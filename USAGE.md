@@ -140,7 +140,7 @@ conda env remove -n llapdiff
 
 ---
 
-## 3. Datasets (bundled cache)
+## 3. Datasets and checkpoints
 
 ### 3.1 What ships in the box
 
@@ -231,6 +231,28 @@ hf download pixelhero98/llapdiff-checkpoints --local-dir ./ldt/checkpoints
 hf download pixelhero98/llapdiff-raw --repo-type dataset --local-dir ./ldt/data
 ```
 
+The checkpoint repo (`README_ckpt.md`) bundles several archives:
+
+| Archive | Contents |
+| ------- | -------- |
+| `llapdiffusion_longest_horizon_artifacts.zip` | LLapDiff **v-prediction** artifacts for each dataset's longest horizon: VAE (elbo + recon), summarizer, and LLapDiff best. Trained from commit `59f4427`. |
+| `llapdiffusion_x0_diffusion_checkpoints.zip` | x0-parameterized LLapDiff diffusion `best`/`last` only (no VAE/summarizer — reuse them from the artifacts archive). Paths under `ldt/output/<dataset>/mode-x0/pred-<H>/`. |
+| `llapdiffusion_baseline_checkpoints.zip` | 56 extrapolation **baseline** checkpoints (8 methods × 7 datasets); names `checkpoints/<dataset>_h<H>_<method>.pt`. Per `MANIFEST.csv` `completion_mode`: **35 `full_train_loop`** (`dlinear`, `mtan`, `patchtst`, `t_patchgnn`, `timegrad`) and **21 `one_batch_one_epoch_update`** (`contiformer`, `mr-diff`, `neuralcde`) — the latter are plumbing checks, *not* comparable results. |
+| `llapdiffusion_csdi_mask30_imputation_checkpoints.zip` | 3 CSDI target-horizon imputation checkpoints (random 30 % holdout, seed 42) for PhysioNet h12, Crypto h100, NOAA UK h168; names `checkpoints/<dataset>_h<H>_csdi_mask30.pt`. |
+
+After unzipping into `ldt/checkpoints/`, each archive expands to a directory of
+the same name (the `.zip` files themselves can be deleted). Verify a download
+before unzipping with the published checksum, e.g.:
+
+```bash
+# the .sha256 sidecar holds "<hash>  <filename>"; -c recomputes and compares
+sha256sum -c llapdiffusion_x0_diffusion_checkpoints.zip.sha256
+```
+
+The x0 archive also ships `metadata/sha256sums.txt` (per-file hashes of the
+extracted `.pt`/`.json`), so individual files can be checked after the zip is
+gone: `cd <x0-dir> && sha256sum -c metadata/sha256sums.txt`.
+
 To point the pipeline at a custom archive / extraction dir (e.g. a rebuilt
 cache), pass the flags or set the env vars:
 
@@ -260,6 +282,137 @@ From `llapdiffusion/configs/dataset_defaults.py`:
 
 Calendar/temporal features (`DOW_*`, `DOM_*`, `MOY_*`) are **context-only** and
 cannot be picked as targets.
+
+### 3.5 Using the downloaded pretrained checkpoints
+
+After unzipping `llapdiffusion_longest_horizon_artifacts.zip` you have a flat
+folder of 28 checkpoints (4 roles × 7 datasets):
+
+```
+ldt/checkpoints/llapdiffusion_longest_horizon_artifacts/
+├── checkpoints/
+│   ├── <dataset>_h<H>_vae_best_elbo.pt
+│   ├── <dataset>_h<H>_vae_best_recon.pt
+│   ├── <dataset>_h<H>_summarizer_best.pt
+│   └── <dataset>_h<H>_llapdiff_best.pt
+└── training_summaries/<dataset>_h<H>.json   # recorded eval_stats (crps/mae/mse)
+```
+
+These cover only the **longest horizon per dataset**:
+
+| Dataset | Horizon `H` | VAE channels `C` |
+| ------- | ----------: | ---------------: |
+| `bms_air`   | 168 | 24 |
+| `uci_air`   | 168 | 16 |
+| `physionet` |  12 | 16 |
+| `noaa_us`   | 168 | 24 |
+| `noaa_uk`   | 168 | 16 |
+| `us_equity` | 100 | 12 |
+| `crypto`    | 100 | 16 |
+
+**Important:** `llapdiff-checkpoint-eval` takes the LLapDiff model from
+`--checkpoint`, but it loads the **VAE and summarizer from config-derived
+paths** (`cfg.VAE_CKPT`, `cfg.SUM_CKPT`). The downloaded files are flat-named,
+so you must stage the VAE + summarizer into the `ldt/` tree the pipeline
+expects (the LLapDiff file is passed directly and needs no staging):
+
+| Downloaded file | Expected location |
+| --------------- | ----------------- |
+| `<ds>_h<H>_vae_best_elbo.pt`  | `ldt/vae/saved_model/<ds>/pred-<H>_ch-<C>_entity_elbo.pt` |
+| `<ds>_h<H>_vae_best_recon.pt` | `ldt/vae/saved_model/<ds>/pred-<H>_ch-<C>_entity_recon.pt` |
+| `<ds>_h<H>_summarizer_best.pt`| `ldt/summarizer/saved_model/<ds>/<H>-<C>-summarizer.pt` |
+| `<ds>_h<H>_llapdiff_best.pt`  | pass directly to `--checkpoint` (no staging) |
+
+Stage all seven datasets with symlinks (relative to the repo root):
+
+```bash
+SRC=ldt/checkpoints/llapdiffusion_longest_horizon_artifacts/checkpoints
+# dataset:horizon:channels
+for spec in bms_air:168:24 uci_air:168:16 physionet:12:16 \
+            noaa_us:168:24 noaa_uk:168:16 us_equity:100:12 crypto:100:16; do
+  ds=${spec%%:*}; rest=${spec#*:}; H=${rest%%:*}; C=${rest##*:}
+  mkdir -p "ldt/vae/saved_model/$ds" "ldt/summarizer/saved_model/$ds"
+  ln -sf "$(realpath "$SRC/${ds}_h${H}_vae_best_elbo.pt")"  "ldt/vae/saved_model/$ds/pred-${H}_ch-${C}_entity_elbo.pt"
+  ln -sf "$(realpath "$SRC/${ds}_h${H}_vae_best_recon.pt")" "ldt/vae/saved_model/$ds/pred-${H}_ch-${C}_entity_recon.pt"
+  ln -sf "$(realpath "$SRC/${ds}_h${H}_summarizer_best.pt")" "ldt/summarizer/saved_model/$ds/${H}-${C}-summarizer.pt"
+done
+```
+
+Then evaluate the pretrained LLapDiff checkpoint directly:
+
+```bash
+llapdiff-checkpoint-eval \
+  --dataset-key crypto --pred 100 \
+  --checkpoint ldt/checkpoints/llapdiffusion_longest_horizon_artifacts/checkpoints/crypto_h100_llapdiff_best.pt \
+  --imputation-random-mask-ratio 0.30 \
+  --out-json ldt/results/crypto_h100_pretrained_eval.json
+```
+
+The `training_summaries/<dataset>_h<H>.json` files record the authors' own
+`eval_stats` (e.g. crypto h100: crps ≈ 0.357, mae ≈ 0.467, mse ≈ 0.527 over 25
+samples) — useful reference numbers when reproducing or comparing.
+
+### 3.6 The other checkpoint archives
+
+These are unzipped under `ldt/checkpoints/` and keep their own layouts.
+
+**x0 diffusion** (`llapdiffusion_x0_diffusion_checkpoints/`) — x0-parameterized
+LLapDiff `best`/`last`, **no VAE/summarizer** (reuse the ones staged in §3.5).
+It preserves repo-relative paths:
+
+```
+ldt/checkpoints/llapdiffusion_x0_diffusion_checkpoints/
+├── ldt/output/<dataset>/mode-x0/pred-<H>/llapdiff_pred-<H>_{best,last}.pt
+├── ldt/results/x0/<dataset>_h<H>.json     # authors' x0 eval_stats
+└── metadata/{x0_manifest.json,sha256sums.txt,README_x0_diffusion_checkpoints.md}
+```
+
+Evaluate after staging the VAE + summarizer (§3.5). The model parameterization
+is read from checkpoint metadata; pass `--predict-type x0` only for a legacy
+file without it:
+
+```bash
+llapdiff-checkpoint-eval \
+  --dataset-key crypto --pred 100 \
+  --checkpoint ldt/checkpoints/llapdiffusion_x0_diffusion_checkpoints/ldt/output/crypto/mode-x0/pred-100/llapdiff_pred-100_best.pt \
+  --imputation-random-mask-ratio 0.30 \
+  --out-json ldt/results/crypto_h100_x0_eval.json
+```
+
+> Note: this archive's folder name is `mode-x0/`, but the **current** code
+> writes new x0 runs to `ldt/output/<dataset>/predict-x0/...` (see §5.4). The
+> difference is cosmetic for evaluation since `--checkpoint` is an explicit
+> path; it only matters if you rely on the pipeline auto-discovering an output.
+
+Reference test CRPS from the authors' own runs — `v` (default, from
+`training_summaries/`) vs `x0` (from `ldt/results/x0/`), 25 samples, lower is
+better:
+
+| Dataset | `H` | CRPS (`v`, default) | CRPS (`x0`) |
+| ------- | --: | ------------------: | ----------: |
+| `bms_air`   | 168 | **0.552** | 0.696 |
+| `uci_air`   | 168 | **1.003** | 1.251 |
+| `physionet` |  12 | **0.367** | 0.396 |
+| `noaa_us`   | 168 | **0.540** | 0.782 |
+| `noaa_uk`   | 168 | **0.570** | 1.011 |
+| `us_equity` | 100 | **0.428** | 0.544 |
+| `crypto`    | 100 | **0.357** | 0.461 |
+
+`v`-prediction wins on CRPS (the primary selection metric) across all seven
+datasets, so treat the x0 checkpoints as an **ablation**, not the headline
+result. Point-error metrics (MAE/MSE) mostly agree; the lone exception is
+`uci_air`, where x0 has slightly lower MAE/MSE despite higher CRPS.
+
+**Extrapolation baselines** (`llapdiffusion_baseline_checkpoints/`) — flat
+`checkpoints/<dataset>_h<H>_<method>.pt` plus `MANIFEST.csv`. These are produced
+and consumed by the `llapdiff-baselines` adapters (§6), not by
+`llapdiff-checkpoint-eval`. Remember the 35 / 21 full-vs-plumbing split from the
+§3.3 table before quoting any baseline number.
+
+**CSDI imputation** (`llapdiffusion_csdi_mask30_imputation_checkpoints/`) — three
+`checkpoints/<dataset>_h<H>_csdi_mask30.pt` files plus `MANIFEST.csv`, for the
+CSDI target-horizon imputation comparison (§6.2), reported separately from
+forecast extrapolation.
 
 ---
 
@@ -530,8 +683,9 @@ VAE/summarizer after the first run (e.g. only re-tune LLapDiff), omit the
 `--recompute-*` flags so cached stage-1/stage-2 artifacts are reused.
 
 If you instead want to evaluate the authors' pretrained model without
-training, download it from the HF `llapdiff-checkpoints` repo (§3.3) and point
-`--checkpoint` at the downloaded file.
+training, skip steps 3 and use the downloaded checkpoints: stage the VAE +
+summarizer per §3.5, then point `--checkpoint` at the matching
+`<dataset>_h<H>_llapdiff_best.pt`.
 
 ---
 
