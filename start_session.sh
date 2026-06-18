@@ -1,0 +1,1 @@
+CLAUDE_CONFIG_DIR="/home/nvidia-lab/ai4life/thaind2/brain/.copilot1" claude

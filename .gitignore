@@ -1,0 +1,36 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Runtime outputs and model artifacts
+ldt/
+baseline_results/
+*.pt
+*.pth
+*.ckpt
+*.log
+
+# Extracted dataset caches
+llapdiffusion/datasets/.llapdiff_dataset_archive_*.stamp
+llapdiffusion/datasets/extracted/
+llapdiffusion/datasets/LLapDiff-datasets/
+llapdiffusion/datasets/fin_dataset/*/
+llapdiffusion/datasets/bms_air/
+llapdiffusion/datasets/uci_air/
+llapdiffusion/datasets/physionet/
+llapdiffusion/datasets/noaa_us/
+llapdiffusion/datasets/noaa_uk/
+
+# Local OS/editor files
+.DS_Store
+Thumbs.db
