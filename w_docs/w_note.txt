@@ -1,0 +1,57 @@
+(llapdiff) nvidia-lab@nvidia-lab:~/ai4life/thaind2/time_series/LLapDiffusion-main$ python -c "from llapdiffusion.configs.dataset_defaults import validate_dataset_presets; \
+import json; print(json.dumps(validate_dataset_presets(['crypto']), indent=2, default=str))"
+-->
+{
+  "status": "ok",
+  "rows": [
+    {
+      "dataset": "crypto",
+      "artifact_name": "crypto",
+      "data_dir": "/home/nvidia-lab/ai4life/thaind2/time_series/LLapDiffusion-main/llapdiffusion/datasets/fin_dataset/crypto",
+      "dataset_cache_exists": false,
+      "dataset_archive": "/home/nvidia-lab/ai4life/thaind2/time_series/LLapDiffusion-main/llapdiffusion/datasets/LLapDiff-evaluation-datasets.zip",
+      "horizons": [
+        5,
+        20,
+        60,
+        100
+      ],
+      "context_length": 200,
+      "table_batch_size": 5,
+      "runtime_dates_per_batch": 5,
+      "split_policy": "global_purged_horizon",
+      "split_scope": "global_target_time",
+      "exact_timestamp_batches": true,
+      "vae_latent_channels": 16,
+      "minsnr_gamma": 5.0,
+      "epochs": 600,
+      "predict_type": "v"
+    }
+  ]
+}
+
+- The data_dir value hasn't been created, do I need to unzip and put the data folder to this path mannually or the process will automatically extracted the dataset from dataset_archive and put data to data_dir folder ? No 
+- horizons: [5, 20, 60, 100] --> So the model will be trained to predict in all of these future horizon numbers ? No 
+
+- --run-checkpoint-eval
+--allow-balanced-eval-failure
+- --checkpoint-eval-random-mask-ratio: If the automated evaluation is triggered above, this float determines the intensity of the imputation benchmark. Passing 0.30 instructs the evaluation script to artificially hide 30% of the historical test data. This strictly evaluates the model's capacity to impute previously unseen continuous-time gaps.
+
+"--checkpoint-eval-forecast-num-samples",
+"--checkpoint-eval-imputation-num-samples"
+"--checkpoint-eval-max-eval-batches",
+
+
+-- TODO : Check the paper to know what it really is. 
+Auxiliary Target Masking Flags (Regularization)
+Training continuous-time diffusion models on highly sparse, irregular data can lead to instability. These flags control auxiliary masking—a dynamic data augmentation technique. By deliberately injecting extra structural missingness into the target trajectories during training, the diffusion denoiser is regularized and forced to learn robust generation even when the target space is severely degraded.
+
+--target-mask-aux-p: The overarching probability P that a specific training batch will undergo this auxiliary target masking during a forward pass.
+
+--target-mask-aux-keep-mode: Configures the statistical pattern of the injected missingness. It tells the masker how to choose which observations survive. Common modes include uniform (pure random point dropout) or stride (rigid periodic decimation).
+
+--target-mask-aux-keep-prob: Used when the keep mode is stochastic (like uniform). It is the exact floating-point probability that a valid observation survives the mask. A keep probability of 0.2 artificially wipes out 80% of the sequence for that batch.
+
+--target-mask-aux-keep-stride: Used when the keep mode is deterministic. This integer S forces the mask to retain exactly 1 out of every S sequential observations. This flawlessly simulates hardware down-sampling (e.g., retaining every 4th timestamp) to force the model to infer the high-frequency continuous physics occurring between wide gaps.
+
+--target-mask-aux-start-epoch: Implements curriculum learning. If set to an epoch E (e.g., 50), the architecture trains exclusively on clean targets for the first 50 epochs to easily lock onto fundamental temporal structures. The harsh auxiliary masking only activates at epoch 51 to harden the model against severe irregularity.

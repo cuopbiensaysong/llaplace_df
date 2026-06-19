@@ -71,14 +71,16 @@ llapdiffusion/
 
 Installed console scripts (from `pyproject.toml`):
 
-| Command                       | Module entry point                                                |
-| ----------------------------- | ----------------------------------------------------------------- |
-| `llapdiff-train`              | `llapdiffusion.pipeline:cli_main`                                 |
-| `llapdiff-checkpoint-eval`    | `llapdiffusion.tools.llapdiff_checkpoint_eval:main`               |
-| `llapdiff-artifact-prep`      | `llapdiffusion.tools.run_multidataset_artifact_prep:main`         |
-| `llapdiff-synthetic-regime`   | `llapdiffusion.tools.run_synthetic_regime_shift:main`             |
-| `llapdiff-plot-poles`         | `llapdiffusion.viz.plot_llapdiff_poles:main`                      |
-| `llapdiff-baselines`          | `llapdiffusion.tools.run_baselines:main`                          |
+
+| Command                     | Module entry point                                        |
+| --------------------------- | --------------------------------------------------------- |
+| `llapdiff-train`            | `llapdiffusion.pipeline:cli_main`                         |
+| `llapdiff-checkpoint-eval`  | `llapdiffusion.tools.llapdiff_checkpoint_eval:main`       |
+| `llapdiff-artifact-prep`    | `llapdiffusion.tools.run_multidataset_artifact_prep:main` |
+| `llapdiff-synthetic-regime` | `llapdiffusion.tools.run_synthetic_regime_shift:main`     |
+| `llapdiff-plot-poles`       | `llapdiffusion.viz.plot_llapdiff_poles:main`              |
+| `llapdiff-baselines`        | `llapdiffusion.tools.run_baselines:main`                  |
+
 
 ---
 
@@ -123,10 +125,8 @@ managed by pip so it stays consistent with the rest of the project deps.
 ```bash
 # Baseline adapter dependencies (torchcde, torchdiffeq, gluonts, lightning, ...)
 python -m pip install -e ".[baselines]"
-
 # Dev / test
 python -m pip install -e ".[dev]"
-
 # NOAA raw download support (only needed if regenerating NOAA caches)
 python -m pip install -e ".[noaa-download]"
 ```
@@ -167,8 +167,7 @@ fin_dataset/crypto/cache_ratio_index/
 ```
 
 The train / val / test split is **computed at load time**, not baked into the
-zip. `pipeline.prepare_dataloaders` calls `run_experiment(..., ratios=(...),
-split_policy=...)` and the windows are partitioned using the defaults in
+zip. `pipeline.prepare_dataloaders` calls `run_experiment(..., ratios=(...), split_policy=...)` and the windows are partitioned using the defaults in
 `configs/config.py`:
 
 ```python
@@ -218,8 +217,8 @@ want to **rebuild caches from raw sources** (change preprocessing, universe,
 date range, frequency, or precision). They are *not* required for the
 retrain-and-evaluate workflow in this guide.
 
-- Pretrained checkpoints: <https://huggingface.co/pixelhero98/llapdiff-checkpoints>
-- Raw datasets:           <https://huggingface.co/datasets/pixelhero98/llapdiff-raw>
+- Pretrained checkpoints: [https://huggingface.co/pixelhero98/llapdiff-checkpoints](https://huggingface.co/pixelhero98/llapdiff-checkpoints)
+- Raw datasets:           [https://huggingface.co/datasets/pixelhero98/llapdiff-raw](https://huggingface.co/datasets/pixelhero98/llapdiff-raw)
 
 ```bash
 python -m pip install -U "huggingface_hub[cli]"
@@ -233,12 +232,14 @@ hf download pixelhero98/llapdiff-raw --repo-type dataset --local-dir ./ldt/data
 
 The checkpoint repo (`README_ckpt.md`) bundles several archives:
 
-| Archive | Contents |
-| ------- | -------- |
-| `llapdiffusion_longest_horizon_artifacts.zip` | LLapDiff **v-prediction** artifacts for each dataset's longest horizon: VAE (elbo + recon), summarizer, and LLapDiff best. Trained from commit `59f4427`. |
-| `llapdiffusion_x0_diffusion_checkpoints.zip` | x0-parameterized LLapDiff diffusion `best`/`last` only (no VAE/summarizer — reuse them from the artifacts archive). Paths under `ldt/output/<dataset>/mode-x0/pred-<H>/`. |
-| `llapdiffusion_baseline_checkpoints.zip` | 56 extrapolation **baseline** checkpoints (8 methods × 7 datasets); names `checkpoints/<dataset>_h<H>_<method>.pt`. Per `MANIFEST.csv` `completion_mode`: **35 `full_train_loop`** (`dlinear`, `mtan`, `patchtst`, `t_patchgnn`, `timegrad`) and **21 `one_batch_one_epoch_update`** (`contiformer`, `mr-diff`, `neuralcde`) — the latter are plumbing checks, *not* comparable results. |
-| `llapdiffusion_csdi_mask30_imputation_checkpoints.zip` | 3 CSDI target-horizon imputation checkpoints (random 30 % holdout, seed 42) for PhysioNet h12, Crypto h100, NOAA UK h168; names `checkpoints/<dataset>_h<H>_csdi_mask30.pt`. |
+
+| Archive                                                | Contents                                                                                                                                                                                                                                                                                                                                                                                 |
+| ------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `llapdiffusion_longest_horizon_artifacts.zip`          | LLapDiff **v-prediction** artifacts for each dataset's longest horizon: VAE (elbo + recon), summarizer, and LLapDiff best. Trained from commit `59f4427`.                                                                                                                                                                                                                                |
+| `llapdiffusion_x0_diffusion_checkpoints.zip`           | x0-parameterized LLapDiff diffusion `best`/`last` only (no VAE/summarizer — reuse them from the artifacts archive). Paths under `ldt/output/<dataset>/mode-x0/pred-<H>/`.                                                                                                                                                                                                                |
+| `llapdiffusion_baseline_checkpoints.zip`               | 56 extrapolation **baseline** checkpoints (8 methods × 7 datasets); names `checkpoints/<dataset>_h<H>_<method>.pt`. Per `MANIFEST.csv` `completion_mode`: **35 `full_train_loop`** (`dlinear`, `mtan`, `patchtst`, `t_patchgnn`, `timegrad`) and **21 `one_batch_one_epoch_update`** (`contiformer`, `mr-diff`, `neuralcde`) — the latter are plumbing checks, *not* comparable results. |
+| `llapdiffusion_csdi_mask30_imputation_checkpoints.zip` | 3 CSDI target-horizon imputation checkpoints (random 30 % holdout, seed 42) for PhysioNet h12, Crypto h100, NOAA UK h168; names `checkpoints/<dataset>_h<H>_csdi_mask30.pt`.                                                                                                                                                                                                             |
+
 
 After unzipping into `ldt/checkpoints/`, each archive expands to a directory of
 the same name (the `.zip` files themselves can be deleted). Verify a download
@@ -270,15 +271,17 @@ export LLAPDIFF_DATASET_EXTRACT_DIR=/path/to/extract
 
 From `llapdiffusion/configs/dataset_defaults.py`:
 
+
 | `--dataset-key` | Context length | Supported `--preds` horizons | VAE latent channels |
-| --------------- | -------------: | ---------------------------- | ------------------: |
-| `bms_air`       |            336 | 24, 48, 96, 168              | 24                  |
-| `uci_air`       |            336 | 24, 48, 96, 168              | 16                  |
-| `physionet`     |             24 | 4, 8, 10, 12                 | 16                  |
-| `noaa_us`       |            336 | 24, 48, 96, 168              | 24                  |
-| `noaa_uk`       |            336 | 24, 48, 96, 168              | 16                  |
-| `us_equity`     |            200 | 5, 20, 60, 100               | 12                  |
-| `crypto`        |            200 | 5, 20, 60, 100               | 16                  |
+| --------------- | -------------- | ---------------------------- | ------------------- |
+| `bms_air`       | 336            | 24, 48, 96, 168              | 24                  |
+| `uci_air`       | 336            | 24, 48, 96, 168              | 16                  |
+| `physionet`     | 24             | 4, 8, 10, 12                 | 16                  |
+| `noaa_us`       | 336            | 24, 48, 96, 168              | 24                  |
+| `noaa_uk`       | 336            | 24, 48, 96, 168              | 16                  |
+| `us_equity`     | 200            | 5, 20, 60, 100               | 12                  |
+| `crypto`        | 200            | 5, 20, 60, 100               | 16                  |
+
 
 Calendar/temporal features (`DOW_*`, `DOM_*`, `MOY_*`) are **context-only** and
 cannot be picked as targets.
@@ -300,15 +303,17 @@ ldt/checkpoints/llapdiffusion_longest_horizon_artifacts/
 
 These cover only the **longest horizon per dataset**:
 
-| Dataset | Horizon `H` | VAE channels `C` |
-| ------- | ----------: | ---------------: |
-| `bms_air`   | 168 | 24 |
-| `uci_air`   | 168 | 16 |
-| `physionet` |  12 | 16 |
-| `noaa_us`   | 168 | 24 |
-| `noaa_uk`   | 168 | 16 |
-| `us_equity` | 100 | 12 |
-| `crypto`    | 100 | 16 |
+
+| Dataset     | Horizon `H` | VAE channels `C` |
+| ----------- | ----------- | ---------------- |
+| `bms_air`   | 168         | 24               |
+| `uci_air`   | 168         | 16               |
+| `physionet` | 12          | 16               |
+| `noaa_us`   | 168         | 24               |
+| `noaa_uk`   | 168         | 16               |
+| `us_equity` | 100         | 12               |
+| `crypto`    | 100         | 16               |
+
 
 **Important:** `llapdiff-checkpoint-eval` takes the LLapDiff model from
 `--checkpoint`, but it loads the **VAE and summarizer from config-derived
@@ -316,14 +321,19 @@ paths** (`cfg.VAE_CKPT`, `cfg.SUM_CKPT`). The downloaded files are flat-named,
 so you must stage the VAE + summarizer into the `ldt/` tree the pipeline
 expects (the LLapDiff file is passed directly and needs no staging):
 
-| Downloaded file | Expected location |
-| --------------- | ----------------- |
-| `<ds>_h<H>_vae_best_elbo.pt`  | `ldt/vae/saved_model/<ds>/pred-<H>_ch-<C>_entity_elbo.pt` |
-| `<ds>_h<H>_vae_best_recon.pt` | `ldt/vae/saved_model/<ds>/pred-<H>_ch-<C>_entity_recon.pt` |
-| `<ds>_h<H>_summarizer_best.pt`| `ldt/summarizer/saved_model/<ds>/<H>-<C>-summarizer.pt` |
-| `<ds>_h<H>_llapdiff_best.pt`  | pass directly to `--checkpoint` (no staging) |
 
-Stage all seven datasets with symlinks (relative to the repo root):
+| Downloaded file                | Expected location                                          |
+| ------------------------------ | ---------------------------------------------------------- |
+| `<ds>_h<H>_vae_best_elbo.pt`   | `ldt/vae/saved_model/<ds>/pred-<H>_ch-<C>_entity_elbo.pt`  |
+| `<ds>_h<H>_vae_best_recon.pt`  | `ldt/vae/saved_model/<ds>/pred-<H>_ch-<C>_entity_recon.pt` |
+| `<ds>_h<H>_summarizer_best.pt` | `ldt/summarizer/saved_model/<ds>/<H>-<C>-summarizer.pt`    |
+| `<ds>_h<H>_llapdiff_best.pt`   | pass directly to `--checkpoint` (no staging)               |
+
+
+Stage all seven datasets by **moving** the files into the expected locations
+(relative to the repo root). Moving — rather than symlinking — means the real
+files live where the pipeline looks for them, so there is no hidden link step
+to forget later:
 
 ```bash
 SRC=ldt/checkpoints/llapdiffusion_longest_horizon_artifacts/checkpoints
@@ -332,11 +342,14 @@ for spec in bms_air:168:24 uci_air:168:16 physionet:12:16 \
             noaa_us:168:24 noaa_uk:168:16 us_equity:100:12 crypto:100:16; do
   ds=${spec%%:*}; rest=${spec#*:}; H=${rest%%:*}; C=${rest##*:}
   mkdir -p "ldt/vae/saved_model/$ds" "ldt/summarizer/saved_model/$ds"
-  ln -sf "$(realpath "$SRC/${ds}_h${H}_vae_best_elbo.pt")"  "ldt/vae/saved_model/$ds/pred-${H}_ch-${C}_entity_elbo.pt"
-  ln -sf "$(realpath "$SRC/${ds}_h${H}_vae_best_recon.pt")" "ldt/vae/saved_model/$ds/pred-${H}_ch-${C}_entity_recon.pt"
-  ln -sf "$(realpath "$SRC/${ds}_h${H}_summarizer_best.pt")" "ldt/summarizer/saved_model/$ds/${H}-${C}-summarizer.pt"
+  mv "$SRC/${ds}_h${H}_vae_best_elbo.pt"   "ldt/vae/saved_model/$ds/pred-${H}_ch-${C}_entity_elbo.pt"
+  mv "$SRC/${ds}_h${H}_vae_best_recon.pt"  "ldt/vae/saved_model/$ds/pred-${H}_ch-${C}_entity_recon.pt"
+  mv "$SRC/${ds}_h${H}_summarizer_best.pt" "ldt/summarizer/saved_model/$ds/${H}-${C}-summarizer.pt"
 done
 ```
+
+The `<ds>_h<H>_llapdiff_best.pt` files are **left in place** in `$SRC` — they
+are passed directly to `--checkpoint` (see below) and need no staging.
 
 Then evaluate the pretrained LLapDiff checkpoint directly:
 
@@ -388,15 +401,17 @@ Reference test CRPS from the authors' own runs — `v` (default, from
 `training_summaries/`) vs `x0` (from `ldt/results/x0/`), 25 samples, lower is
 better:
 
-| Dataset | `H` | CRPS (`v`, default) | CRPS (`x0`) |
-| ------- | --: | ------------------: | ----------: |
-| `bms_air`   | 168 | **0.552** | 0.696 |
-| `uci_air`   | 168 | **1.003** | 1.251 |
-| `physionet` |  12 | **0.367** | 0.396 |
-| `noaa_us`   | 168 | **0.540** | 0.782 |
-| `noaa_uk`   | 168 | **0.570** | 1.011 |
-| `us_equity` | 100 | **0.428** | 0.544 |
-| `crypto`    | 100 | **0.357** | 0.461 |
+
+| Dataset     | `H` | CRPS (`v`, default) | CRPS (`x0`) |
+| ----------- | --- | ------------------- | ----------- |
+| `bms_air`   | 168 | **0.552**           | 0.696       |
+| `uci_air`   | 168 | **1.003**           | 1.251       |
+| `physionet` | 12  | **0.367**           | 0.396       |
+| `noaa_us`   | 168 | **0.540**           | 0.782       |
+| `noaa_uk`   | 168 | **0.570**           | 1.011       |
+| `us_equity` | 100 | **0.428**           | 0.544       |
+| `crypto`    | 100 | **0.357**           | 0.461       |
+
 
 `v`-prediction wins on CRPS (the primary selection metric) across all seven
 datasets, so treat the x0 checkpoints as an **ablation**, not the headline
@@ -421,16 +436,16 @@ forecast extrapolation.
 A full LLapDiffusion run for a (dataset, horizon) pair has three stages, all
 driven by a single `llapdiff-train` invocation. Each stage reuses the artifact
 from the previous one (and skips it if a checkpoint already exists, unless you
-pass `--recompute-*`):
+pass `--recompute-`*):
 
 1. **Latent VAE** (`trainers/train_val_latent.py`) — learns the compact
-   latent representation of trajectories.
+  latent representation of trajectories.
    → `./ldt/vae/saved_model/<dataset>/pred-<H>_ch-<C>_entity_elbo.pt`
 2. **History summarizer** (`trainers/train_val_summarizer.py`) — conditions on
-   observed values, timestamps, gaps, and masks.
+  observed values, timestamps, gaps, and masks.
    → `./ldt/summarizer/saved_model/<dataset>/<H>-<C>-summarizer.pt`
 3. **LLapDiff** (`trainers/train_val_llapdiff.py`) — denoises latent
-   trajectories using Laplace-domain stable poles.
+  trajectories using Laplace-domain stable poles.
    → `./ldt/output/<dataset>/llapdiff_pred-<H>_best.pt`
      (also `_best_raw.pt`, `_best_ema.pt`, `_last.pt`)
 
@@ -691,36 +706,39 @@ summarizer per §3.5, then point `--checkpoint` at the matching
 
 ## 8. Useful flags cheat sheet (`llapdiff-train`)
 
-| Flag                                  | Effect                                                    |
-| ------------------------------------- | --------------------------------------------------------- |
-| `--dataset-key KEY`                   | Required. Selects preset (table in §3.4).                 |
-| `--preds H1 [H2 ...]`                 | Subset of preset horizons; omit for all.                  |
-| `--predict-type {v,x0,eps}`           | Diffusion parameterization (default `v`).                 |
-| `--coverage F`                        | Hide `F` of observed context entries (`0 ≤ F < 1`).       |
-| `--batch-size N`                      | Override preset batch size.                               |
-| `--target-col COL` / `--target-cols`  | Single or multi-target forecasting.                       |
-| `--recompute-vae` / `--recompute-summarizer` | Force retrain of upstream stages.                  |
-| `--latent-plot-only`                  | Skip latent training, render plots only.                  |
-| `--no-shared-loaders`                 | Each stage builds its own dataloaders.                    |
-| `--summary-json PATH`                 | Write a compact JSON summary of the run.                  |
-| `--run-checkpoint-eval`               | After training, run forecast + imputation eval.           |
-| `--checkpoint-eval-random-mask-ratio` | Random-mask fraction for the optional post-train eval.    |
-| `--target-mask-aux-p P`               | Mix completion batches into training with prob `P`.       |
-| `--target-mask-aux-keep-mode MODE`    | `random` \| `regular` \| `prefix` \| `mixed`.            |
-| `--target-mask-aux-keep-prob P`       | Observed-target keep prob for `random` mode.              |
-| `--target-mask-aux-keep-stride S`     | Keep stride for `regular` mode.                           |
-| `--target-mask-aux-start-epoch E`     | First epoch at which aux batches begin.                   |
-| `--dataset-zip PATH`                  | Override bundled dataset zip.                             |
-| `--dataset-extract-dir PATH`          | Override extraction location.                             |
-| `--split-policy POLICY`               | `global_purged_horizon` \| `per_asset_purged_horizon` \| `contiguous`. |
-| `--calendar-day-batches`              | Legacy calendar-day batching (else exact-timestamp).      |
-| `--verbose` / `--debug`               | Trainer logging verbosity.                                |
+
+| Flag                                         | Effect                                                 |
+| -------------------------------------------- | ------------------------------------------------------ |
+| `--dataset-key KEY`                          | Required. Selects preset (table in §3.4).              |
+| `--preds H1 [H2 ...]`                        | Subset of preset horizons; omit for all.               |
+| `--predict-type {v,x0,eps}`                  | Diffusion parameterization (default `v`).              |
+| `--coverage F`                               | Hide `F` of observed context entries (`0 ≤ F < 1`).    |
+| `--batch-size N`                             | Override preset batch size.                            |
+| `--target-col COL` / `--target-cols`         | Single or multi-target forecasting.                    |
+| `--recompute-vae` / `--recompute-summarizer` | Force retrain of upstream stages.                      |
+| `--latent-plot-only`                         | Skip latent training, render plots only.               |
+| `--no-shared-loaders`                        | Each stage builds its own dataloaders.                 |
+| `--summary-json PATH`                        | Write a compact JSON summary of the run.               |
+| `--run-checkpoint-eval`                      | After training, run forecast + imputation eval.        |
+| `--checkpoint-eval-random-mask-ratio`        | Random-mask fraction for the optional post-train eval. |
+| `--target-mask-aux-p P`                      | Mix completion batches into training with prob `P`.    |
+| `--target-mask-aux-keep-mode MODE`           | `random`                                               |
+| `--target-mask-aux-keep-prob P`              | Observed-target keep prob for `random` mode.           |
+| `--target-mask-aux-keep-stride S`            | Keep stride for `regular` mode.                        |a
+| `--target-mask-aux-start-epoch E`            | First epoch at which aux batches begin.                |
+| `--dataset-zip PATH`                         | Override bundled dataset zip.                          |
+| `--dataset-extract-dir PATH`                 | Override extraction location.                          |
+| `--split-policy POLICY`                      | `global_purged_horizon`                                |
+| `--calendar-day-batches`                     | Legacy calendar-day batching (else exact-timestamp).   |
+| `--verbose` / `--debug`                      | Trainer logging verbosity.                             |
+
 
 ---
 
 ## 9. Citation and licensing
 
-- Preprint: <https://arxiv.org/abs/2605.19805>
+- Preprint: [https://arxiv.org/abs/2605.19805](https://arxiv.org/abs/2605.19805)
 - License: MIT (see `LICENSE`)
 - Derived dataset caches in `LLapDiff-evaluation-datasets.zip` remain governed
-  by each source's original terms.
+by each source's original terms.
+
