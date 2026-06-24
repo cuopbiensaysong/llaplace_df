@@ -1,0 +1,942 @@
+pip_system_certs: ERROR: could not register module: No module named 'wrapt'
+sizes: (284250, 39044, 81884)
+V: torch.Size([10, 12, 336, 12]) T: torch.Size([10, 12, 336, 12]) y: torch.Size([10, 12, 168])
+LLapDiff target_dim: 1
+Using device: cuda
+[diffusion cache] planning cache at ldt/diffusion_cache/bms_air/pred-168_batch-10
+[diffusion cache] building rows=146146 latent_dtype=float32 summary_dtype=float16
+[diffusion cache] wrote train: rows=95099
+[diffusion cache] wrote val: rows=17598
+[diffusion cache] wrote test: rows=33449
+[epoch 1/600] train_loss=1.005709 raw_loss=1.008361 cond_frac=0.817 lr=3.000e-06
+[epoch 2/600] train_loss=0.984434 raw_loss=0.986079 cond_frac=0.820 lr=5.264e-06
+[epoch 3/600] train_loss=0.976283 raw_loss=0.972591 cond_frac=0.818 lr=7.896e-06
+[epoch 4/600] train_loss=0.962612 raw_loss=0.957275 cond_frac=0.821 lr=1.053e-05
+[epoch 5/600] train_loss=0.946711 raw_loss=0.943413 cond_frac=0.819 lr=1.316e-05
+[epoch 6/600] train_loss=0.929246 raw_loss=0.923088 cond_frac=0.820 lr=1.579e-05
+[epoch 7/600] train_loss=0.907197 raw_loss=0.902968 cond_frac=0.819 lr=1.842e-05
+[epoch 8/600] train_loss=0.897631 raw_loss=0.884717 cond_frac=0.819 lr=2.105e-05
+[epoch 9/600] train_loss=0.888563 raw_loss=0.874016 cond_frac=0.821 lr=2.369e-05
+[epoch 10/600] train_loss=0.876055 raw_loss=0.864699 cond_frac=0.822 lr=2.632e-05
+[epoch 11/600] train_loss=0.866196 raw_loss=0.849947 cond_frac=0.819 lr=2.895e-05
+[epoch 12/600] train_loss=0.857569 raw_loss=0.843442 cond_frac=0.820 lr=3.158e-05
+[epoch 13/600] train_loss=0.852573 raw_loss=0.831238 cond_frac=0.820 lr=3.421e-05
+[epoch 14/600] train_loss=0.842749 raw_loss=0.823063 cond_frac=0.820 lr=3.684e-05
+[epoch 15/600] train_loss=0.833142 raw_loss=0.809806 cond_frac=0.820 lr=3.947e-05
+[epoch 16/600] train_loss=0.826401 raw_loss=0.802831 cond_frac=0.821 lr=4.211e-05
+[epoch 17/600] train_loss=0.812214 raw_loss=0.792834 cond_frac=0.820 lr=4.474e-05
+[epoch 18/600] train_loss=0.803797 raw_loss=0.780285 cond_frac=0.821 lr=4.737e-05
+[epoch 19/600] train_loss=0.795112 raw_loss=0.772291 cond_frac=0.821 lr=5.000e-05
+[epoch 20/600] train_loss=0.789936 raw_loss=0.766954 cond_frac=0.819 lr=5.263e-05
+[epoch 21/600] train_loss=0.778679 raw_loss=0.757105 cond_frac=0.818 lr=5.526e-05
+[epoch 22/600] train_loss=0.769641 raw_loss=0.748960 cond_frac=0.818 lr=5.790e-05
+[epoch 23/600] train_loss=0.761444 raw_loss=0.739103 cond_frac=0.816 lr=6.053e-05
+[epoch 24/600] train_loss=0.754011 raw_loss=0.731299 cond_frac=0.821 lr=6.316e-05
+[epoch 25/600] train_loss=0.747049 raw_loss=0.725860 cond_frac=0.820 lr=6.579e-05
+[epoch 26/600] train_loss=0.736280 raw_loss=0.719869 cond_frac=0.818 lr=6.842e-05
+[epoch 27/600] train_loss=0.728482 raw_loss=0.708714 cond_frac=0.820 lr=7.105e-05
+[epoch 28/600] train_loss=0.733354 raw_loss=0.713484 cond_frac=0.819 lr=7.369e-05
+[epoch 29/600] train_loss=0.726582 raw_loss=0.708456 cond_frac=0.822 lr=7.632e-05
+[epoch 30/600] train_loss=0.716572 raw_loss=0.696031 cond_frac=0.819 lr=7.895e-05
+[epoch 31/600] train_loss=0.707792 raw_loss=0.689250 cond_frac=0.819 lr=8.158e-05
+[epoch 32/600] train_loss=0.715474 raw_loss=0.698948 cond_frac=0.817 lr=8.421e-05
+[epoch 33/600] train_loss=0.698816 raw_loss=0.680024 cond_frac=0.817 lr=8.684e-05
+[epoch 34/600] train_loss=0.690616 raw_loss=0.673251 cond_frac=0.817 lr=8.947e-05
+[epoch 35/600] train_loss=0.698479 raw_loss=0.680735 cond_frac=0.822 lr=9.211e-05
+[epoch 36/600] train_loss=0.678426 raw_loss=0.663733 cond_frac=0.822 lr=9.474e-05
+[epoch 37/600] train_loss=0.696899 raw_loss=0.681492 cond_frac=0.820 lr=9.737e-05
+[epoch 38/600] train_loss=0.674856 raw_loss=0.662037 cond_frac=0.819 lr=1.000e-04
+[epoch 39/600] train_loss=0.681599 raw_loss=0.671767 cond_frac=0.817 lr=1.026e-04
+[epoch 40/600] train_loss=0.656549 raw_loss=0.644748 cond_frac=0.820 lr=1.053e-04
+[epoch 41/600] train_loss=0.660000 raw_loss=0.648719 cond_frac=0.820 lr=1.079e-04
+[epoch 42/600] train_loss=0.641039 raw_loss=0.632041 cond_frac=0.820 lr=1.105e-04
+[epoch 43/600] train_loss=0.653435 raw_loss=0.644344 cond_frac=0.820 lr=1.132e-04
+[epoch 44/600] train_loss=0.635818 raw_loss=0.626883 cond_frac=0.822 lr=1.158e-04
+[epoch 45/600] train_loss=0.624287 raw_loss=0.616779 cond_frac=0.819 lr=1.184e-04
+[epoch 46/600] train_loss=0.624512 raw_loss=0.614711 cond_frac=0.819 lr=1.211e-04
+[epoch 47/600] train_loss=0.607177 raw_loss=0.602456 cond_frac=0.820 lr=1.237e-04
+[epoch 48/600] train_loss=0.640525 raw_loss=0.632855 cond_frac=0.819 lr=1.263e-04
+[epoch 49/600] train_loss=0.593985 raw_loss=0.588267 cond_frac=0.821 lr=1.289e-04
+[epoch 50/600] train_loss=0.606463 raw_loss=0.598982 cond_frac=0.820 lr=1.316e-04
+[epoch 51/600] train_loss=0.587487 raw_loss=0.582087 cond_frac=0.819 lr=1.342e-04
+[epoch 52/600] train_loss=0.585727 raw_loss=0.583064 cond_frac=0.821 lr=1.368e-04
+[epoch 53/600] train_loss=0.578858 raw_loss=0.575744 cond_frac=0.819 lr=1.395e-04
+[epoch 54/600] train_loss=0.570906 raw_loss=0.567779 cond_frac=0.819 lr=1.421e-04
+[epoch 55/600] train_loss=0.560354 raw_loss=0.559061 cond_frac=0.819 lr=1.447e-04
+[epoch 56/600] train_loss=0.558661 raw_loss=0.561457 cond_frac=0.819 lr=1.474e-04
+[epoch 57/600] train_loss=0.565589 raw_loss=0.566283 cond_frac=0.820 lr=1.500e-04
+[epoch 58/600] train_loss=0.552081 raw_loss=0.551808 cond_frac=0.818 lr=1.500e-04
+[epoch 59/600] train_loss=0.546178 raw_loss=0.552462 cond_frac=0.820 lr=1.500e-04
+[epoch 60/600] train_loss=0.662327 raw_loss=0.654420 cond_frac=0.817 lr=1.500e-04
+[epoch 61/600] train_loss=0.607737 raw_loss=0.601789 cond_frac=0.820 lr=1.500e-04
+[epoch 62/600] train_loss=0.571587 raw_loss=0.568483 cond_frac=0.822 lr=1.500e-04
+[epoch 63/600] train_loss=0.550486 raw_loss=0.549500 cond_frac=0.821 lr=1.500e-04
+[epoch 64/600] train_loss=0.584232 raw_loss=0.578410 cond_frac=0.820 lr=1.500e-04
+[epoch 65/600] train_loss=0.582939 raw_loss=0.579009 cond_frac=0.821 lr=1.500e-04
+[epoch 66/600] train_loss=0.532712 raw_loss=0.536234 cond_frac=0.820 lr=1.500e-04
+[epoch 67/600] train_loss=0.527635 raw_loss=0.534894 cond_frac=0.821 lr=1.500e-04
+[epoch 68/600] train_loss=0.522398 raw_loss=0.528836 cond_frac=0.821 lr=1.500e-04
+[epoch 69/600] train_loss=0.518792 raw_loss=0.523906 cond_frac=0.820 lr=1.500e-04
+[epoch 70/600] train_loss=0.539771 raw_loss=0.542950 cond_frac=0.820 lr=1.500e-04
+[epoch 71/600] train_loss=0.504884 raw_loss=0.512088 cond_frac=0.823 lr=1.500e-04
+[epoch 72/600] train_loss=0.534931 raw_loss=0.534792 cond_frac=0.819 lr=1.500e-04
+[epoch 73/600] train_loss=0.528114 raw_loss=0.532812 cond_frac=0.820 lr=1.500e-04
+[epoch 74/600] train_loss=0.495145 raw_loss=0.502283 cond_frac=0.821 lr=1.500e-04
+[epoch 75/600] train_loss=0.481329 raw_loss=0.491508 cond_frac=0.820 lr=1.500e-04
+[epoch 76/600] train_loss=0.472593 raw_loss=0.483966 cond_frac=0.820 lr=1.500e-04
+[epoch 77/600] train_loss=0.488162 raw_loss=0.497564 cond_frac=0.818 lr=1.500e-04
+[epoch 78/600] train_loss=0.479317 raw_loss=0.492231 cond_frac=0.820 lr=1.500e-04
+[epoch 79/600] train_loss=0.460128 raw_loss=0.481710 cond_frac=0.820 lr=1.500e-04
+[epoch 80/600] train_loss=0.501772 raw_loss=0.510098 cond_frac=0.820 lr=1.500e-04
+[epoch 81/600] train_loss=0.480514 raw_loss=0.493746 cond_frac=0.820 lr=1.500e-04
+[epoch 82/600] train_loss=0.451616 raw_loss=0.468723 cond_frac=0.820 lr=1.500e-04
+[epoch 83/600] train_loss=0.450164 raw_loss=0.465217 cond_frac=0.821 lr=1.500e-04
+[epoch 84/600] train_loss=0.441819 raw_loss=0.456744 cond_frac=0.820 lr=1.500e-04
+[epoch 85/600] train_loss=0.438909 raw_loss=0.455884 cond_frac=0.819 lr=1.500e-04
+[epoch 86/600] train_loss=0.442969 raw_loss=0.463236 cond_frac=0.819 lr=1.500e-04
+[epoch 87/600] train_loss=0.426812 raw_loss=0.445963 cond_frac=0.820 lr=1.500e-04
+[epoch 88/600] train_loss=0.424742 raw_loss=0.445488 cond_frac=0.818 lr=1.500e-04
+[epoch 89/600] train_loss=0.428796 raw_loss=0.444215 cond_frac=0.821 lr=1.500e-04
+[epoch 90/600] train_loss=0.456888 raw_loss=0.471919 cond_frac=0.821 lr=1.500e-04
+[epoch 91/600] train_loss=0.431329 raw_loss=0.449391 cond_frac=0.821 lr=1.500e-04
+[epoch 92/600] train_loss=0.426054 raw_loss=0.445481 cond_frac=0.820 lr=1.500e-04
+[epoch 93/600] train_loss=0.457285 raw_loss=0.470976 cond_frac=0.817 lr=1.500e-04
+[epoch 94/600] train_loss=0.425410 raw_loss=0.444747 cond_frac=0.819 lr=1.500e-04
+[epoch 95/600] train_loss=0.409373 raw_loss=0.427556 cond_frac=0.820 lr=1.500e-04
+[epoch 96/600] train_loss=0.409844 raw_loss=0.431242 cond_frac=0.819 lr=1.500e-04
+[epoch 97/600] train_loss=0.402034 raw_loss=0.426687 cond_frac=0.822 lr=1.500e-04
+[epoch 98/600] train_loss=0.399324 raw_loss=0.426122 cond_frac=0.820 lr=1.500e-04
+[epoch 99/600] train_loss=0.402211 raw_loss=0.424194 cond_frac=0.819 lr=1.500e-04
+[epoch 100/600] train_loss=0.425908 raw_loss=0.447476 cond_frac=0.821 lr=1.500e-04
+[epoch 101/600] train_loss=0.398681 raw_loss=0.422401 cond_frac=0.818 lr=1.500e-04
+[epoch 102/600] train_loss=0.391507 raw_loss=0.414581 cond_frac=0.817 lr=1.500e-04
+[epoch 103/600] train_loss=0.389469 raw_loss=0.415475 cond_frac=0.819 lr=1.500e-04
+[epoch 104/600] train_loss=0.393395 raw_loss=0.417576 cond_frac=0.819 lr=1.500e-04
+[epoch 105/600] train_loss=0.382554 raw_loss=0.406406 cond_frac=0.819 lr=1.500e-04
+[epoch 106/600] train_loss=0.391373 raw_loss=0.416616 cond_frac=0.821 lr=1.500e-04
+[epoch 107/600] train_loss=0.389060 raw_loss=0.414502 cond_frac=0.821 lr=1.500e-04
+[epoch 108/600] train_loss=0.394644 raw_loss=0.420546 cond_frac=0.822 lr=1.500e-04
+[epoch 109/600] train_loss=0.382621 raw_loss=0.412627 cond_frac=0.819 lr=1.500e-04
+[epoch 110/600] train_loss=0.383574 raw_loss=0.408961 cond_frac=0.821 lr=1.500e-04
+[epoch 111/600] train_loss=0.377747 raw_loss=0.404760 cond_frac=0.820 lr=1.500e-04
+[epoch 112/600] train_loss=0.374391 raw_loss=0.400455 cond_frac=0.822 lr=1.500e-04
+[epoch 113/600] train_loss=0.375036 raw_loss=0.402237 cond_frac=0.819 lr=1.500e-04
+[epoch 114/600] train_loss=0.368918 raw_loss=0.396858 cond_frac=0.821 lr=1.500e-04
+[epoch 115/600] train_loss=0.367604 raw_loss=0.393275 cond_frac=0.820 lr=1.500e-04
+[epoch 116/600] train_loss=0.369468 raw_loss=0.399006 cond_frac=0.821 lr=1.500e-04
+[epoch 117/600] train_loss=0.380691 raw_loss=0.407587 cond_frac=0.823 lr=1.500e-04
+[epoch 118/600] train_loss=0.377413 raw_loss=0.405186 cond_frac=0.820 lr=1.500e-04
+[epoch 119/600] train_loss=0.416248 raw_loss=0.435489 cond_frac=0.820 lr=1.500e-04
+[epoch 120/600] train_loss=0.361535 raw_loss=0.392087 cond_frac=0.818 lr=1.500e-04
+[epoch 121/600] train_loss=0.362740 raw_loss=0.392989 cond_frac=0.818 lr=1.500e-04
+[epoch 122/600] train_loss=0.366058 raw_loss=0.393152 cond_frac=0.818 lr=1.500e-04
+[epoch 123/600] train_loss=0.365152 raw_loss=0.394044 cond_frac=0.819 lr=1.500e-04
+[epoch 124/600] train_loss=0.353884 raw_loss=0.383739 cond_frac=0.822 lr=1.500e-04
+[epoch 125/600] train_loss=0.363199 raw_loss=0.392758 cond_frac=0.822 lr=1.500e-04
+[epoch 126/600] train_loss=0.405058 raw_loss=0.426480 cond_frac=0.819 lr=1.500e-04
+[epoch 127/600] train_loss=0.363966 raw_loss=0.389767 cond_frac=0.820 lr=1.500e-04
+[epoch 128/600] train_loss=0.383414 raw_loss=0.405042 cond_frac=0.820 lr=1.500e-04
+[epoch 129/600] train_loss=0.355376 raw_loss=0.383648 cond_frac=0.819 lr=1.500e-04
+[epoch 130/600] train_loss=0.373258 raw_loss=0.402139 cond_frac=0.821 lr=1.500e-04
+[epoch 131/600] train_loss=0.371742 raw_loss=0.400626 cond_frac=0.821 lr=1.500e-04
+[epoch 132/600] train_loss=0.365158 raw_loss=0.391439 cond_frac=0.817 lr=1.500e-04
+[epoch 133/600] train_loss=0.352166 raw_loss=0.381934 cond_frac=0.819 lr=1.500e-04
+[epoch 134/600] train_loss=0.354792 raw_loss=0.385015 cond_frac=0.820 lr=1.500e-04
+[epoch 135/600] train_loss=0.346010 raw_loss=0.377420 cond_frac=0.822 lr=1.500e-04
+[epoch 136/600] train_loss=0.344936 raw_loss=0.376042 cond_frac=0.817 lr=1.500e-04
+[epoch 137/600] train_loss=0.772486 raw_loss=0.771967 cond_frac=0.820 lr=1.500e-04
+[epoch 138/600] train_loss=0.438429 raw_loss=0.452449 cond_frac=0.820 lr=1.500e-04
+[epoch 139/600] train_loss=0.415232 raw_loss=0.433366 cond_frac=0.818 lr=1.500e-04
+[epoch 140/600] train_loss=0.405001 raw_loss=0.423240 cond_frac=0.821 lr=1.500e-04
+[epoch 141/600] train_loss=0.381105 raw_loss=0.405560 cond_frac=0.819 lr=1.500e-04
+[epoch 142/600] train_loss=0.393291 raw_loss=0.413527 cond_frac=0.818 lr=1.500e-04
+[epoch 143/600] train_loss=0.375587 raw_loss=0.401028 cond_frac=0.820 lr=1.500e-04
+[epoch 144/600] train_loss=0.392655 raw_loss=0.414599 cond_frac=0.817 lr=1.500e-04
+[epoch 145/600] train_loss=0.386277 raw_loss=0.409920 cond_frac=0.821 lr=1.500e-04
+[epoch 146/600] train_loss=0.376985 raw_loss=0.402417 cond_frac=0.820 lr=1.500e-04
+[epoch 147/600] train_loss=0.372049 raw_loss=0.396665 cond_frac=0.819 lr=1.500e-04
+[epoch 148/600] train_loss=0.368315 raw_loss=0.394448 cond_frac=0.817 lr=1.500e-04
+[epoch 149/600] train_loss=0.381490 raw_loss=0.404998 cond_frac=0.819 lr=1.500e-04
+[epoch 150/600] train_loss=0.374304 raw_loss=0.398912 cond_frac=0.822 lr=1.500e-04
+[epoch 151/600] train_loss=0.363536 raw_loss=0.390922 cond_frac=0.821 lr=1.500e-04
+[epoch 152/600] train_loss=0.367792 raw_loss=0.391891 cond_frac=0.820 lr=1.500e-04
+[epoch 153/600] train_loss=0.380310 raw_loss=0.402314 cond_frac=0.820 lr=1.500e-04
+[epoch 154/600] train_loss=0.366381 raw_loss=0.393125 cond_frac=0.822 lr=1.500e-04
+[epoch 155/600] train_loss=0.358056 raw_loss=0.382311 cond_frac=0.821 lr=1.500e-04
+[early stop] validation val_diag_mse_raw did not improve for 20 evals after epoch 57
+[loaded for eval] /home/user01/aiotlab/htien/llaplace_df/ldt/output/bms_air/pred-168/llapdiff_pred-168_best.pt
+
+Pipeline summary:
+pred | vae                         | summarizer                  | llapdiff_ckpt                                                                                | best_val | crps     | mae      | mse     
+-----+-----------------------------+-----------------------------+----------------------------------------------------------------------------------------------+----------+----------+----------+---------
+168  | skipped (checkpoint_exists) | skipped (checkpoint_exists) | /home/user01/aiotlab/htien/llaplace_df/ldt/output/bms_air/pred-168/llapdiff_pred-168_best.pt | None     | 0.560230 | 0.821248 | 1.255639
+Saved pipeline summary to ldt/results/bms_air_pred168.json
+pip_system_certs: ERROR: could not register module: No module named 'wrapt'
+sizes: (6030, 718, 1772)
+V: torch.Size([10, 1, 336, 13]) T: torch.Size([10, 1, 336, 13]) y: torch.Size([10, 1, 168])
+LLapDiff target_dim: 1
+Using device: cuda
+[diffusion cache] planning cache at ldt/diffusion_cache/uci_air/pred-168_batch-10
+[diffusion cache] building rows=8520 latent_dtype=float32 summary_dtype=float16
+[diffusion cache] wrote train: rows=6030
+[diffusion cache] wrote val: rows=718
+[diffusion cache] wrote test: rows=1772
+[epoch 1/600] train_loss=1.036424 raw_loss=1.038774 cond_frac=0.813 lr=3.000e-06
+[epoch 2/600] train_loss=1.008087 raw_loss=1.009953 cond_frac=0.819 lr=5.268e-06
+[epoch 3/600] train_loss=1.002981 raw_loss=1.008542 cond_frac=0.824 lr=7.899e-06
+[epoch 4/600] train_loss=0.992413 raw_loss=0.997816 cond_frac=0.817 lr=1.053e-05
+[epoch 5/600] train_loss=0.987696 raw_loss=0.989132 cond_frac=0.829 lr=1.316e-05
+[epoch 6/600] train_loss=0.982886 raw_loss=0.985333 cond_frac=0.822 lr=1.579e-05
+[epoch 7/600] train_loss=0.965634 raw_loss=0.963950 cond_frac=0.824 lr=1.843e-05
+[epoch 8/600] train_loss=0.947301 raw_loss=0.944116 cond_frac=0.823 lr=2.106e-05
+[epoch 9/600] train_loss=0.930152 raw_loss=0.929310 cond_frac=0.817 lr=2.369e-05
+[epoch 10/600] train_loss=0.910259 raw_loss=0.908767 cond_frac=0.820 lr=2.632e-05
+[epoch 11/600] train_loss=0.893848 raw_loss=0.887364 cond_frac=0.814 lr=2.895e-05
+[epoch 12/600] train_loss=0.879681 raw_loss=0.868714 cond_frac=0.819 lr=3.158e-05
+[epoch 13/600] train_loss=0.859806 raw_loss=0.848912 cond_frac=0.823 lr=3.421e-05
+[epoch 14/600] train_loss=0.855127 raw_loss=0.839206 cond_frac=0.813 lr=3.685e-05
+[epoch 15/600] train_loss=0.842618 raw_loss=0.824654 cond_frac=0.818 lr=3.948e-05
+[epoch 16/600] train_loss=0.830856 raw_loss=0.809192 cond_frac=0.832 lr=4.211e-05
+[epoch 17/600] train_loss=0.825018 raw_loss=0.802430 cond_frac=0.823 lr=4.474e-05
+[epoch 18/600] train_loss=0.816087 raw_loss=0.791407 cond_frac=0.821 lr=4.737e-05
+[epoch 19/600] train_loss=0.812062 raw_loss=0.787920 cond_frac=0.822 lr=5.000e-05
+[epoch 20/600] train_loss=0.806547 raw_loss=0.780944 cond_frac=0.812 lr=5.264e-05
+[epoch 21/600] train_loss=0.798696 raw_loss=0.775221 cond_frac=0.822 lr=5.527e-05
+[epoch 22/600] train_loss=0.796539 raw_loss=0.764843 cond_frac=0.826 lr=5.790e-05
+[epoch 23/600] train_loss=0.791783 raw_loss=0.761069 cond_frac=0.822 lr=6.053e-05
+[epoch 24/600] train_loss=0.789805 raw_loss=0.759990 cond_frac=0.816 lr=6.316e-05
+[epoch 25/600] train_loss=0.776737 raw_loss=0.750399 cond_frac=0.833 lr=6.579e-05
+[epoch 26/600] train_loss=0.775745 raw_loss=0.747996 cond_frac=0.820 lr=6.843e-05
+[epoch 27/600] train_loss=0.778593 raw_loss=0.743411 cond_frac=0.824 lr=7.106e-05
+[epoch 28/600] train_loss=0.777699 raw_loss=0.740731 cond_frac=0.814 lr=7.369e-05
+[epoch 29/600] train_loss=0.767044 raw_loss=0.725164 cond_frac=0.816 lr=7.632e-05
+[epoch 30/600] train_loss=0.770973 raw_loss=0.732952 cond_frac=0.818 lr=7.895e-05
+[epoch 31/600] train_loss=0.765831 raw_loss=0.729084 cond_frac=0.811 lr=8.158e-05
+[epoch 32/600] train_loss=0.767241 raw_loss=0.726383 cond_frac=0.819 lr=8.421e-05
+[epoch 33/600] train_loss=0.762845 raw_loss=0.719665 cond_frac=0.823 lr=8.685e-05
+[epoch 34/600] train_loss=0.761031 raw_loss=0.718062 cond_frac=0.811 lr=8.948e-05
+[epoch 35/600] train_loss=0.753435 raw_loss=0.716279 cond_frac=0.830 lr=9.211e-05
+[epoch 36/600] train_loss=0.755486 raw_loss=0.717616 cond_frac=0.825 lr=9.474e-05
+[epoch 37/600] train_loss=0.751990 raw_loss=0.712447 cond_frac=0.820 lr=9.737e-05
+[epoch 38/600] train_loss=0.747791 raw_loss=0.701396 cond_frac=0.826 lr=1.000e-04
+[epoch 39/600] train_loss=0.747148 raw_loss=0.702730 cond_frac=0.817 lr=1.026e-04
+[epoch 40/600] train_loss=0.749923 raw_loss=0.707523 cond_frac=0.822 lr=1.053e-04
+[epoch 41/600] train_loss=0.746986 raw_loss=0.705110 cond_frac=0.820 lr=1.079e-04
+[epoch 42/600] train_loss=0.741956 raw_loss=0.698764 cond_frac=0.824 lr=1.105e-04
+[epoch 43/600] train_loss=0.741693 raw_loss=0.696064 cond_frac=0.819 lr=1.132e-04
+[epoch 44/600] train_loss=0.738124 raw_loss=0.698078 cond_frac=0.811 lr=1.158e-04
+[epoch 45/600] train_loss=0.739192 raw_loss=0.696712 cond_frac=0.822 lr=1.184e-04
+[epoch 46/600] train_loss=0.736715 raw_loss=0.696017 cond_frac=0.822 lr=1.211e-04
+[epoch 47/600] train_loss=0.742072 raw_loss=0.695726 cond_frac=0.832 lr=1.237e-04
+[epoch 48/600] train_loss=0.737603 raw_loss=0.696407 cond_frac=0.814 lr=1.263e-04
+[epoch 49/600] train_loss=0.727973 raw_loss=0.688335 cond_frac=0.815 lr=1.290e-04
+[epoch 50/600] train_loss=0.731952 raw_loss=0.692195 cond_frac=0.810 lr=1.316e-04
+[epoch 51/600] train_loss=0.803947 raw_loss=0.762280 cond_frac=0.812 lr=1.342e-04
+[epoch 52/600] train_loss=0.777071 raw_loss=0.734607 cond_frac=0.822 lr=1.368e-04
+[epoch 53/600] train_loss=0.768020 raw_loss=0.724942 cond_frac=0.809 lr=1.395e-04
+[epoch 54/600] train_loss=0.751293 raw_loss=0.711397 cond_frac=0.822 lr=1.421e-04
+[epoch 55/600] train_loss=0.752355 raw_loss=0.711579 cond_frac=0.810 lr=1.447e-04
+[epoch 56/600] train_loss=0.751964 raw_loss=0.711023 cond_frac=0.820 lr=1.474e-04
+[epoch 57/600] train_loss=0.742036 raw_loss=0.700057 cond_frac=0.815 lr=1.500e-04
+[epoch 58/600] train_loss=0.747267 raw_loss=0.699149 cond_frac=0.824 lr=1.500e-04
+[epoch 59/600] train_loss=0.741883 raw_loss=0.699971 cond_frac=0.810 lr=1.500e-04
+[epoch 60/600] train_loss=0.739757 raw_loss=0.693597 cond_frac=0.829 lr=1.500e-04
+[epoch 61/600] train_loss=0.739386 raw_loss=0.694280 cond_frac=0.820 lr=1.500e-04
+[epoch 62/600] train_loss=0.734956 raw_loss=0.694225 cond_frac=0.813 lr=1.500e-04
+[epoch 63/600] train_loss=0.737752 raw_loss=0.688636 cond_frac=0.822 lr=1.500e-04
+[epoch 64/600] train_loss=0.731109 raw_loss=0.686253 cond_frac=0.820 lr=1.500e-04
+[epoch 65/600] train_loss=0.728323 raw_loss=0.683243 cond_frac=0.828 lr=1.500e-04
+[epoch 66/600] train_loss=0.732471 raw_loss=0.684467 cond_frac=0.819 lr=1.500e-04
+[epoch 67/600] train_loss=0.722250 raw_loss=0.677347 cond_frac=0.816 lr=1.500e-04
+[epoch 68/600] train_loss=0.730583 raw_loss=0.682690 cond_frac=0.818 lr=1.500e-04
+[epoch 69/600] train_loss=0.725325 raw_loss=0.672830 cond_frac=0.816 lr=1.500e-04
+[epoch 70/600] train_loss=0.719493 raw_loss=0.674457 cond_frac=0.818 lr=1.500e-04
+[epoch 71/600] train_loss=0.725321 raw_loss=0.673267 cond_frac=0.813 lr=1.500e-04
+[epoch 72/600] train_loss=0.717624 raw_loss=0.670465 cond_frac=0.824 lr=1.500e-04
+[epoch 73/600] train_loss=0.710544 raw_loss=0.660691 cond_frac=0.824 lr=1.500e-04
+[epoch 74/600] train_loss=0.718792 raw_loss=0.669348 cond_frac=0.825 lr=1.500e-04
+[epoch 75/600] train_loss=0.717955 raw_loss=0.669996 cond_frac=0.822 lr=1.500e-04
+[epoch 76/600] train_loss=0.716456 raw_loss=0.665069 cond_frac=0.818 lr=1.500e-04
+[epoch 77/600] train_loss=0.714010 raw_loss=0.664979 cond_frac=0.822 lr=1.500e-04
+[epoch 78/600] train_loss=0.710137 raw_loss=0.658511 cond_frac=0.822 lr=1.500e-04
+[epoch 79/600] train_loss=0.706643 raw_loss=0.654596 cond_frac=0.815 lr=1.500e-04
+[epoch 80/600] train_loss=0.706296 raw_loss=0.656202 cond_frac=0.816 lr=1.500e-04
+[epoch 81/600] train_loss=0.709393 raw_loss=0.662268 cond_frac=0.821 lr=1.500e-04
+[epoch 82/600] train_loss=0.703069 raw_loss=0.654215 cond_frac=0.819 lr=1.500e-04
+[epoch 83/600] train_loss=0.705764 raw_loss=0.654651 cond_frac=0.822 lr=1.500e-04
+[epoch 84/600] train_loss=0.707960 raw_loss=0.653556 cond_frac=0.820 lr=1.500e-04
+[epoch 85/600] train_loss=0.707427 raw_loss=0.652257 cond_frac=0.829 lr=1.500e-04
+[epoch 86/600] train_loss=0.695564 raw_loss=0.647113 cond_frac=0.821 lr=1.500e-04
+[epoch 87/600] train_loss=0.706480 raw_loss=0.653564 cond_frac=0.819 lr=1.500e-04
+[epoch 88/600] train_loss=0.693932 raw_loss=0.646175 cond_frac=0.814 lr=1.500e-04
+[epoch 89/600] train_loss=0.696596 raw_loss=0.645140 cond_frac=0.815 lr=1.500e-04
+[epoch 90/600] train_loss=0.696090 raw_loss=0.647620 cond_frac=0.814 lr=1.500e-04
+[epoch 91/600] train_loss=0.704044 raw_loss=0.653522 cond_frac=0.820 lr=1.500e-04
+[epoch 92/600] train_loss=0.690806 raw_loss=0.638230 cond_frac=0.810 lr=1.500e-04
+[epoch 93/600] train_loss=0.690972 raw_loss=0.638557 cond_frac=0.815 lr=1.500e-04
+[epoch 94/600] train_loss=0.692129 raw_loss=0.639623 cond_frac=0.812 lr=1.500e-04
+[epoch 95/600] train_loss=0.695939 raw_loss=0.641339 cond_frac=0.825 lr=1.500e-04
+[epoch 96/600] train_loss=0.692517 raw_loss=0.640497 cond_frac=0.812 lr=1.500e-04
+[epoch 97/600] train_loss=0.692275 raw_loss=0.643433 cond_frac=0.820 lr=1.500e-04
+[epoch 98/600] train_loss=0.693336 raw_loss=0.644281 cond_frac=0.818 lr=1.500e-04
+[epoch 99/600] train_loss=0.694111 raw_loss=0.638586 cond_frac=0.822 lr=1.500e-04
+[epoch 100/600] train_loss=0.693253 raw_loss=0.639917 cond_frac=0.823 lr=1.500e-04
+[epoch 101/600] train_loss=0.693077 raw_loss=0.641738 cond_frac=0.824 lr=1.500e-04
+[epoch 102/600] train_loss=0.689239 raw_loss=0.630172 cond_frac=0.820 lr=1.500e-04
+[epoch 103/600] train_loss=0.694596 raw_loss=0.635106 cond_frac=0.816 lr=1.500e-04
+[epoch 104/600] train_loss=0.689591 raw_loss=0.634671 cond_frac=0.819 lr=1.500e-04
+[epoch 105/600] train_loss=0.690761 raw_loss=0.636376 cond_frac=0.815 lr=1.500e-04
+[epoch 106/600] train_loss=0.684233 raw_loss=0.633917 cond_frac=0.811 lr=1.500e-04
+[epoch 107/600] train_loss=0.686753 raw_loss=0.633681 cond_frac=0.822 lr=1.500e-04
+[epoch 108/600] train_loss=0.694809 raw_loss=0.634934 cond_frac=0.819 lr=1.500e-04
+[epoch 109/600] train_loss=0.685388 raw_loss=0.627997 cond_frac=0.827 lr=1.500e-04
+[epoch 110/600] train_loss=0.686546 raw_loss=0.628302 cond_frac=0.826 lr=1.500e-04
+[epoch 111/600] train_loss=0.687570 raw_loss=0.632731 cond_frac=0.818 lr=1.500e-04
+[epoch 112/600] train_loss=0.685082 raw_loss=0.629934 cond_frac=0.817 lr=1.500e-04
+[epoch 113/600] train_loss=0.683808 raw_loss=0.630774 cond_frac=0.819 lr=1.500e-04
+[epoch 114/600] train_loss=0.683320 raw_loss=0.628191 cond_frac=0.828 lr=1.500e-04
+[epoch 115/600] train_loss=0.683896 raw_loss=0.626595 cond_frac=0.817 lr=1.500e-04
+[epoch 116/600] train_loss=0.678657 raw_loss=0.624039 cond_frac=0.829 lr=1.500e-04
+[epoch 117/600] train_loss=0.679441 raw_loss=0.621261 cond_frac=0.815 lr=1.500e-04
+[epoch 118/600] train_loss=0.674914 raw_loss=0.616847 cond_frac=0.822 lr=1.500e-04
+[epoch 119/600] train_loss=0.682098 raw_loss=0.622364 cond_frac=0.826 lr=1.500e-04
+[epoch 120/600] train_loss=0.681502 raw_loss=0.620463 cond_frac=0.822 lr=1.500e-04
+[epoch 121/600] train_loss=0.678484 raw_loss=0.615262 cond_frac=0.816 lr=1.500e-04
+[epoch 122/600] train_loss=0.677152 raw_loss=0.616546 cond_frac=0.821 lr=1.500e-04
+[epoch 123/600] train_loss=0.679086 raw_loss=0.620793 cond_frac=0.827 lr=1.500e-04
+[epoch 124/600] train_loss=0.679909 raw_loss=0.616645 cond_frac=0.830 lr=1.500e-04
+[epoch 125/600] train_loss=0.677747 raw_loss=0.617118 cond_frac=0.815 lr=1.500e-04
+[epoch 126/600] train_loss=0.678719 raw_loss=0.622984 cond_frac=0.819 lr=1.500e-04
+[epoch 127/600] train_loss=0.671819 raw_loss=0.614093 cond_frac=0.815 lr=1.500e-04
+[epoch 128/600] train_loss=0.679425 raw_loss=0.622243 cond_frac=0.819 lr=1.500e-04
+[epoch 129/600] train_loss=0.675870 raw_loss=0.624451 cond_frac=0.818 lr=1.500e-04
+[epoch 130/600] train_loss=0.705787 raw_loss=0.653332 cond_frac=0.817 lr=1.500e-04
+[epoch 131/600] train_loss=0.689515 raw_loss=0.633739 cond_frac=0.821 lr=1.500e-04
+[epoch 132/600] train_loss=0.679279 raw_loss=0.619923 cond_frac=0.819 lr=1.500e-04
+[epoch 133/600] train_loss=0.673537 raw_loss=0.611916 cond_frac=0.828 lr=1.500e-04
+[epoch 134/600] train_loss=0.672834 raw_loss=0.615869 cond_frac=0.821 lr=1.500e-04
+[early stop] validation val_diag_mse_raw did not improve for 20 evals after epoch 57
+[loaded for eval] /home/user01/aiotlab/htien/llaplace_df/ldt/output/uci_air/pred-168/llapdiff_pred-168_best.pt
+
+Pipeline summary:
+pred | vae                         | summarizer                  | llapdiff_ckpt                                                                                | best_val | crps     | mae      | mse     
+-----+-----------------------------+-----------------------------+----------------------------------------------------------------------------------------------+----------+----------+----------+---------
+168  | skipped (checkpoint_exists) | skipped (checkpoint_exists) | /home/user01/aiotlab/htien/llaplace_df/ldt/output/uci_air/pred-168/llapdiff_pred-168_best.pt | None     | 0.917005 | 1.230249 | 2.470952
+Saved pipeline summary to ldt/results/uci_air_pred168.json
+pip_system_certs: ERROR: could not register module: No module named 'wrapt'
+sizes: (949080, 131560, 276480)
+V: torch.Size([15, 40, 336, 5]) T: torch.Size([15, 40, 336, 5]) y: torch.Size([15, 40, 168])
+LLapDiff target_dim: 1
+Using device: cuda
+[diffusion cache] planning cache at ldt/diffusion_cache/noaa_us/pred-168_batch-15
+[diffusion cache] building rows=34226 latent_dtype=float32 summary_dtype=float16
+[diffusion cache] wrote train: rows=24025
+[diffusion cache] wrote val: rows=3289
+[diffusion cache] wrote test: rows=6912
+[epoch 1/600] train_loss=1.013481 raw_loss=1.012687 cond_frac=0.819 lr=3.000e-06
+[epoch 2/600] train_loss=0.958734 raw_loss=0.954571 cond_frac=0.823 lr=5.265e-06
+[epoch 3/600] train_loss=0.909726 raw_loss=0.900297 cond_frac=0.824 lr=7.896e-06
+[epoch 4/600] train_loss=0.873638 raw_loss=0.854775 cond_frac=0.819 lr=1.053e-05
+[epoch 5/600] train_loss=0.849781 raw_loss=0.822028 cond_frac=0.820 lr=1.316e-05
+[epoch 6/600] train_loss=0.826757 raw_loss=0.791220 cond_frac=0.818 lr=1.579e-05
+[epoch 7/600] train_loss=0.813943 raw_loss=0.775048 cond_frac=0.821 lr=1.842e-05
+[epoch 8/600] train_loss=0.797345 raw_loss=0.756865 cond_frac=0.821 lr=2.105e-05
+[epoch 9/600] train_loss=0.782703 raw_loss=0.738549 cond_frac=0.818 lr=2.369e-05
+[epoch 10/600] train_loss=0.767268 raw_loss=0.720455 cond_frac=0.820 lr=2.632e-05
+[epoch 11/600] train_loss=0.753840 raw_loss=0.705484 cond_frac=0.819 lr=2.895e-05
+[epoch 12/600] train_loss=0.739874 raw_loss=0.687283 cond_frac=0.819 lr=3.158e-05
+[epoch 13/600] train_loss=0.728518 raw_loss=0.673243 cond_frac=0.819 lr=3.421e-05
+[epoch 14/600] train_loss=0.719106 raw_loss=0.659393 cond_frac=0.827 lr=3.684e-05
+[epoch 15/600] train_loss=0.711480 raw_loss=0.657176 cond_frac=0.820 lr=3.948e-05
+[epoch 16/600] train_loss=0.702220 raw_loss=0.642778 cond_frac=0.817 lr=4.211e-05
+[epoch 17/600] train_loss=0.703749 raw_loss=0.642935 cond_frac=0.819 lr=4.474e-05
+[epoch 18/600] train_loss=0.699893 raw_loss=0.637255 cond_frac=0.819 lr=4.737e-05
+[epoch 19/600] train_loss=0.691161 raw_loss=0.625808 cond_frac=0.818 lr=5.000e-05
+[epoch 20/600] train_loss=0.687188 raw_loss=0.621916 cond_frac=0.824 lr=5.263e-05
+[epoch 21/600] train_loss=0.684112 raw_loss=0.616808 cond_frac=0.822 lr=5.526e-05
+[epoch 22/600] train_loss=0.681355 raw_loss=0.616728 cond_frac=0.817 lr=5.790e-05
+[epoch 23/600] train_loss=0.676789 raw_loss=0.608401 cond_frac=0.819 lr=6.053e-05
+[epoch 24/600] train_loss=0.675789 raw_loss=0.605331 cond_frac=0.825 lr=6.316e-05
+[epoch 25/600] train_loss=0.672475 raw_loss=0.607045 cond_frac=0.820 lr=6.579e-05
+[epoch 26/600] train_loss=0.671577 raw_loss=0.601945 cond_frac=0.820 lr=6.842e-05
+[epoch 27/600] train_loss=0.674300 raw_loss=0.601985 cond_frac=0.822 lr=7.105e-05
+[epoch 28/600] train_loss=0.668596 raw_loss=0.599344 cond_frac=0.820 lr=7.369e-05
+[epoch 29/600] train_loss=0.670173 raw_loss=0.599488 cond_frac=0.820 lr=7.632e-05
+[epoch 30/600] train_loss=0.666016 raw_loss=0.594401 cond_frac=0.819 lr=7.895e-05
+[epoch 31/600] train_loss=0.664664 raw_loss=0.595557 cond_frac=0.823 lr=8.158e-05
+[epoch 32/600] train_loss=0.665007 raw_loss=0.597281 cond_frac=0.822 lr=8.421e-05
+[epoch 33/600] train_loss=0.667446 raw_loss=0.597911 cond_frac=0.816 lr=8.684e-05
+[epoch 34/600] train_loss=0.660566 raw_loss=0.588045 cond_frac=0.814 lr=8.948e-05
+[epoch 35/600] train_loss=0.664588 raw_loss=0.592732 cond_frac=0.817 lr=9.211e-05
+[epoch 36/600] train_loss=0.659170 raw_loss=0.589705 cond_frac=0.821 lr=9.474e-05
+[epoch 37/600] train_loss=0.662866 raw_loss=0.591473 cond_frac=0.823 lr=9.737e-05
+[epoch 38/600] train_loss=0.661840 raw_loss=0.590595 cond_frac=0.820 lr=1.000e-04
+[epoch 39/600] train_loss=0.660026 raw_loss=0.590031 cond_frac=0.824 lr=1.026e-04
+[epoch 40/600] train_loss=0.662256 raw_loss=0.589954 cond_frac=0.823 lr=1.053e-04
+[epoch 41/600] train_loss=0.660799 raw_loss=0.591336 cond_frac=0.822 lr=1.079e-04
+[epoch 42/600] train_loss=0.655543 raw_loss=0.587020 cond_frac=0.820 lr=1.105e-04
+[epoch 43/600] train_loss=0.657069 raw_loss=0.585950 cond_frac=0.822 lr=1.132e-04
+[epoch 44/600] train_loss=0.653402 raw_loss=0.579044 cond_frac=0.819 lr=1.158e-04
+[epoch 45/600] train_loss=0.655656 raw_loss=0.586135 cond_frac=0.815 lr=1.184e-04
+[epoch 46/600] train_loss=0.650989 raw_loss=0.577158 cond_frac=0.822 lr=1.211e-04
+[epoch 47/600] train_loss=0.650857 raw_loss=0.579902 cond_frac=0.818 lr=1.237e-04
+[epoch 48/600] train_loss=0.650131 raw_loss=0.578796 cond_frac=0.818 lr=1.263e-04
+[epoch 49/600] train_loss=0.647941 raw_loss=0.578830 cond_frac=0.820 lr=1.289e-04
+[epoch 50/600] train_loss=0.646148 raw_loss=0.574406 cond_frac=0.817 lr=1.316e-04
+[epoch 51/600] train_loss=0.643267 raw_loss=0.571663 cond_frac=0.820 lr=1.342e-04
+[epoch 52/600] train_loss=0.640904 raw_loss=0.571927 cond_frac=0.822 lr=1.368e-04
+[epoch 53/600] train_loss=0.639409 raw_loss=0.571873 cond_frac=0.821 lr=1.395e-04
+[epoch 54/600] train_loss=0.633516 raw_loss=0.563411 cond_frac=0.819 lr=1.421e-04
+[epoch 55/600] train_loss=0.632088 raw_loss=0.563272 cond_frac=0.819 lr=1.447e-04
+[epoch 56/600] train_loss=0.625672 raw_loss=0.557469 cond_frac=0.823 lr=1.474e-04
+[epoch 57/600] train_loss=0.624620 raw_loss=0.558133 cond_frac=0.824 lr=1.500e-04
+[epoch 58/600] train_loss=0.618692 raw_loss=0.553428 cond_frac=0.820 lr=1.500e-04
+[epoch 59/600] train_loss=0.610807 raw_loss=0.547022 cond_frac=0.817 lr=1.500e-04
+[epoch 60/600] train_loss=0.613985 raw_loss=0.549494 cond_frac=0.815 lr=1.500e-04
+[epoch 61/600] train_loss=0.612205 raw_loss=0.547134 cond_frac=0.821 lr=1.500e-04
+[epoch 62/600] train_loss=0.605747 raw_loss=0.541638 cond_frac=0.816 lr=1.500e-04
+[epoch 63/600] train_loss=0.596715 raw_loss=0.532624 cond_frac=0.813 lr=1.500e-04
+[epoch 64/600] train_loss=0.597755 raw_loss=0.533317 cond_frac=0.821 lr=1.500e-04
+[epoch 65/600] train_loss=0.595898 raw_loss=0.530296 cond_frac=0.819 lr=1.500e-04
+[epoch 66/600] train_loss=0.591454 raw_loss=0.528770 cond_frac=0.818 lr=1.500e-04
+[epoch 67/600] train_loss=0.590577 raw_loss=0.526277 cond_frac=0.820 lr=1.500e-04
+[epoch 68/600] train_loss=0.587568 raw_loss=0.525253 cond_frac=0.818 lr=1.500e-04
+[epoch 69/600] train_loss=0.582161 raw_loss=0.520226 cond_frac=0.821 lr=1.500e-04
+[epoch 70/600] train_loss=0.584448 raw_loss=0.523420 cond_frac=0.824 lr=1.500e-04
+[epoch 71/600] train_loss=0.581507 raw_loss=0.518445 cond_frac=0.822 lr=1.500e-04
+[epoch 72/600] train_loss=0.578624 raw_loss=0.515259 cond_frac=0.816 lr=1.500e-04
+[epoch 73/600] train_loss=0.577660 raw_loss=0.519413 cond_frac=0.817 lr=1.500e-04
+[epoch 74/600] train_loss=0.570869 raw_loss=0.510630 cond_frac=0.821 lr=1.500e-04
+[epoch 75/600] train_loss=0.573385 raw_loss=0.516256 cond_frac=0.820 lr=1.500e-04
+[epoch 76/600] train_loss=0.569720 raw_loss=0.513168 cond_frac=0.818 lr=1.500e-04
+[epoch 77/600] train_loss=0.563558 raw_loss=0.505142 cond_frac=0.818 lr=1.500e-04
+[epoch 78/600] train_loss=0.566917 raw_loss=0.507185 cond_frac=0.822 lr=1.500e-04
+[epoch 79/600] train_loss=0.557937 raw_loss=0.501494 cond_frac=0.819 lr=1.500e-04
+[epoch 80/600] train_loss=0.557852 raw_loss=0.500021 cond_frac=0.821 lr=1.500e-04
+[epoch 81/600] train_loss=0.551206 raw_loss=0.494746 cond_frac=0.818 lr=1.500e-04
+[epoch 82/600] train_loss=0.552175 raw_loss=0.496269 cond_frac=0.820 lr=1.500e-04
+[epoch 83/600] train_loss=0.549438 raw_loss=0.490197 cond_frac=0.820 lr=1.500e-04
+[epoch 84/600] train_loss=0.545517 raw_loss=0.488992 cond_frac=0.819 lr=1.500e-04
+[early stop] validation val_diag_mse_raw did not improve for 20 evals after epoch 57
+[loaded for eval] /home/user01/aiotlab/htien/llaplace_df/ldt/output/noaa_us/pred-168/llapdiff_pred-168_best.pt
+
+Pipeline summary:
+pred | vae                         | summarizer                  | llapdiff_ckpt                                                                                | best_val | crps     | mae      | mse     
+-----+-----------------------------+-----------------------------+----------------------------------------------------------------------------------------------+----------+----------+----------+---------
+168  | skipped (checkpoint_exists) | skipped (checkpoint_exists) | /home/user01/aiotlab/htien/llaplace_df/ldt/output/noaa_us/pred-168/llapdiff_pred-168_best.pt | None     | 0.527862 | 0.736944 | 0.836540
+Saved pipeline summary to ldt/results/noaa_us_pred168.json
+pip_system_certs: ERROR: could not register module: No module named 'wrapt'
+sizes: (63136, 8732, 18808)
+V: torch.Size([15, 4, 336, 5]) T: torch.Size([15, 4, 336, 5]) y: torch.Size([15, 4, 168])
+LLapDiff target_dim: 1
+Using device: cuda
+[diffusion cache] planning cache at ldt/diffusion_cache/noaa_uk/pred-168_batch-15
+[diffusion cache] building rows=23171 latent_dtype=float32 summary_dtype=float16
+[diffusion cache] wrote train: rows=16286
+[diffusion cache] wrote val: rows=2183
+[diffusion cache] wrote test: rows=4702
+[epoch 1/600] train_loss=1.010122 raw_loss=1.009714 cond_frac=0.822 lr=3.000e-06
+[epoch 2/600] train_loss=0.991613 raw_loss=0.984726 cond_frac=0.818 lr=5.266e-06
+[epoch 3/600] train_loss=0.967776 raw_loss=0.961150 cond_frac=0.826 lr=7.897e-06
+[epoch 4/600] train_loss=0.933023 raw_loss=0.921956 cond_frac=0.822 lr=1.053e-05
+[epoch 5/600] train_loss=0.903007 raw_loss=0.890022 cond_frac=0.818 lr=1.316e-05
+[epoch 6/600] train_loss=0.882976 raw_loss=0.864936 cond_frac=0.818 lr=1.579e-05
+[epoch 7/600] train_loss=0.878297 raw_loss=0.858987 cond_frac=0.816 lr=1.842e-05
+[epoch 8/600] train_loss=0.870126 raw_loss=0.846049 cond_frac=0.819 lr=2.106e-05
+[epoch 9/600] train_loss=0.857781 raw_loss=0.829572 cond_frac=0.825 lr=2.369e-05
+[epoch 10/600] train_loss=0.849659 raw_loss=0.818410 cond_frac=0.824 lr=2.632e-05
+[epoch 11/600] train_loss=0.837243 raw_loss=0.808289 cond_frac=0.825 lr=2.895e-05
+[epoch 12/600] train_loss=0.830657 raw_loss=0.798573 cond_frac=0.822 lr=3.158e-05
+[epoch 13/600] train_loss=0.821988 raw_loss=0.787668 cond_frac=0.820 lr=3.421e-05
+[epoch 14/600] train_loss=0.816990 raw_loss=0.780588 cond_frac=0.819 lr=3.684e-05
+[epoch 15/600] train_loss=0.810829 raw_loss=0.772412 cond_frac=0.819 lr=3.948e-05
+[epoch 16/600] train_loss=0.806042 raw_loss=0.768599 cond_frac=0.819 lr=4.211e-05
+[epoch 17/600] train_loss=0.801240 raw_loss=0.766146 cond_frac=0.822 lr=4.474e-05
+[epoch 18/600] train_loss=0.793910 raw_loss=0.749062 cond_frac=0.818 lr=4.737e-05
+[epoch 19/600] train_loss=0.786410 raw_loss=0.748245 cond_frac=0.826 lr=5.000e-05
+[epoch 20/600] train_loss=0.783187 raw_loss=0.745318 cond_frac=0.822 lr=5.263e-05
+[epoch 21/600] train_loss=0.779627 raw_loss=0.740254 cond_frac=0.825 lr=5.527e-05
+[epoch 22/600] train_loss=0.768809 raw_loss=0.733727 cond_frac=0.818 lr=5.790e-05
+[epoch 23/600] train_loss=0.771525 raw_loss=0.730298 cond_frac=0.819 lr=6.053e-05
+[epoch 24/600] train_loss=0.761291 raw_loss=0.720740 cond_frac=0.816 lr=6.316e-05
+[epoch 25/600] train_loss=0.755643 raw_loss=0.717095 cond_frac=0.820 lr=6.579e-05
+[epoch 26/600] train_loss=0.753055 raw_loss=0.707261 cond_frac=0.821 lr=6.842e-05
+[epoch 27/600] train_loss=0.749045 raw_loss=0.710805 cond_frac=0.816 lr=7.106e-05
+[epoch 28/600] train_loss=0.750569 raw_loss=0.704766 cond_frac=0.817 lr=7.369e-05
+[epoch 29/600] train_loss=0.746323 raw_loss=0.702915 cond_frac=0.825 lr=7.632e-05
+[epoch 30/600] train_loss=0.740780 raw_loss=0.697884 cond_frac=0.821 lr=7.895e-05
+[epoch 31/600] train_loss=0.741668 raw_loss=0.699547 cond_frac=0.820 lr=8.158e-05
+[epoch 32/600] train_loss=0.739565 raw_loss=0.694364 cond_frac=0.819 lr=8.421e-05
+[epoch 33/600] train_loss=0.738763 raw_loss=0.697635 cond_frac=0.819 lr=8.684e-05
+[epoch 34/600] train_loss=0.741554 raw_loss=0.698796 cond_frac=0.826 lr=8.948e-05
+[epoch 35/600] train_loss=0.728147 raw_loss=0.682025 cond_frac=0.820 lr=9.211e-05
+[epoch 36/600] train_loss=0.734795 raw_loss=0.689250 cond_frac=0.823 lr=9.474e-05
+[epoch 37/600] train_loss=0.727345 raw_loss=0.686197 cond_frac=0.823 lr=9.737e-05
+[epoch 38/600] train_loss=0.729562 raw_loss=0.681872 cond_frac=0.818 lr=1.000e-04
+[epoch 39/600] train_loss=0.726355 raw_loss=0.680276 cond_frac=0.821 lr=1.026e-04
+[epoch 40/600] train_loss=0.726178 raw_loss=0.678598 cond_frac=0.822 lr=1.053e-04
+[epoch 41/600] train_loss=0.719177 raw_loss=0.675661 cond_frac=0.819 lr=1.079e-04
+[epoch 42/600] train_loss=0.717538 raw_loss=0.672301 cond_frac=0.819 lr=1.105e-04
+[epoch 43/600] train_loss=0.714865 raw_loss=0.669366 cond_frac=0.825 lr=1.132e-04
+[epoch 44/600] train_loss=0.712671 raw_loss=0.671119 cond_frac=0.821 lr=1.158e-04
+[epoch 45/600] train_loss=0.708651 raw_loss=0.664363 cond_frac=0.820 lr=1.184e-04
+[epoch 46/600] train_loss=0.705932 raw_loss=0.664516 cond_frac=0.818 lr=1.211e-04
+[epoch 47/600] train_loss=0.702424 raw_loss=0.661563 cond_frac=0.821 lr=1.237e-04
+[epoch 48/600] train_loss=0.702816 raw_loss=0.662918 cond_frac=0.817 lr=1.263e-04
+[epoch 49/600] train_loss=0.711026 raw_loss=0.669371 cond_frac=0.816 lr=1.289e-04
+[epoch 50/600] train_loss=0.696556 raw_loss=0.652267 cond_frac=0.819 lr=1.316e-04
+[epoch 51/600] train_loss=0.691866 raw_loss=0.650977 cond_frac=0.812 lr=1.342e-04
+[epoch 52/600] train_loss=0.689977 raw_loss=0.647917 cond_frac=0.820 lr=1.368e-04
+[epoch 53/600] train_loss=0.688147 raw_loss=0.642584 cond_frac=0.819 lr=1.395e-04
+[epoch 54/600] train_loss=0.687023 raw_loss=0.642547 cond_frac=0.825 lr=1.421e-04
+[epoch 55/600] train_loss=0.680927 raw_loss=0.638757 cond_frac=0.823 lr=1.447e-04
+[epoch 56/600] train_loss=0.680915 raw_loss=0.637857 cond_frac=0.820 lr=1.474e-04
+[epoch 57/600] train_loss=0.677363 raw_loss=0.636751 cond_frac=0.816 lr=1.500e-04
+[epoch 58/600] train_loss=0.671567 raw_loss=0.630867 cond_frac=0.823 lr=1.500e-04
+[epoch 59/600] train_loss=0.668031 raw_loss=0.624444 cond_frac=0.822 lr=1.500e-04
+[epoch 60/600] train_loss=0.665989 raw_loss=0.625941 cond_frac=0.825 lr=1.500e-04
+[epoch 61/600] train_loss=0.660215 raw_loss=0.622712 cond_frac=0.824 lr=1.500e-04
+[epoch 62/600] train_loss=0.654379 raw_loss=0.619245 cond_frac=0.823 lr=1.500e-04
+[epoch 63/600] train_loss=0.652005 raw_loss=0.617120 cond_frac=0.822 lr=1.500e-04
+[epoch 64/600] train_loss=0.649705 raw_loss=0.610185 cond_frac=0.821 lr=1.500e-04
+[epoch 65/600] train_loss=0.649859 raw_loss=0.615396 cond_frac=0.818 lr=1.500e-04
+[epoch 66/600] train_loss=0.640177 raw_loss=0.600075 cond_frac=0.819 lr=1.500e-04
+[epoch 67/600] train_loss=0.635631 raw_loss=0.601260 cond_frac=0.815 lr=1.500e-04
+[epoch 68/600] train_loss=0.631278 raw_loss=0.594117 cond_frac=0.818 lr=1.500e-04
+[epoch 69/600] train_loss=0.627652 raw_loss=0.594406 cond_frac=0.817 lr=1.500e-04
+[epoch 70/600] train_loss=0.624226 raw_loss=0.588970 cond_frac=0.820 lr=1.500e-04
+[epoch 71/600] train_loss=0.620815 raw_loss=0.585102 cond_frac=0.821 lr=1.500e-04
+[epoch 72/600] train_loss=0.619029 raw_loss=0.585629 cond_frac=0.821 lr=1.500e-04
+[epoch 73/600] train_loss=0.612739 raw_loss=0.581149 cond_frac=0.824 lr=1.500e-04
+[epoch 74/600] train_loss=0.613835 raw_loss=0.579656 cond_frac=0.814 lr=1.500e-04
+[epoch 75/600] train_loss=0.603970 raw_loss=0.568181 cond_frac=0.820 lr=1.500e-04
+[epoch 76/600] train_loss=0.605744 raw_loss=0.573405 cond_frac=0.817 lr=1.500e-04
+[epoch 77/600] train_loss=0.597623 raw_loss=0.564125 cond_frac=0.822 lr=1.500e-04
+[epoch 78/600] train_loss=0.593538 raw_loss=0.562103 cond_frac=0.821 lr=1.500e-04
+[epoch 79/600] train_loss=0.592596 raw_loss=0.557398 cond_frac=0.819 lr=1.500e-04
+[epoch 80/600] train_loss=0.587213 raw_loss=0.558266 cond_frac=0.824 lr=1.500e-04
+[epoch 81/600] train_loss=0.591781 raw_loss=0.561067 cond_frac=0.818 lr=1.500e-04
+[epoch 82/600] train_loss=0.583007 raw_loss=0.553307 cond_frac=0.822 lr=1.500e-04
+[epoch 83/600] train_loss=0.580393 raw_loss=0.546130 cond_frac=0.822 lr=1.500e-04
+[epoch 84/600] train_loss=0.577712 raw_loss=0.549109 cond_frac=0.823 lr=1.500e-04
+[epoch 85/600] train_loss=0.579754 raw_loss=0.548736 cond_frac=0.822 lr=1.500e-04
+[epoch 86/600] train_loss=0.572379 raw_loss=0.544512 cond_frac=0.809 lr=1.500e-04
+[epoch 87/600] train_loss=0.569334 raw_loss=0.542012 cond_frac=0.817 lr=1.500e-04
+[epoch 88/600] train_loss=0.569840 raw_loss=0.545122 cond_frac=0.817 lr=1.500e-04
+[epoch 89/600] train_loss=0.575877 raw_loss=0.548632 cond_frac=0.815 lr=1.500e-04
+[epoch 90/600] train_loss=0.565904 raw_loss=0.536728 cond_frac=0.820 lr=1.500e-04
+[epoch 91/600] train_loss=0.566358 raw_loss=0.539140 cond_frac=0.817 lr=1.500e-04
+[epoch 92/600] train_loss=0.560737 raw_loss=0.536508 cond_frac=0.817 lr=1.500e-04
+[epoch 93/600] train_loss=0.560292 raw_loss=0.529765 cond_frac=0.819 lr=1.500e-04
+[epoch 94/600] train_loss=0.567432 raw_loss=0.538267 cond_frac=0.819 lr=1.500e-04
+[epoch 95/600] train_loss=0.559771 raw_loss=0.532475 cond_frac=0.820 lr=1.500e-04
+[epoch 96/600] train_loss=0.571142 raw_loss=0.546006 cond_frac=0.821 lr=1.500e-04
+[epoch 97/600] train_loss=0.555613 raw_loss=0.530878 cond_frac=0.817 lr=1.500e-04
+[epoch 98/600] train_loss=0.554151 raw_loss=0.530146 cond_frac=0.824 lr=1.500e-04
+[epoch 99/600] train_loss=0.544725 raw_loss=0.521387 cond_frac=0.819 lr=1.500e-04
+[epoch 100/600] train_loss=0.539606 raw_loss=0.516013 cond_frac=0.824 lr=1.500e-04
+[epoch 101/600] train_loss=0.580845 raw_loss=0.558540 cond_frac=0.820 lr=1.500e-04
+[epoch 102/600] train_loss=0.558116 raw_loss=0.532716 cond_frac=0.820 lr=1.500e-04
+[epoch 103/600] train_loss=0.537391 raw_loss=0.515207 cond_frac=0.826 lr=1.500e-04
+[epoch 104/600] train_loss=0.529637 raw_loss=0.506459 cond_frac=0.818 lr=1.500e-04
+[epoch 105/600] train_loss=0.530621 raw_loss=0.507224 cond_frac=0.817 lr=1.500e-04
+[epoch 106/600] train_loss=0.526976 raw_loss=0.501661 cond_frac=0.815 lr=1.500e-04
+[epoch 107/600] train_loss=0.528718 raw_loss=0.502057 cond_frac=0.819 lr=1.500e-04
+[epoch 108/600] train_loss=0.555966 raw_loss=0.535775 cond_frac=0.817 lr=1.500e-04
+[epoch 109/600] train_loss=0.527072 raw_loss=0.505134 cond_frac=0.830 lr=1.500e-04
+[epoch 110/600] train_loss=0.524519 raw_loss=0.501834 cond_frac=0.817 lr=1.500e-04
+[epoch 111/600] train_loss=0.521981 raw_loss=0.502329 cond_frac=0.823 lr=1.500e-04
+[epoch 112/600] train_loss=0.515567 raw_loss=0.496685 cond_frac=0.819 lr=1.500e-04
+[epoch 113/600] train_loss=0.512762 raw_loss=0.491766 cond_frac=0.817 lr=1.500e-04
+[epoch 114/600] train_loss=0.517278 raw_loss=0.496516 cond_frac=0.818 lr=1.500e-04
+[epoch 115/600] train_loss=0.546115 raw_loss=0.525774 cond_frac=0.821 lr=1.500e-04
+[epoch 116/600] train_loss=0.512297 raw_loss=0.492477 cond_frac=0.819 lr=1.500e-04
+[epoch 117/600] train_loss=0.509031 raw_loss=0.490445 cond_frac=0.818 lr=1.500e-04
+[epoch 118/600] train_loss=0.501830 raw_loss=0.484306 cond_frac=0.818 lr=1.500e-04
+[epoch 119/600] train_loss=0.507153 raw_loss=0.485771 cond_frac=0.821 lr=1.500e-04
+[epoch 120/600] train_loss=0.503227 raw_loss=0.485064 cond_frac=0.823 lr=1.500e-04
+[epoch 121/600] train_loss=0.503184 raw_loss=0.484538 cond_frac=0.821 lr=1.500e-04
+[epoch 122/600] train_loss=0.501021 raw_loss=0.484368 cond_frac=0.822 lr=1.500e-04
+[epoch 123/600] train_loss=0.498924 raw_loss=0.479774 cond_frac=0.819 lr=1.500e-04
+[epoch 124/600] train_loss=0.492114 raw_loss=0.473821 cond_frac=0.820 lr=1.500e-04
+[epoch 125/600] train_loss=0.492218 raw_loss=0.474894 cond_frac=0.816 lr=1.500e-04
+[epoch 126/600] train_loss=0.491510 raw_loss=0.472803 cond_frac=0.821 lr=1.500e-04
+[epoch 127/600] train_loss=0.488700 raw_loss=0.470248 cond_frac=0.818 lr=1.500e-04
+[epoch 128/600] train_loss=0.493826 raw_loss=0.475342 cond_frac=0.824 lr=1.500e-04
+[epoch 129/600] train_loss=0.484783 raw_loss=0.465129 cond_frac=0.823 lr=1.500e-04
+[epoch 130/600] train_loss=0.488057 raw_loss=0.470422 cond_frac=0.822 lr=1.500e-04
+[epoch 131/600] train_loss=0.483660 raw_loss=0.469670 cond_frac=0.820 lr=1.500e-04
+[epoch 132/600] train_loss=0.481994 raw_loss=0.464241 cond_frac=0.824 lr=1.500e-04
+[epoch 133/600] train_loss=0.482176 raw_loss=0.465834 cond_frac=0.820 lr=1.500e-04
+[epoch 134/600] train_loss=0.478998 raw_loss=0.467071 cond_frac=0.820 lr=1.500e-04
+[epoch 135/600] train_loss=0.478799 raw_loss=0.460518 cond_frac=0.830 lr=1.500e-04
+[epoch 136/600] train_loss=0.477683 raw_loss=0.464186 cond_frac=0.816 lr=1.500e-04
+[epoch 137/600] train_loss=0.477744 raw_loss=0.461466 cond_frac=0.822 lr=1.500e-04
+[epoch 138/600] train_loss=0.474936 raw_loss=0.459829 cond_frac=0.823 lr=1.500e-04
+[epoch 139/600] train_loss=0.473242 raw_loss=0.455982 cond_frac=0.819 lr=1.500e-04
+[epoch 140/600] train_loss=0.533433 raw_loss=0.513349 cond_frac=0.823 lr=1.500e-04
+[epoch 141/600] train_loss=0.471958 raw_loss=0.459024 cond_frac=0.821 lr=1.500e-04
+[epoch 142/600] train_loss=0.473161 raw_loss=0.455901 cond_frac=0.817 lr=1.500e-04
+[epoch 143/600] train_loss=0.469420 raw_loss=0.450817 cond_frac=0.821 lr=1.500e-04
+[epoch 144/600] train_loss=0.466035 raw_loss=0.450473 cond_frac=0.822 lr=1.500e-04
+[epoch 145/600] train_loss=0.468966 raw_loss=0.455185 cond_frac=0.821 lr=1.500e-04
+[epoch 146/600] train_loss=0.469445 raw_loss=0.454930 cond_frac=0.821 lr=1.500e-04
+[epoch 147/600] train_loss=0.466844 raw_loss=0.447851 cond_frac=0.821 lr=1.500e-04
+[epoch 148/600] train_loss=0.462722 raw_loss=0.451257 cond_frac=0.822 lr=1.500e-04
+[epoch 149/600] train_loss=0.469269 raw_loss=0.452061 cond_frac=0.824 lr=1.500e-04
+[epoch 150/600] train_loss=0.485034 raw_loss=0.475034 cond_frac=0.819 lr=1.500e-04
+[epoch 151/600] train_loss=0.461132 raw_loss=0.444196 cond_frac=0.824 lr=1.500e-04
+[epoch 152/600] train_loss=0.459128 raw_loss=0.445545 cond_frac=0.824 lr=1.500e-04
+[epoch 153/600] train_loss=0.461912 raw_loss=0.446721 cond_frac=0.821 lr=1.500e-04
+[epoch 154/600] train_loss=0.461369 raw_loss=0.448194 cond_frac=0.822 lr=1.500e-04
+[epoch 155/600] train_loss=0.460602 raw_loss=0.449925 cond_frac=0.821 lr=1.500e-04
+[epoch 156/600] train_loss=0.456557 raw_loss=0.441600 cond_frac=0.820 lr=1.500e-04
+[epoch 157/600] train_loss=0.454877 raw_loss=0.437845 cond_frac=0.822 lr=1.500e-04
+[epoch 158/600] train_loss=0.453163 raw_loss=0.440252 cond_frac=0.815 lr=1.500e-04
+[epoch 159/600] train_loss=0.497083 raw_loss=0.479011 cond_frac=0.822 lr=1.500e-04
+[epoch 160/600] train_loss=0.458274 raw_loss=0.445950 cond_frac=0.824 lr=1.500e-04
+[epoch 161/600] train_loss=0.468853 raw_loss=0.449772 cond_frac=0.816 lr=1.500e-04
+[epoch 162/600] train_loss=0.452383 raw_loss=0.437987 cond_frac=0.817 lr=1.500e-04
+[epoch 163/600] train_loss=0.454614 raw_loss=0.440977 cond_frac=0.823 lr=1.500e-04
+[epoch 164/600] train_loss=0.452959 raw_loss=0.436059 cond_frac=0.822 lr=1.500e-04
+[epoch 165/600] train_loss=0.452055 raw_loss=0.436608 cond_frac=0.825 lr=1.500e-04
+[epoch 166/600] train_loss=0.451706 raw_loss=0.435952 cond_frac=0.821 lr=1.500e-04
+[epoch 167/600] train_loss=0.446216 raw_loss=0.431757 cond_frac=0.824 lr=1.500e-04
+[epoch 168/600] train_loss=0.454324 raw_loss=0.441025 cond_frac=0.815 lr=1.500e-04
+[epoch 169/600] train_loss=0.452573 raw_loss=0.440186 cond_frac=0.818 lr=1.500e-04
+[epoch 170/600] train_loss=0.446196 raw_loss=0.431421 cond_frac=0.824 lr=1.500e-04
+[epoch 171/600] train_loss=0.445472 raw_loss=0.431761 cond_frac=0.817 lr=1.500e-04
+[epoch 172/600] train_loss=0.450577 raw_loss=0.436513 cond_frac=0.816 lr=1.500e-04
+[epoch 173/600] train_loss=0.467835 raw_loss=0.449134 cond_frac=0.824 lr=1.500e-04
+[epoch 174/600] train_loss=0.456730 raw_loss=0.439656 cond_frac=0.823 lr=1.500e-04
+[epoch 175/600] train_loss=0.448868 raw_loss=0.437448 cond_frac=0.819 lr=1.500e-04
+[epoch 176/600] train_loss=0.444022 raw_loss=0.429972 cond_frac=0.819 lr=1.500e-04
+[epoch 177/600] train_loss=0.440340 raw_loss=0.430581 cond_frac=0.820 lr=1.500e-04
+[epoch 178/600] train_loss=0.445542 raw_loss=0.433061 cond_frac=0.818 lr=1.500e-04
+[epoch 179/600] train_loss=0.445617 raw_loss=0.431601 cond_frac=0.819 lr=1.500e-04
+[epoch 180/600] train_loss=0.440338 raw_loss=0.427824 cond_frac=0.818 lr=1.500e-04
+[epoch 181/600] train_loss=0.439906 raw_loss=0.429138 cond_frac=0.822 lr=1.500e-04
+[epoch 182/600] train_loss=0.443577 raw_loss=0.426650 cond_frac=0.815 lr=1.500e-04
+[epoch 183/600] train_loss=0.437822 raw_loss=0.421597 cond_frac=0.819 lr=1.500e-04
+[epoch 184/600] train_loss=0.441253 raw_loss=0.428696 cond_frac=0.824 lr=1.500e-04
+[epoch 185/600] train_loss=0.447066 raw_loss=0.433459 cond_frac=0.820 lr=1.500e-04
+[epoch 186/600] train_loss=0.470545 raw_loss=0.452571 cond_frac=0.823 lr=1.500e-04
+[epoch 187/600] train_loss=0.446010 raw_loss=0.429473 cond_frac=0.823 lr=1.500e-04
+[epoch 188/600] train_loss=0.440771 raw_loss=0.427766 cond_frac=0.819 lr=1.500e-04
+[epoch 189/600] train_loss=0.439842 raw_loss=0.425818 cond_frac=0.821 lr=1.500e-04
+[epoch 190/600] train_loss=0.444085 raw_loss=0.430715 cond_frac=0.822 lr=1.500e-04
+[epoch 191/600] train_loss=0.437778 raw_loss=0.426360 cond_frac=0.823 lr=1.500e-04
+[epoch 192/600] train_loss=0.438139 raw_loss=0.425513 cond_frac=0.823 lr=1.500e-04
+[epoch 193/600] train_loss=0.451343 raw_loss=0.437744 cond_frac=0.820 lr=1.500e-04
+[epoch 194/600] train_loss=0.441589 raw_loss=0.427499 cond_frac=0.821 lr=1.500e-04
+[epoch 195/600] train_loss=0.434434 raw_loss=0.421858 cond_frac=0.821 lr=1.500e-04
+[epoch 196/600] train_loss=0.435984 raw_loss=0.423724 cond_frac=0.819 lr=1.500e-04
+[epoch 197/600] train_loss=0.433612 raw_loss=0.420784 cond_frac=0.820 lr=1.500e-04
+[epoch 198/600] train_loss=0.426601 raw_loss=0.415522 cond_frac=0.821 lr=1.500e-04
+[epoch 199/600] train_loss=0.423925 raw_loss=0.415078 cond_frac=0.818 lr=1.500e-04
+[epoch 200/600] train_loss=0.428469 raw_loss=0.422491 cond_frac=0.824 lr=1.500e-04
+[epoch 201/600] train_loss=0.419775 raw_loss=0.414426 cond_frac=0.826 lr=1.500e-04
+[epoch 202/600] train_loss=0.411335 raw_loss=0.404849 cond_frac=0.818 lr=1.500e-04
+[epoch 203/600] train_loss=0.409305 raw_loss=0.405632 cond_frac=0.825 lr=1.500e-04
+[epoch 204/600] train_loss=0.409779 raw_loss=0.404230 cond_frac=0.821 lr=1.500e-04
+[epoch 205/600] train_loss=0.416812 raw_loss=0.407451 cond_frac=0.823 lr=1.500e-04
+[epoch 206/600] train_loss=0.412445 raw_loss=0.403846 cond_frac=0.819 lr=1.500e-04
+[epoch 207/600] train_loss=0.403753 raw_loss=0.396184 cond_frac=0.825 lr=1.500e-04
+[epoch 208/600] train_loss=0.404771 raw_loss=0.396000 cond_frac=0.819 lr=1.500e-04
+[epoch 209/600] train_loss=0.406456 raw_loss=0.399195 cond_frac=0.820 lr=1.500e-04
+[epoch 210/600] train_loss=0.447065 raw_loss=0.434496 cond_frac=0.818 lr=1.500e-04
+[epoch 211/600] train_loss=0.509655 raw_loss=0.501049 cond_frac=0.827 lr=1.500e-04
+[epoch 212/600] train_loss=0.467412 raw_loss=0.456569 cond_frac=0.817 lr=1.500e-04
+[epoch 213/600] train_loss=0.402887 raw_loss=0.395634 cond_frac=0.819 lr=1.500e-04
+[epoch 214/600] train_loss=0.401416 raw_loss=0.395186 cond_frac=0.827 lr=1.500e-04
+[epoch 215/600] train_loss=0.395622 raw_loss=0.387263 cond_frac=0.820 lr=1.500e-04
+[epoch 216/600] train_loss=0.405853 raw_loss=0.398054 cond_frac=0.823 lr=1.500e-04
+[epoch 217/600] train_loss=0.400077 raw_loss=0.393175 cond_frac=0.816 lr=1.500e-04
+[epoch 218/600] train_loss=0.408696 raw_loss=0.397462 cond_frac=0.821 lr=1.500e-04
+[epoch 219/600] train_loss=0.399788 raw_loss=0.390398 cond_frac=0.820 lr=1.500e-04
+[epoch 220/600] train_loss=0.402547 raw_loss=0.394449 cond_frac=0.823 lr=1.500e-04
+[epoch 221/600] train_loss=0.398092 raw_loss=0.391122 cond_frac=0.817 lr=1.500e-04
+[epoch 222/600] train_loss=0.402843 raw_loss=0.393277 cond_frac=0.823 lr=1.500e-04
+[epoch 223/600] train_loss=0.396531 raw_loss=0.391278 cond_frac=0.821 lr=1.500e-04
+[epoch 224/600] train_loss=0.395194 raw_loss=0.389889 cond_frac=0.819 lr=1.500e-04
+[epoch 225/600] train_loss=0.402281 raw_loss=0.394610 cond_frac=0.824 lr=1.500e-04
+[epoch 226/600] train_loss=0.395274 raw_loss=0.389851 cond_frac=0.820 lr=1.500e-04
+[epoch 227/600] train_loss=0.392096 raw_loss=0.387104 cond_frac=0.818 lr=1.500e-04
+[epoch 228/600] train_loss=0.388804 raw_loss=0.383620 cond_frac=0.821 lr=1.500e-04
+[epoch 229/600] train_loss=0.392153 raw_loss=0.384164 cond_frac=0.815 lr=1.500e-04
+[epoch 230/600] train_loss=0.394659 raw_loss=0.387182 cond_frac=0.822 lr=1.500e-04
+[epoch 231/600] train_loss=0.393454 raw_loss=0.389650 cond_frac=0.819 lr=1.500e-04
+[epoch 232/600] train_loss=0.393067 raw_loss=0.390900 cond_frac=0.813 lr=1.500e-04
+[epoch 233/600] train_loss=0.389760 raw_loss=0.382752 cond_frac=0.812 lr=1.500e-04
+[epoch 234/600] train_loss=0.402051 raw_loss=0.395171 cond_frac=0.817 lr=1.500e-04
+[epoch 235/600] train_loss=0.383360 raw_loss=0.377296 cond_frac=0.823 lr=1.500e-04
+[epoch 236/600] train_loss=0.397209 raw_loss=0.388045 cond_frac=0.824 lr=1.500e-04
+[epoch 237/600] train_loss=0.391617 raw_loss=0.386379 cond_frac=0.815 lr=1.500e-04
+[epoch 238/600] train_loss=0.382811 raw_loss=0.378152 cond_frac=0.823 lr=1.500e-04
+[epoch 239/600] train_loss=0.393584 raw_loss=0.385971 cond_frac=0.822 lr=1.500e-04
+[epoch 240/600] train_loss=0.386775 raw_loss=0.382138 cond_frac=0.818 lr=1.500e-04
+[epoch 241/600] train_loss=0.387759 raw_loss=0.382051 cond_frac=0.816 lr=1.500e-04
+[epoch 242/600] train_loss=0.387013 raw_loss=0.382931 cond_frac=0.816 lr=1.500e-04
+[epoch 243/600] train_loss=0.390004 raw_loss=0.385949 cond_frac=0.817 lr=1.500e-04
+[epoch 244/600] train_loss=0.392830 raw_loss=0.388204 cond_frac=0.820 lr=1.500e-04
+[epoch 245/600] train_loss=0.491938 raw_loss=0.479812 cond_frac=0.824 lr=1.500e-04
+[epoch 246/600] train_loss=0.460895 raw_loss=0.451443 cond_frac=0.820 lr=1.500e-04
+[epoch 247/600] train_loss=0.420638 raw_loss=0.415242 cond_frac=0.822 lr=1.500e-04
+[epoch 248/600] train_loss=0.389642 raw_loss=0.383908 cond_frac=0.819 lr=1.500e-04
+[epoch 249/600] train_loss=0.382029 raw_loss=0.377445 cond_frac=0.817 lr=1.500e-04
+[epoch 250/600] train_loss=0.378502 raw_loss=0.374694 cond_frac=0.822 lr=1.500e-04
+[epoch 251/600] train_loss=0.382238 raw_loss=0.375865 cond_frac=0.819 lr=1.500e-04
+[epoch 252/600] train_loss=0.379434 raw_loss=0.372308 cond_frac=0.817 lr=1.500e-04
+[epoch 253/600] train_loss=0.465894 raw_loss=0.452677 cond_frac=0.820 lr=1.500e-04
+[epoch 254/600] train_loss=0.455293 raw_loss=0.443012 cond_frac=0.823 lr=1.500e-04
+[epoch 255/600] train_loss=0.444184 raw_loss=0.434144 cond_frac=0.821 lr=1.500e-04
+[early stop] validation val_diag_mse_raw did not improve for 20 evals after epoch 57
+[loaded for eval] /home/user01/aiotlab/htien/llaplace_df/ldt/output/noaa_uk/pred-168/llapdiff_pred-168_best.pt
+
+Pipeline summary:
+pred | vae                         | summarizer                  | llapdiff_ckpt                                                                                | best_val | crps     | mae      | mse     
+-----+-----------------------------+-----------------------------+----------------------------------------------------------------------------------------------+----------+----------+----------+---------
+168  | skipped (checkpoint_exists) | skipped (checkpoint_exists) | /home/user01/aiotlab/htien/llaplace_df/ldt/output/noaa_uk/pred-168/llapdiff_pred-168_best.pt | None     | 0.576191 | 0.780294 | 0.898542
+Saved pipeline summary to ldt/results/noaa_uk_pred168.json
+pip_system_certs: ERROR: could not register module: No module named 'wrapt'
+sizes: (242879, 15912, 75803)
+V: torch.Size([5, 221, 200, 10]) T: torch.Size([5, 221, 200, 10]) y: torch.Size([5, 221, 100])
+LLapDiff target_dim: 1
+Using device: cuda
+[diffusion cache] planning cache at ldt/diffusion_cache/us_equity/pred-100_batch-5
+[diffusion cache] building rows=1514 latent_dtype=float32 summary_dtype=float16
+[diffusion cache] wrote train: rows=1099
+[diffusion cache] wrote val: rows=72
+[diffusion cache] wrote test: rows=343
+[epoch 1/600] train_loss=1.022295 raw_loss=1.012605 cond_frac=0.827 lr=3.000e-06
+[epoch 2/600] train_loss=1.005493 raw_loss=1.011545 cond_frac=0.823 lr=5.275e-06
+[epoch 3/600] train_loss=1.009451 raw_loss=1.018284 cond_frac=0.817 lr=7.907e-06
+[epoch 4/600] train_loss=0.999146 raw_loss=0.993537 cond_frac=0.815 lr=1.054e-05
+[epoch 5/600] train_loss=0.998561 raw_loss=1.000013 cond_frac=0.813 lr=1.317e-05
+[epoch 6/600] train_loss=1.017932 raw_loss=1.008356 cond_frac=0.812 lr=1.580e-05
+[epoch 7/600] train_loss=1.024593 raw_loss=1.021939 cond_frac=0.825 lr=1.843e-05
+[epoch 8/600] train_loss=1.001050 raw_loss=1.000465 cond_frac=0.824 lr=2.106e-05
+[epoch 9/600] train_loss=1.001585 raw_loss=0.995826 cond_frac=0.815 lr=2.370e-05
+[epoch 10/600] train_loss=0.992058 raw_loss=0.992901 cond_frac=0.812 lr=2.633e-05
+[epoch 11/600] train_loss=0.976597 raw_loss=0.999752 cond_frac=0.807 lr=2.896e-05
+[epoch 12/600] train_loss=1.007861 raw_loss=1.003081 cond_frac=0.823 lr=3.159e-05
+[epoch 13/600] train_loss=0.975705 raw_loss=0.991279 cond_frac=0.839 lr=3.422e-05
+[epoch 14/600] train_loss=0.994475 raw_loss=0.999546 cond_frac=0.822 lr=3.685e-05
+[epoch 15/600] train_loss=0.991726 raw_loss=1.001596 cond_frac=0.840 lr=3.949e-05
+[epoch 16/600] train_loss=1.006034 raw_loss=1.000340 cond_frac=0.813 lr=4.212e-05
+[epoch 17/600] train_loss=1.012542 raw_loss=1.001922 cond_frac=0.815 lr=4.475e-05
+[epoch 18/600] train_loss=0.988410 raw_loss=1.000979 cond_frac=0.820 lr=4.738e-05
+[epoch 19/600] train_loss=0.987192 raw_loss=0.992787 cond_frac=0.809 lr=5.001e-05
+[epoch 20/600] train_loss=0.982736 raw_loss=0.991484 cond_frac=0.849 lr=5.264e-05
+[epoch 21/600] train_loss=0.986920 raw_loss=0.995115 cond_frac=0.817 lr=5.528e-05
+[epoch 22/600] train_loss=0.972662 raw_loss=0.987100 cond_frac=0.834 lr=5.791e-05
+[epoch 23/600] train_loss=0.973693 raw_loss=0.987041 cond_frac=0.820 lr=6.054e-05
+[epoch 24/600] train_loss=0.990372 raw_loss=0.992308 cond_frac=0.832 lr=6.317e-05
+[epoch 25/600] train_loss=0.982973 raw_loss=0.984148 cond_frac=0.813 lr=6.580e-05
+[epoch 26/600] train_loss=0.975485 raw_loss=0.977318 cond_frac=0.804 lr=6.843e-05
+[epoch 27/600] train_loss=0.987352 raw_loss=0.976326 cond_frac=0.813 lr=7.106e-05
+[epoch 28/600] train_loss=0.960122 raw_loss=0.974490 cond_frac=0.823 lr=7.370e-05
+[epoch 29/600] train_loss=0.966217 raw_loss=0.965045 cond_frac=0.827 lr=7.633e-05
+[epoch 30/600] train_loss=0.971130 raw_loss=0.976684 cond_frac=0.796 lr=7.896e-05
+[epoch 31/600] train_loss=0.950027 raw_loss=0.965012 cond_frac=0.808 lr=8.159e-05
+[epoch 32/600] train_loss=0.965049 raw_loss=0.975410 cond_frac=0.827 lr=8.422e-05
+[epoch 33/600] train_loss=0.973481 raw_loss=0.982107 cond_frac=0.828 lr=8.685e-05
+[epoch 34/600] train_loss=0.969405 raw_loss=0.974896 cond_frac=0.844 lr=8.949e-05
+[epoch 35/600] train_loss=0.979724 raw_loss=0.968500 cond_frac=0.815 lr=9.212e-05
+[epoch 36/600] train_loss=0.963881 raw_loss=0.968369 cond_frac=0.817 lr=9.475e-05
+[epoch 37/600] train_loss=0.962414 raw_loss=0.973000 cond_frac=0.818 lr=9.738e-05
+[epoch 38/600] train_loss=0.952058 raw_loss=0.970349 cond_frac=0.820 lr=1.000e-04
+[epoch 39/600] train_loss=0.946473 raw_loss=0.965523 cond_frac=0.810 lr=1.026e-04
+[epoch 40/600] train_loss=0.956239 raw_loss=0.956713 cond_frac=0.791 lr=1.053e-04
+[epoch 41/600] train_loss=0.940617 raw_loss=0.952785 cond_frac=0.813 lr=1.079e-04
+[epoch 42/600] train_loss=0.946634 raw_loss=0.963645 cond_frac=0.814 lr=1.105e-04
+[epoch 43/600] train_loss=0.919578 raw_loss=0.949551 cond_frac=0.820 lr=1.132e-04
+[epoch 44/600] train_loss=0.956600 raw_loss=0.966700 cond_frac=0.813 lr=1.158e-04
+[epoch 45/600] train_loss=0.945800 raw_loss=0.965033 cond_frac=0.830 lr=1.184e-04
+[epoch 46/600] train_loss=0.935273 raw_loss=0.944601 cond_frac=0.831 lr=1.211e-04
+[epoch 47/600] train_loss=0.939809 raw_loss=0.957203 cond_frac=0.840 lr=1.237e-04
+[epoch 48/600] train_loss=0.938337 raw_loss=0.953484 cond_frac=0.825 lr=1.263e-04
+[epoch 49/600] train_loss=0.926238 raw_loss=0.931869 cond_frac=0.808 lr=1.290e-04
+[epoch 50/600] train_loss=0.919625 raw_loss=0.940809 cond_frac=0.817 lr=1.316e-04
+[epoch 51/600] train_loss=0.936078 raw_loss=0.936001 cond_frac=0.808 lr=1.342e-04
+[epoch 52/600] train_loss=0.934008 raw_loss=0.950994 cond_frac=0.814 lr=1.369e-04
+[epoch 53/600] train_loss=0.933680 raw_loss=0.938392 cond_frac=0.814 lr=1.395e-04
+[epoch 54/600] train_loss=0.932173 raw_loss=0.944729 cond_frac=0.816 lr=1.421e-04
+[epoch 55/600] train_loss=0.918979 raw_loss=0.927866 cond_frac=0.835 lr=1.447e-04
+[epoch 56/600] train_loss=0.924006 raw_loss=0.938152 cond_frac=0.813 lr=1.474e-04
+[epoch 57/600] train_loss=0.941758 raw_loss=0.955192 cond_frac=0.816 lr=1.500e-04
+[epoch 58/600] train_loss=0.913965 raw_loss=0.917766 cond_frac=0.810 lr=1.500e-04
+[epoch 59/600] train_loss=0.913508 raw_loss=0.944833 cond_frac=0.811 lr=1.500e-04
+[epoch 60/600] train_loss=0.913949 raw_loss=0.921629 cond_frac=0.809 lr=1.500e-04
+[epoch 61/600] train_loss=0.922615 raw_loss=0.947128 cond_frac=0.821 lr=1.500e-04
+[epoch 62/600] train_loss=0.939009 raw_loss=0.931077 cond_frac=0.840 lr=1.500e-04
+[epoch 63/600] train_loss=0.911180 raw_loss=0.937962 cond_frac=0.811 lr=1.500e-04
+[epoch 64/600] train_loss=0.915889 raw_loss=0.941345 cond_frac=0.816 lr=1.500e-04
+[epoch 65/600] train_loss=0.910614 raw_loss=0.930515 cond_frac=0.825 lr=1.500e-04
+[epoch 66/600] train_loss=0.910934 raw_loss=0.919818 cond_frac=0.832 lr=1.500e-04
+[epoch 67/600] train_loss=0.920444 raw_loss=0.947537 cond_frac=0.833 lr=1.500e-04
+[epoch 68/600] train_loss=0.916314 raw_loss=0.928581 cond_frac=0.816 lr=1.500e-04
+[epoch 69/600] train_loss=0.931236 raw_loss=0.946442 cond_frac=0.818 lr=1.500e-04
+[epoch 70/600] train_loss=0.905673 raw_loss=0.916233 cond_frac=0.835 lr=1.500e-04
+[epoch 71/600] train_loss=0.910084 raw_loss=0.916569 cond_frac=0.827 lr=1.500e-04
+[epoch 72/600] train_loss=0.890872 raw_loss=0.912580 cond_frac=0.828 lr=1.500e-04
+[epoch 73/600] train_loss=0.894462 raw_loss=0.929939 cond_frac=0.814 lr=1.500e-04
+[epoch 74/600] train_loss=0.899941 raw_loss=0.932557 cond_frac=0.809 lr=1.500e-04
+[epoch 75/600] train_loss=0.899518 raw_loss=0.922422 cond_frac=0.829 lr=1.500e-04
+[epoch 76/600] train_loss=0.895154 raw_loss=0.917815 cond_frac=0.833 lr=1.500e-04
+[epoch 77/600] train_loss=0.894607 raw_loss=0.922550 cond_frac=0.834 lr=1.500e-04
+[epoch 78/600] train_loss=0.890873 raw_loss=0.917457 cond_frac=0.804 lr=1.500e-04
+[epoch 79/600] train_loss=0.905947 raw_loss=0.930537 cond_frac=0.816 lr=1.500e-04
+[epoch 80/600] train_loss=0.921628 raw_loss=0.937177 cond_frac=0.817 lr=1.500e-04
+[epoch 81/600] train_loss=0.907981 raw_loss=0.933481 cond_frac=0.817 lr=1.500e-04
+[epoch 82/600] train_loss=0.905937 raw_loss=0.922725 cond_frac=0.828 lr=1.500e-04
+[epoch 83/600] train_loss=0.905441 raw_loss=0.911927 cond_frac=0.820 lr=1.500e-04
+[epoch 84/600] train_loss=0.903121 raw_loss=0.920154 cond_frac=0.808 lr=1.500e-04
+[epoch 85/600] train_loss=0.893072 raw_loss=0.909467 cond_frac=0.810 lr=1.500e-04
+[epoch 86/600] train_loss=0.882055 raw_loss=0.925125 cond_frac=0.828 lr=1.500e-04
+[epoch 87/600] train_loss=0.900253 raw_loss=0.912132 cond_frac=0.817 lr=1.500e-04
+[epoch 88/600] train_loss=0.875559 raw_loss=0.915236 cond_frac=0.796 lr=1.500e-04
+[epoch 89/600] train_loss=0.897367 raw_loss=0.908566 cond_frac=0.821 lr=1.500e-04
+[epoch 90/600] train_loss=0.880431 raw_loss=0.910626 cond_frac=0.831 lr=1.500e-04
+[epoch 91/600] train_loss=0.891304 raw_loss=0.900419 cond_frac=0.803 lr=1.500e-04
+[epoch 92/600] train_loss=0.888165 raw_loss=0.907389 cond_frac=0.827 lr=1.500e-04
+[epoch 93/600] train_loss=0.891545 raw_loss=0.910370 cond_frac=0.814 lr=1.500e-04
+[epoch 94/600] train_loss=0.879748 raw_loss=0.918378 cond_frac=0.819 lr=1.500e-04
+[epoch 95/600] train_loss=0.867404 raw_loss=0.902276 cond_frac=0.821 lr=1.500e-04
+[epoch 96/600] train_loss=0.884766 raw_loss=0.898114 cond_frac=0.825 lr=1.500e-04
+[epoch 97/600] train_loss=0.887334 raw_loss=0.906093 cond_frac=0.801 lr=1.500e-04
+[epoch 98/600] train_loss=0.878361 raw_loss=0.899812 cond_frac=0.829 lr=1.500e-04
+[epoch 99/600] train_loss=0.879685 raw_loss=0.899001 cond_frac=0.839 lr=1.500e-04
+[epoch 100/600] train_loss=0.878786 raw_loss=0.904430 cond_frac=0.826 lr=1.500e-04
+[epoch 101/600] train_loss=0.886513 raw_loss=0.910638 cond_frac=0.817 lr=1.500e-04
+[epoch 102/600] train_loss=0.872915 raw_loss=0.900133 cond_frac=0.829 lr=1.500e-04
+[epoch 103/600] train_loss=0.862404 raw_loss=0.888434 cond_frac=0.847 lr=1.500e-04
+[epoch 104/600] train_loss=0.881953 raw_loss=0.900207 cond_frac=0.835 lr=1.500e-04
+[epoch 105/600] train_loss=0.866344 raw_loss=0.902162 cond_frac=0.813 lr=1.500e-04
+[epoch 106/600] train_loss=0.879233 raw_loss=0.905198 cond_frac=0.809 lr=1.500e-04
+[epoch 107/600] train_loss=0.872551 raw_loss=0.897127 cond_frac=0.827 lr=1.500e-04
+[epoch 108/600] train_loss=0.865854 raw_loss=0.895754 cond_frac=0.812 lr=1.500e-04
+[epoch 109/600] train_loss=0.890952 raw_loss=0.894450 cond_frac=0.820 lr=1.500e-04
+[epoch 110/600] train_loss=0.878201 raw_loss=0.899509 cond_frac=0.823 lr=1.500e-04
+[epoch 111/600] train_loss=0.862455 raw_loss=0.895955 cond_frac=0.813 lr=1.500e-04
+[epoch 112/600] train_loss=0.872640 raw_loss=0.894188 cond_frac=0.796 lr=1.500e-04
+[epoch 113/600] train_loss=0.877437 raw_loss=0.903284 cond_frac=0.825 lr=1.500e-04
+[epoch 114/600] train_loss=0.879731 raw_loss=0.894606 cond_frac=0.820 lr=1.500e-04
+[early stop] validation val_diag_mse_raw did not improve for 20 evals after epoch 57
+[loaded for eval] /home/user01/aiotlab/htien/llaplace_df/ldt/output/us_equity/pred-100/llapdiff_pred-100_best.pt
+
+Pipeline summary:
+pred | vae                         | summarizer                  | llapdiff_ckpt                                                                                  | best_val | crps     | mae      | mse     
+-----+-----------------------------+-----------------------------+------------------------------------------------------------------------------------------------+----------+----------+----------+---------
+100  | skipped (checkpoint_exists) | skipped (checkpoint_exists) | /home/user01/aiotlab/htien/llaplace_df/ldt/output/us_equity/pred-100/llapdiff_pred-100_best.pt | None     | 0.430910 | 0.574799 | 0.657033
+Saved pipeline summary to ldt/results/us_equity_pred100.json
+pip_system_certs: ERROR: could not register module: No module named 'wrapt'
+sizes: (143445, 10118, 42448)
+V: torch.Size([5, 118, 200, 10]) T: torch.Size([5, 118, 200, 10]) y: torch.Size([5, 118, 100])
+LLapDiff target_dim: 1
+Using device: cuda
+[diffusion cache] planning cache at ldt/diffusion_cache/crypto/pred-100_batch-5
+[diffusion cache] building rows=1694 latent_dtype=float32 summary_dtype=float16
+[diffusion cache] wrote train: rows=1225
+[diffusion cache] wrote val: rows=90
+[diffusion cache] wrote test: rows=379
+[epoch 1/600] train_loss=1.060688 raw_loss=1.076832 cond_frac=0.821 lr=3.000e-06
+[epoch 2/600] train_loss=1.019957 raw_loss=1.018050 cond_frac=0.851 lr=5.274e-06
+[epoch 3/600] train_loss=1.020713 raw_loss=1.016670 cond_frac=0.834 lr=7.905e-06
+[epoch 4/600] train_loss=1.014349 raw_loss=1.008994 cond_frac=0.826 lr=1.054e-05
+[epoch 5/600] train_loss=1.021502 raw_loss=1.009896 cond_frac=0.830 lr=1.317e-05
+[epoch 6/600] train_loss=1.020824 raw_loss=1.005960 cond_frac=0.824 lr=1.580e-05
+[epoch 7/600] train_loss=1.004379 raw_loss=0.996323 cond_frac=0.813 lr=1.843e-05
+[epoch 8/600] train_loss=0.979935 raw_loss=0.993792 cond_frac=0.810 lr=2.106e-05
+[epoch 9/600] train_loss=0.999422 raw_loss=1.011873 cond_frac=0.812 lr=2.369e-05
+[epoch 10/600] train_loss=0.996363 raw_loss=1.004832 cond_frac=0.823 lr=2.633e-05
+[epoch 11/600] train_loss=0.987976 raw_loss=0.994079 cond_frac=0.822 lr=2.896e-05
+[epoch 12/600] train_loss=0.999403 raw_loss=1.004183 cond_frac=0.823 lr=3.159e-05
+[epoch 13/600] train_loss=0.979104 raw_loss=0.996227 cond_frac=0.845 lr=3.422e-05
+[epoch 14/600] train_loss=0.992806 raw_loss=0.990792 cond_frac=0.827 lr=3.685e-05
+[epoch 15/600] train_loss=0.991368 raw_loss=0.985170 cond_frac=0.831 lr=3.948e-05
+[epoch 16/600] train_loss=0.985242 raw_loss=0.995449 cond_frac=0.828 lr=4.212e-05
+[epoch 17/600] train_loss=0.983172 raw_loss=0.992557 cond_frac=0.818 lr=4.475e-05
+[epoch 18/600] train_loss=1.006340 raw_loss=1.001638 cond_frac=0.807 lr=4.738e-05
+[epoch 19/600] train_loss=0.985820 raw_loss=0.989095 cond_frac=0.812 lr=5.001e-05
+[epoch 20/600] train_loss=0.973862 raw_loss=0.982293 cond_frac=0.811 lr=5.264e-05
+[epoch 21/600] train_loss=0.988756 raw_loss=0.987063 cond_frac=0.806 lr=5.527e-05
+[epoch 22/600] train_loss=0.975484 raw_loss=0.987368 cond_frac=0.825 lr=5.791e-05
+[epoch 23/600] train_loss=0.983541 raw_loss=0.991014 cond_frac=0.829 lr=6.054e-05
+[epoch 24/600] train_loss=0.983303 raw_loss=0.981989 cond_frac=0.807 lr=6.317e-05
+[epoch 25/600] train_loss=0.971223 raw_loss=0.981621 cond_frac=0.816 lr=6.580e-05
+[epoch 26/600] train_loss=0.989322 raw_loss=0.989555 cond_frac=0.827 lr=6.843e-05
+[epoch 27/600] train_loss=0.998708 raw_loss=0.987736 cond_frac=0.805 lr=7.106e-05
+[epoch 28/600] train_loss=0.990142 raw_loss=0.983624 cond_frac=0.838 lr=7.369e-05
+[epoch 29/600] train_loss=0.981175 raw_loss=0.987873 cond_frac=0.819 lr=7.633e-05
+[epoch 30/600] train_loss=0.978476 raw_loss=0.979782 cond_frac=0.813 lr=7.896e-05
+[epoch 31/600] train_loss=0.970538 raw_loss=0.982131 cond_frac=0.824 lr=8.159e-05
+[epoch 32/600] train_loss=0.980179 raw_loss=0.976492 cond_frac=0.824 lr=8.422e-05
+[epoch 33/600] train_loss=0.989914 raw_loss=0.978083 cond_frac=0.832 lr=8.685e-05
+[epoch 34/600] train_loss=0.981110 raw_loss=0.978386 cond_frac=0.825 lr=8.948e-05
+[epoch 35/600] train_loss=0.964044 raw_loss=0.981495 cond_frac=0.832 lr=9.212e-05
+[epoch 36/600] train_loss=0.975280 raw_loss=0.975922 cond_frac=0.809 lr=9.475e-05
+[epoch 37/600] train_loss=0.970380 raw_loss=0.979800 cond_frac=0.798 lr=9.738e-05
+[epoch 38/600] train_loss=0.962927 raw_loss=0.971461 cond_frac=0.807 lr=1.000e-04
+[epoch 39/600] train_loss=0.977731 raw_loss=0.970008 cond_frac=0.805 lr=1.026e-04
+[epoch 40/600] train_loss=0.965035 raw_loss=0.964494 cond_frac=0.827 lr=1.053e-04
+[epoch 41/600] train_loss=0.961533 raw_loss=0.970713 cond_frac=0.827 lr=1.079e-04
+[epoch 42/600] train_loss=0.954317 raw_loss=0.974018 cond_frac=0.822 lr=1.105e-04
+[epoch 43/600] train_loss=0.954454 raw_loss=0.968352 cond_frac=0.803 lr=1.132e-04
+[epoch 44/600] train_loss=0.965238 raw_loss=0.966964 cond_frac=0.818 lr=1.158e-04
+[epoch 45/600] train_loss=0.965908 raw_loss=0.974791 cond_frac=0.818 lr=1.184e-04
+[epoch 46/600] train_loss=0.963184 raw_loss=0.960493 cond_frac=0.814 lr=1.211e-04
+[epoch 47/600] train_loss=0.955836 raw_loss=0.959473 cond_frac=0.839 lr=1.237e-04
+[epoch 48/600] train_loss=0.944431 raw_loss=0.963344 cond_frac=0.805 lr=1.263e-04
+[epoch 49/600] train_loss=0.940915 raw_loss=0.959173 cond_frac=0.816 lr=1.290e-04
+[epoch 50/600] train_loss=0.947513 raw_loss=0.954451 cond_frac=0.820 lr=1.316e-04
+[epoch 51/600] train_loss=0.931160 raw_loss=0.953263 cond_frac=0.830 lr=1.342e-04
+[epoch 52/600] train_loss=0.929962 raw_loss=0.948997 cond_frac=0.817 lr=1.369e-04
+[epoch 53/600] train_loss=0.938880 raw_loss=0.948342 cond_frac=0.820 lr=1.395e-04
+[epoch 54/600] train_loss=0.947765 raw_loss=0.950376 cond_frac=0.807 lr=1.421e-04
+[epoch 55/600] train_loss=0.935698 raw_loss=0.957595 cond_frac=0.820 lr=1.447e-04
+[epoch 56/600] train_loss=0.933761 raw_loss=0.948136 cond_frac=0.830 lr=1.474e-04
+[epoch 57/600] train_loss=0.941301 raw_loss=0.959860 cond_frac=0.820 lr=1.500e-04
+[epoch 58/600] train_loss=0.931885 raw_loss=0.948856 cond_frac=0.821 lr=1.500e-04
+[epoch 59/600] train_loss=0.933536 raw_loss=0.940329 cond_frac=0.824 lr=1.500e-04
+[epoch 60/600] train_loss=0.932664 raw_loss=0.937332 cond_frac=0.827 lr=1.500e-04
+[epoch 61/600] train_loss=0.941999 raw_loss=0.943928 cond_frac=0.817 lr=1.500e-04
+[epoch 62/600] train_loss=0.911426 raw_loss=0.933874 cond_frac=0.796 lr=1.500e-04
+[epoch 63/600] train_loss=0.932281 raw_loss=0.941600 cond_frac=0.812 lr=1.500e-04
+[epoch 64/600] train_loss=0.911387 raw_loss=0.944511 cond_frac=0.834 lr=1.500e-04
+[epoch 65/600] train_loss=0.923882 raw_loss=0.940568 cond_frac=0.826 lr=1.500e-04
+[epoch 66/600] train_loss=0.925760 raw_loss=0.933008 cond_frac=0.821 lr=1.500e-04
+[epoch 67/600] train_loss=0.915336 raw_loss=0.934869 cond_frac=0.820 lr=1.500e-04
+[epoch 68/600] train_loss=0.907141 raw_loss=0.936578 cond_frac=0.807 lr=1.500e-04
+[epoch 69/600] train_loss=0.922182 raw_loss=0.940269 cond_frac=0.830 lr=1.500e-04
+[epoch 70/600] train_loss=0.915625 raw_loss=0.926058 cond_frac=0.811 lr=1.500e-04
+[epoch 71/600] train_loss=0.909379 raw_loss=0.933976 cond_frac=0.817 lr=1.500e-04
+[epoch 72/600] train_loss=0.904967 raw_loss=0.935339 cond_frac=0.836 lr=1.500e-04
+[epoch 73/600] train_loss=0.912936 raw_loss=0.931531 cond_frac=0.801 lr=1.500e-04
+[epoch 74/600] train_loss=0.909564 raw_loss=0.925371 cond_frac=0.811 lr=1.500e-04
+[epoch 75/600] train_loss=0.914943 raw_loss=0.935487 cond_frac=0.829 lr=1.500e-04
+[epoch 76/600] train_loss=0.912541 raw_loss=0.938009 cond_frac=0.833 lr=1.500e-04
+[epoch 77/600] train_loss=0.911844 raw_loss=0.931270 cond_frac=0.812 lr=1.500e-04
+[epoch 78/600] train_loss=0.896316 raw_loss=0.926863 cond_frac=0.815 lr=1.500e-04
+[epoch 79/600] train_loss=0.903476 raw_loss=0.923589 cond_frac=0.814 lr=1.500e-04
+[epoch 80/600] train_loss=0.899324 raw_loss=0.922134 cond_frac=0.820 lr=1.500e-04
+[epoch 81/600] train_loss=0.906123 raw_loss=0.921244 cond_frac=0.813 lr=1.500e-04
+[epoch 82/600] train_loss=0.895702 raw_loss=0.913781 cond_frac=0.811 lr=1.500e-04
+[epoch 83/600] train_loss=0.898403 raw_loss=0.920023 cond_frac=0.823 lr=1.500e-04
+[epoch 84/600] train_loss=0.908932 raw_loss=0.931966 cond_frac=0.820 lr=1.500e-04
+[epoch 85/600] train_loss=0.894401 raw_loss=0.918039 cond_frac=0.824 lr=1.500e-04
+[epoch 86/600] train_loss=0.892961 raw_loss=0.919599 cond_frac=0.817 lr=1.500e-04
+[epoch 87/600] train_loss=0.899887 raw_loss=0.922835 cond_frac=0.823 lr=1.500e-04
+[epoch 88/600] train_loss=0.908300 raw_loss=0.926205 cond_frac=0.822 lr=1.500e-04
+[epoch 89/600] train_loss=0.895977 raw_loss=0.912353 cond_frac=0.842 lr=1.500e-04
+[epoch 90/600] train_loss=0.895894 raw_loss=0.920754 cond_frac=0.808 lr=1.500e-04
+[epoch 91/600] train_loss=0.895025 raw_loss=0.905846 cond_frac=0.824 lr=1.500e-04
+[epoch 92/600] train_loss=0.887591 raw_loss=0.904696 cond_frac=0.833 lr=1.500e-04
+[early stop] validation val_diag_mse_raw did not improve for 20 evals after epoch 57
+[loaded for eval] /home/user01/aiotlab/htien/llaplace_df/ldt/output/crypto/pred-100/llapdiff_pred-100_best.pt
+
+Pipeline summary:
+pred | vae                         | summarizer                  | llapdiff_ckpt                                                                               | best_val | crps     | mae      | mse     
+-----+-----------------------------+-----------------------------+---------------------------------------------------------------------------------------------+----------+----------+----------+---------
+100  | skipped (checkpoint_exists) | skipped (checkpoint_exists) | /home/user01/aiotlab/htien/llaplace_df/ldt/output/crypto/pred-100/llapdiff_pred-100_best.pt | None     | 0.357459 | 0.469633 | 0.531422
+Saved pipeline summary to ldt/results/crypto_pred100.json
