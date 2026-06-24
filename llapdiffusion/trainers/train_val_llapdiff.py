@@ -1413,6 +1413,10 @@ def _llapdiff_model_kwargs(config_obj: object) -> Dict[str, object]:
         "analysis_summary_qk": bool(getattr(config_obj, "ANALYSIS_SUMMARY_QK", False)),
         "analysis_qk_use_raw_summary": bool(getattr(config_obj, "ANALYSIS_QK_USE_RAW", False)),
         "rho_conditioning_mode": str(getattr(config_obj, "RHO_CONDITIONING_MODE", "raw")),
+        "denoiser_modal_type": str(getattr(config_obj, "DENOISER_MODAL_TYPE", "lti")),
+        "chirp_num_basis": int(getattr(config_obj, "CHIRP_NUM_BASIS", 8)),
+        "chirp_rho_min": float(getattr(config_obj, "CHIRP_RHO_MIN", 1e-4)),
+        "chirp_use_mlp_residual": bool(getattr(config_obj, "CHIRP_USE_MLP_RESIDUAL", False)),
     }
 
 
@@ -1453,6 +1457,8 @@ def _llapdiff_config_from_checkpoint(payload: object) -> Dict[str, object]:
             if key != "cond_adapter"
         }
     config.setdefault("rho_conditioning_mode", "legacy_effective")
+    # Checkpoints predating the chirp variant are LTI; keep them loadable unchanged.
+    config.setdefault("denoiser_modal_type", "lti")
     return config
 
 

@@ -9,12 +9,16 @@ from torch.nn.utils import spectral_norm
 from llapdiffusion.models.time_utils import relative_time_offsets
 
 RHO_CONDITIONING_MODES = ("legacy_effective", "raw")
+MODAL_TYPES = ("lti", "chirp")
 
 __all__ = [
     "LaplaceTransformEncoder",
     "LaplacePseudoInverse",
+    "ChirpModalField",
     "RHO_CONDITIONING_MODES",
+    "MODAL_TYPES",
     "normalize_rho_conditioning_mode",
+    "normalize_modal_type",
 ]
 
 
@@ -23,6 +27,14 @@ def normalize_rho_conditioning_mode(mode: object) -> str:
     if value not in RHO_CONDITIONING_MODES:
         choices = ", ".join(RHO_CONDITIONING_MODES)
         raise ValueError(f"Unknown rho_conditioning_mode '{mode}'. Use one of: {choices}.")
+    return value
+
+
+def normalize_modal_type(mode: object) -> str:
+    value = str(mode).strip().lower()
+    if value not in MODAL_TYPES:
+        choices = ", ".join(MODAL_TYPES)
+        raise ValueError(f"Unknown denoiser_modal_type '{mode}'. Use one of: {choices}.")
     return value
 
 
@@ -224,6 +236,21 @@ class LaplaceTransformEncoder(nn.Module):
         sin_basis = decay * torch.sin(angle)
         return torch.cat([cos_basis, sin_basis], dim=-1).contiguous()
 
+    @staticmethod
+    def chirp_basis_matrix(
+        rho_bar: torch.Tensor, omega_bar: torch.Tensor
+    ) -> torch.Tensor:
+        """Time-varying damped basis from integrated poles, shape [B,T,2K].
+
+        Uses the already-integrated poles rho_bar(t)=int_0^t rho, omega_bar(t)=int_0^t omega
+        directly: e^{-rho_bar} [cos(omega_bar), sin(omega_bar)]. Constant poles recover the
+        LTI ``basis_matrix`` (rho_bar=rho*t, omega_bar=omega*t).
+        """
+        decay = torch.exp(-rho_bar)
+        cos_basis = decay * torch.cos(omega_bar)
+        sin_basis = decay * torch.sin(omega_bar)
+        return torch.cat([cos_basis, sin_basis], dim=-1).contiguous()
+
     def _theta_time_attention(
         self,
         x: torch.Tensor,
@@ -308,6 +335,123 @@ class LaplaceTransformEncoder(nn.Module):
         return theta, rho, omega, (t_rel if return_t_rel else None)
 
 
+class ChirpModalField(nn.Module):
+    """Time-varying ("chirp") modal poles in rotation-scaling normal form.
+
+    Produces per-mode instantaneous poles rho_k(t), omega_k(t) > 0 and their exact
+    integrals rho_bar_k(t)=int_0^t rho_k, omega_bar_k(t)=int_0^t omega_k via a fixed
+    nonnegative Fourier basis with closed-form antiderivative (the "P-exact"
+    parameterization):
+
+        phi_m(t) = 1 + cos(2 pi f_m t)            in [0, 2]
+        Phi_m(t) = t + sin(2 pi f_m t)/(2 pi f_m)  (antiderivative, Phi_m(0)=0)
+        rho_k(t)     = rho_floor_k + sum_m a^rho_km^2 phi_m(t)        (> 0)
+        rho_bar_k(t) = rho_floor_k t + sum_m a^rho_km^2 Phi_m(t)
+
+    The conditioning head ``to_coeffs`` is zero-initialized, so at init the coefficients
+    vanish and the field reduces to constant per-mode poles -- i.e. the chirp synthesizer
+    matches the LTI (LLapDiff) model. The integrals are analytic and evaluated in parallel
+    over all query times (no ODE solver). Positive instantaneous decay yields the
+    contraction ||Phi_k|| = e^{-rho_bar_k} <= 1 used for stability by construction.
+    """
+
+    def __init__(
+        self,
+        k: int,
+        cond_dim: int,
+        num_basis: int = 8,
+        rho_min: float = 1e-4,
+        omega_max: float = math.pi,
+    ) -> None:
+        super().__init__()
+        self.k = int(k)
+        self.cond_dim = int(cond_dim)
+        self.num_basis = int(num_basis)
+        self.rho_min = float(rho_min)
+        self.omega_max = float(omega_max)
+
+        # Per-mode floor poles (the constant term; init mirrors
+        # LaplaceTransformEncoder.reset_parameters so chirp@init == LTI base poles).
+        self._rho_base = nn.Parameter(torch.empty(self.k))
+        self._omega_base = nn.Parameter(torch.empty(self.k))
+
+        # Fixed nonnegative basis frequencies (cycles per unit relative-time).
+        freqs = torch.linspace(1.0, float(self.num_basis), self.num_basis)
+        self.register_buffer("basis_freqs", freqs, persistent=True)
+
+        # Conditioned time-varying coefficients (squared -> nonnegative). Zero-init so the
+        # model starts at the constant-pole (LTI) special case.
+        self.to_coeffs = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(self.cond_dim, 2 * self.k * self.num_basis),
+        )
+        nn.init.zeros_(self.to_coeffs[-1].weight)
+        nn.init.zeros_(self.to_coeffs[-1].bias)
+
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        with torch.no_grad():
+            # rho_floor in (0.01, 0.2) via rho_floor = rho_min + softplus(_rho_base)
+            target_rho = torch.empty_like(self._rho_base).uniform_(0.01, 0.2)
+            y = (target_rho - self.rho_min).clamp_min(1e-8)
+            self._rho_base.copy_(torch.log(torch.expm1(y)))
+
+            # omega_floor in [0.01, 0.95] * omega_max via omega_max * sigmoid(_omega_base)
+            low_log = math.log(0.01 * self.omega_max)
+            high_log = math.log(0.95 * self.omega_max)
+            target_omega = torch.exp(
+                torch.empty_like(self._omega_base).uniform_(low_log, high_log)
+            )
+            p = (target_omega / self.omega_max).clamp(1e-4, 1 - 1e-4)
+            self._omega_base.copy_(torch.log(p) - torch.log1p(-p))
+
+    def _floor_poles(
+        self, dtype: torch.dtype, device: torch.device
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        rho_floor = self.rho_min + F.softplus(self._rho_base.to(device=device, dtype=dtype))
+        omega_floor = self.omega_max * torch.sigmoid(
+            self._omega_base.to(device=device, dtype=dtype)
+        )
+        return rho_floor, omega_floor  # [K], [K]
+
+    def _coeffs(self, cond: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Nonnegative per-mode, per-basis coefficients a^2, each [B,K,M]."""
+        c = self.to_coeffs(cond).view(-1, 2, self.k, self.num_basis)
+        return c[:, 0].pow(2), c[:, 1].pow(2)
+
+    def _basis(self, t_rel: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Return (phi, Phi), each [B,T,M], for the nonnegative Fourier basis."""
+        two_pi_f = (2.0 * math.pi) * self.basis_freqs.to(
+            device=t_rel.device, dtype=t_rel.dtype
+        )  # [M]
+        wt = t_rel * two_pi_f  # [B,T,1]*[M] -> [B,T,M]
+        phi = 1.0 + torch.cos(wt)
+        Phi = t_rel + torch.sin(wt) / two_pi_f  # Phi_m(0)=0
+        return phi, Phi
+
+    def integrated(
+        self, cond: torch.Tensor, t_rel: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Integrated poles rho_bar, omega_bar at query times, each [B,T,K]."""
+        rho_floor, omega_floor = self._floor_poles(t_rel.dtype, t_rel.device)
+        a_rho2, a_omega2 = self._coeffs(cond)  # [B,K,M]
+        _, Phi = self._basis(t_rel)  # [B,T,M]
+        rho_var = torch.einsum("bkm,btm->btk", a_rho2, Phi)
+        omega_var = torch.einsum("bkm,btm->btk", a_omega2, Phi)
+        rho_bar = rho_floor.view(1, 1, self.k) * t_rel + rho_var
+        omega_bar = omega_floor.view(1, 1, self.k) * t_rel + omega_var
+        return rho_bar, omega_bar
+
+    def seed_poles(self, cond: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Instantaneous poles at t=0 (phi_m(0)=2), used to seed residue extraction; [B,K]."""
+        rho_floor, omega_floor = self._floor_poles(cond.dtype, cond.device)
+        a_rho2, a_omega2 = self._coeffs(cond)  # [B,K,M]
+        rho0 = rho_floor.view(1, self.k) + 2.0 * a_rho2.sum(dim=-1)
+        omega0 = omega_floor.view(1, self.k) + 2.0 * a_omega2.sum(dim=-1)
+        return rho0, omega0
+
+
 class LaplacePseudoInverse(nn.Module):
     """Explicit synthesis from residues and effective poles.
 
@@ -340,27 +484,34 @@ class LaplacePseudoInverse(nn.Module):
     def forward(
         self,
         theta: torch.Tensor,  # [B,2K,D]
-        rho: torch.Tensor,  # [B,K]
-        omega: torch.Tensor,  # [B,K]
+        rho: Optional[torch.Tensor] = None,  # [B,K]
+        omega: Optional[torch.Tensor] = None,  # [B,K]
         dt: Optional[torch.Tensor] = None,
         t: Optional[torch.Tensor] = None,
         target_T: Optional[int] = None,
+        rho_bar: Optional[torch.Tensor] = None,  # [B,T,K] (chirp / time-varying poles)
+        omega_bar: Optional[torch.Tensor] = None,  # [B,T,K]
     ) -> torch.Tensor:
         if theta.dim() != 3:
             raise ValueError("theta must be [B,2K,D]")
         B = theta.shape[0]
 
-        if t is not None:
-            T = t.shape[1]
-        elif dt is not None:
-            T = dt.shape[1]
-        elif target_T is not None:
-            T = int(target_T)
+        if rho_bar is not None and omega_bar is not None:
+            # Chirp path: integrated poles already evaluated at the query times.
+            basis = self.encoder.chirp_basis_matrix(rho_bar, omega_bar)  # [B,T,2K]
         else:
-            raise ValueError("Provide t or dt or target_T to determine output length")
-
-        t_rel = self.encoder.relative_time(B, T, theta.dtype, theta.device, dt=dt, t=t)
-        basis = self.encoder.basis_matrix(t_rel, rho, omega)  # [B,T,2K]
+            if rho is None or omega is None:
+                raise ValueError("Provide (rho, omega) or (rho_bar, omega_bar)")
+            if t is not None:
+                T = t.shape[1]
+            elif dt is not None:
+                T = dt.shape[1]
+            elif target_T is not None:
+                T = int(target_T)
+            else:
+                raise ValueError("Provide t or dt or target_T to determine output length")
+            t_rel = self.encoder.relative_time(B, T, theta.dtype, theta.device, dt=dt, t=t)
+            basis = self.encoder.basis_matrix(t_rel, rho, omega)  # [B,T,2K]
         y = torch.bmm(basis, theta)  # [B,T,D]
 
         if not self.use_mlp_residual:

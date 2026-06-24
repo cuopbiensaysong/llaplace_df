@@ -1,10 +1,16 @@
+import math
 from typing import Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from llapdiffusion.models.laptrans import LaplaceTransformEncoder, LaplacePseudoInverse
+from llapdiffusion.models.laptrans import (
+    ChirpModalField,
+    LaplacePseudoInverse,
+    LaplaceTransformEncoder,
+    normalize_modal_type,
+)
 
 
 def _init_small_out_proj(layer: nn.Linear, *, std: float = 1e-2) -> None:
@@ -305,11 +311,16 @@ class LapFormer(nn.Module):
         analysis_summary_qk: bool = False,
         analysis_qk_use_raw_summary: bool = False,
         rho_conditioning_mode: str = "raw",
+        denoiser_modal_type: str = "lti",
+        chirp_num_basis: int = 8,
+        chirp_rho_min: float = 1e-4,
+        chirp_use_mlp_residual: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_dim = int(hidden_dim)
         self.self_conditioning = bool(self_conditioning)
         self.k = int(laplace_k)
+        self.denoiser_modal_type = normalize_modal_type(denoiser_modal_type)
         pool_mode = str(summary_pool_mode).strip().lower()
         if pool_mode not in {"mean", "attn"}:
             raise ValueError(f"Unknown summary_pool_mode '{summary_pool_mode}'. Use 'mean' or 'attn'.")
@@ -331,10 +342,25 @@ class LapFormer(nn.Module):
             rho_conditioning_mode=self.rho_conditioning_mode,
             attn_dropout=attn_dropout,
         )
+        # Chirp (time-varying poles) replaces the LTI residual-MLP correction with
+        # stability-by-construction, so the residual MLP is off by default in that mode.
+        if self.denoiser_modal_type == "chirp":
+            synth_use_mlp_residual = bool(chirp_use_mlp_residual)
+            self.chirp_field = ChirpModalField(
+                k=self.k,
+                cond_dim=2 * hidden_dim,
+                num_basis=int(chirp_num_basis),
+                rho_min=float(chirp_rho_min),
+                omega_max=math.pi,
+            )
+        else:
+            synth_use_mlp_residual = use_mlp_residual
+            self.chirp_field = None
+
         self.synthesis = LaplacePseudoInverse(
             self.analysis,
             hidden_dim=hidden_dim,
-            use_mlp_residual=use_mlp_residual,
+            use_mlp_residual=synth_use_mlp_residual,
         )
 
         # Optional self-conditioning in modal space: project sc_feat -> theta_sc
@@ -500,8 +526,12 @@ class LapFormer(nn.Module):
             cond_summary_raw=cond_summary_raw,
         )
 
-        # Compute poles once per forward (reused for x and optional self-conditioning)
-        rho, omega = self.analysis.effective_poles(B, x_tokens.dtype, x_tokens.device, cond=cond_vec)
+        # Compute poles once per forward (reused for x and optional self-conditioning).
+        # For chirp, residue extraction is seeded with the instantaneous poles at t=0.
+        if self.chirp_field is not None:
+            rho, omega = self.chirp_field.seed_poles(cond_vec)
+        else:
+            rho, omega = self.analysis.effective_poles(B, x_tokens.dtype, x_tokens.device, cond=cond_vec)
 
         # Modal analysis: x_time -> theta
         theta, _, _, _ = self.analysis(
@@ -539,5 +569,10 @@ class LapFormer(nn.Module):
             )
 
         # Synthesis (parallel over all queried timestamps)
-        y_time = self.synthesis(theta, rho=rho, omega=omega, dt=dt, t=t, target_T=T)
+        if self.chirp_field is not None:
+            t_rel = self.analysis.relative_time(B, T, x_tokens.dtype, x_tokens.device, dt=dt, t=t)
+            rho_bar, omega_bar = self.chirp_field.integrated(cond_vec, t_rel)
+            y_time = self.synthesis(theta, rho_bar=rho_bar, omega_bar=omega_bar)
+        else:
+            y_time = self.synthesis(theta, rho=rho, omega=omega, dt=dt, t=t, target_T=T)
         return self.output_skip_scale * y_time + self.head_proj(self.head_norm(y_time))

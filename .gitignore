@@ -34,3 +34,6 @@ llapdiffusion/datasets/noaa_uk/
 # Local OS/editor files
 .DS_Store
 Thumbs.db
+
+method.pdf
+chirp_modal_method.md

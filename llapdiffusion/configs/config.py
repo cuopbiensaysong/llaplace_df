@@ -125,6 +125,13 @@ NUM_HEADS = 4
 LAPLACE_K = 256
 RHO_CONDITIONING_MODE = "raw"
 
+# Denoiser dynamical core: "lti" (constant poles + residual MLP, original LLapDiff) or
+# "chirp" (time-varying poles, stable-by-construction, residual MLP off by default).
+DENOISER_MODAL_TYPE = "lti"
+CHIRP_NUM_BASIS = 8
+CHIRP_RHO_MIN = 1e-4
+CHIRP_USE_MLP_RESIDUAL = False
+
 
 # ============================ Training Hyperparameters ============================
 

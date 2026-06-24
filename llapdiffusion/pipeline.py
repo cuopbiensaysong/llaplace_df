@@ -27,6 +27,8 @@ from llapdiffusion.target_artifacts import (
 
 COVERAGE_HELP = "fraction of observed context entries to hide; 0 disables induced missingness"
 PREDICT_TYPE_DIR_PREFIX = "predict"
+MODAL_TYPE_DIR_PREFIX = "modal"
+DEFAULT_MODAL_TYPE = "lti"
 
 
 def _import_trainers():
@@ -181,6 +183,45 @@ def _apply_predict_type_output_routing(*, config=config) -> str:
     return predict_type
 
 
+def _active_modal_type(config=config) -> str:
+    value = str(getattr(config, "DENOISER_MODAL_TYPE", DEFAULT_MODAL_TYPE)).strip().lower()
+    return value or DEFAULT_MODAL_TYPE
+
+
+def _modal_type_dir_name(modal_type: str) -> str:
+    return f"{MODAL_TYPE_DIR_PREFIX}-{modal_type}"
+
+
+def _apply_modal_type_output_routing(*, config=config) -> str:
+    """
+    Put a non-default denoiser dynamical core in its own artifact dirs.
+
+    The default ``lti`` core keeps the historical paths; a ``chirp`` run is nested
+    under a ``modal-chirp`` segment so it no longer overwrites ``lti`` checkpoints
+    for the same (dataset, pred, predict-type). Applied after — and composes with —
+    the predict-type routing, mirroring _apply_predict_type_output_routing.
+    """
+    modal_type = _active_modal_type(config=config)
+    if modal_type == DEFAULT_MODAL_TYPE:
+        return modal_type
+
+    dirname = _modal_type_dir_name(modal_type)
+
+    def route(value: object) -> Path:
+        path = Path(str(value))
+        if any(part == dirname or part.startswith(f"{dirname}_") for part in path.parts):
+            return path
+        return path / dirname
+
+    if hasattr(config, "OUT_DIR"):
+        config.OUT_DIR = str(route(getattr(config, "OUT_DIR")))
+    if hasattr(config, "CKPT_DIR"):
+        config.CKPT_DIR = str(route(getattr(config, "CKPT_DIR")))
+    if hasattr(config, "POLE_PLOT_DIR") and hasattr(config, "OUT_DIR"):
+        config.POLE_PLOT_DIR = str(Path(str(config.OUT_DIR)) / "pole_plots")
+    return modal_type
+
+
 def _target_policy(config=config) -> Dict[str, object]:
     requested = getattr(config, "TARGET_COL", None)
     requested_cols = getattr(config, "TARGET_COLS", None)
@@ -312,6 +353,7 @@ def run_single_pred(
         )
     else:
         _apply_predict_type_output_routing(config=config)
+        _apply_modal_type_output_routing(config=config)
     _apply_training_overrides(training_overrides, config=config)
     data_policy = _sync_target_shape_config(config=config)
 
@@ -445,6 +487,7 @@ def run_preds(
     Run the pipeline for multiple prediction horizons and collect stats.
     """
     _apply_predict_type_output_routing(config=config)
+    _apply_modal_type_output_routing(config=config)
     base_out_dir = Path(getattr(config, "OUT_DIR", "./outputs"))
     base_ckpt_dir = Path(getattr(config, "CKPT_DIR", str(base_out_dir / "checkpoints")))
 
@@ -516,6 +559,14 @@ def _parse_args() -> argparse.Namespace:
         choices=PREDICT_TYPES,
         default=None,
         help="Diffusion prediction parameterization. Defaults to v.",
+    )
+    parser.add_argument(
+        "--modal-type",
+        type=str,
+        choices=("lti", "chirp"),
+        default=None,
+        help="Denoiser dynamical core: 'lti' (original) or 'chirp' (time-varying poles). "
+        "Defaults to config.DENOISER_MODAL_TYPE.",
     )
     parser.add_argument(
         "--recompute-vae",
@@ -822,6 +873,8 @@ def main() -> Dict[int, Dict[str, object]]:
     if args.calendar_day_batches:
         config.exact_timestamp_batches = False
     config.COVERAGE = _validate_coverage(args.coverage)
+    if args.modal_type is not None:
+        config.DENOISER_MODAL_TYPE = args.modal_type
     config.REQUESTED_PREDICT_TYPE_ARG = args.predict_type
     if args.predict_type is not None:
         config.PREDICT_TYPE = args.predict_type
@@ -833,6 +886,7 @@ def main() -> Dict[int, Dict[str, object]]:
         raise ValueError("No prediction horizons provided to the pipeline.")
 
     _apply_predict_type_output_routing(config=config)
+    _apply_modal_type_output_routing(config=config)
     base_out_dir = Path(getattr(config, "OUT_DIR", "./outputs"))
     base_ckpt_dir = Path(getattr(config, "CKPT_DIR", str(base_out_dir / "checkpoints")))
 

@@ -460,6 +460,13 @@ Non-default prediction parameterizations (`x0`, `eps`) are routed under
 `ldt/output/<dataset>/predict-<type>/...` so they don't overwrite the default
 `v`-prediction outputs.
 
+The stage-3 denoiser also has **two interchangeable dynamical cores**, selected
+with `--modal-type` (§5.12): the default `lti` (constant Laplace poles + a
+residual-MLP correction) and `chirp` (time-varying poles, residual MLP dropped).
+This is *orthogonal* to `--predict-type`, and like predict-type it **routes
+outputs**: a `chirp` run is nested under a `modal-chirp/` segment (composing with
+any `predict-<type>/`), so it never overwrites the default `lti` checkpoints.
+
 ---
 
 ## 5. Running experiments
@@ -508,6 +515,9 @@ Default is `v`. Use `x0` or `eps` without changing other hyperparameters:
 llapdiff-train --dataset-key crypto --preds 100 --predict-type x0
 llapdiff-train --dataset-key crypto --preds 100 --predict-type eps
 ```
+
+This chooses the *prediction target*. To switch the denoiser's *dynamical core*
+(constant vs time-varying poles) — an independent choice — see §5.12.
 
 ### 5.5 Auxiliary target-mask completion training
 
@@ -590,6 +600,38 @@ llapdiff-synthetic-regime \
   --seeds 3407 3408 3409 \
   --output-root ldt/results/synthetic_boundary_crossing
 ```
+
+### 5.12 Chirp-modal dynamical core (time-varying poles)
+
+By default the LLapDiff denoiser predicts **constant** Laplace poles and patches
+the residual with an MLP (`--modal-type lti`). The **chirp** core instead
+predicts *time-varying* poles ρₖ(t̃), ωₖ(t̃); its closed-form latent trajectory is
+a chirped, time-warped damped sinusoid that is stable by construction, so the
+**residual MLP is dropped**:
+
+```bash
+llapdiff-train --dataset-key crypto --preds 100 --modal-type chirp
+```
+
+- **Independent of `--predict-type`.** It works with `v` (default), `x0`, or
+  `eps`; the closed-form trajectory is interpreted as that target. `x0` is the
+  most natural reading (the modal sum *is* ẑ₀), e.g.
+  `--modal-type chirp --predict-type x0`.
+- **Self-describing checkpoints.** The variant is recorded in the checkpoint, so
+  `llapdiff-checkpoint-eval` and `llapdiff-plot-poles` rebuild the correct core
+  automatically — no extra flag at eval time. Checkpoints from before this
+  feature load as `lti`.
+- **Outputs are routed by core.** A `chirp` run is nested under a `modal-chirp/`
+  segment of `OUT_DIR`/`CKPT_DIR` — e.g.
+  `ldt/output/<ds>/modal-chirp/pred-<H>/llapdiff_pred-<H>_*.pt`, or
+  `…/predict-x0/modal-chirp/…` when combined with a non-default `--predict-type`.
+  The default `lti` keeps the historical paths, so the two never overwrite each
+  other. Point `llapdiff-checkpoint-eval --checkpoint` at the `modal-chirp/` file.
+
+Tunables (base config in `configs/config.py`, not per-dataset presets):
+`CHIRP_NUM_BASIS` (number of nonnegative Fourier basis functions for the pole
+field, default 8), `CHIRP_RHO_MIN` (minimum decay floor `ρ_min`, default 1e-4),
+`CHIRP_USE_MLP_RESIDUAL` (re-enable a residual correction, default off).
 
 ---
 
@@ -712,6 +754,7 @@ summarizer per §3.5, then point `--checkpoint` at the matching
 | `--dataset-key KEY`                          | Required. Selects preset (table in §3.4).              |
 | `--preds H1 [H2 ...]`                        | Subset of preset horizons; omit for all.               |
 | `--predict-type {v,x0,eps}`                  | Diffusion parameterization (default `v`).              |
+| `--modal-type {lti,chirp}`                   | Denoiser dynamical core: constant poles + MLP (`lti`, default) or time-varying poles (`chirp`, §5.12). |
 | `--coverage F`                               | Hide `F` of observed context entries (`0 ≤ F < 1`).    |
 | `--batch-size N`                             | Override preset batch size.                            |
 | `--target-col COL` / `--target-cols`         | Single or multi-target forecasting.                    |

@@ -39,6 +39,10 @@ class LLapDiff(nn.Module):
         analysis_summary_qk: bool = False,
         analysis_qk_use_raw_summary: bool = False,
         rho_conditioning_mode: str = "raw",
+        denoiser_modal_type: str = "lti",
+        chirp_num_basis: int = 8,
+        chirp_rho_min: float = 1e-4,
+        chirp_use_mlp_residual: bool = False,
     ) -> None:
         super().__init__()
         if predict_type not in {"eps", "v", "x0"}:
@@ -71,6 +75,10 @@ class LLapDiff(nn.Module):
             analysis_summary_qk=analysis_summary_qk,
             analysis_qk_use_raw_summary=analysis_qk_use_raw_summary,
             rho_conditioning_mode=rho_conditioning_mode,
+            denoiser_modal_type=denoiser_modal_type,
+            chirp_num_basis=chirp_num_basis,
+            chirp_rho_min=chirp_rho_min,
+            chirp_use_mlp_residual=chirp_use_mlp_residual,
         )
         self.time_dim = hidden_dim
 
