@@ -29,6 +29,13 @@ COVERAGE_HELP = "fraction of observed context entries to hide; 0 disables induce
 PREDICT_TYPE_DIR_PREFIX = "predict"
 
 
+import debugpy
+debugpy.listen(5678)
+print("Waiting for debugger to attach...")
+debugpy.wait_for_client()
+print("Debugger attached")
+
+
 def _import_trainers():
     """Return the trainer modules exposed through the public package layout."""
     from llapdiffusion.trainers import train_val_latent, train_val_summarizer, train_val_llapdiff

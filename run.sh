@@ -7,7 +7,7 @@
 #SBATCH --mem=80G                 # Memory per node (4 GB)
 #SBATCH --gpus=1                 # Number of GPUs per node
 
-# llapdiff-train --dataset-key physionet --preds 12 --verbose --summary-json ldt/results/physionet_pred12.json
+llapdiff-train --dataset-key physionet --preds 12 --verbose --summary-json ldt/results/physionet_pred12.json
 
 llapdiff-train --dataset-key bms_air --preds 168 --verbose --summary-json ldt/results/bms_air_pred168.json
 llapdiff-train --dataset-key uci_air --preds 168 --verbose --summary-json ldt/results/uci_air_pred168.json
