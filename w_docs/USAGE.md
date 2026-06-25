@@ -631,7 +631,14 @@ llapdiff-train --dataset-key crypto --preds 100 --modal-type chirp
 Tunables (base config in `configs/config.py`, not per-dataset presets):
 `CHIRP_NUM_BASIS` (number of nonnegative Fourier basis functions for the pole
 field, default 8), `CHIRP_RHO_MIN` (minimum decay floor `ρ_min`, default 1e-4),
-`CHIRP_USE_MLP_RESIDUAL` (re-enable a residual correction, default off).
+`CHIRP_USE_MLP_RESIDUAL` (re-enable a residual correction, default off),
+`CHIRP_TIME_SCALE` (window length `L` that normalizes the basis frequencies to
+the time axis). The basis frequencies are *cycles across the window*, so they
+must be scaled by `L`; otherwise at native horizons (`L ≈ 100–168`) the
+time-varying part is negligible and the chirp collapses to ~LTI. Leave
+`CHIRP_TIME_SCALE = None` (default) to use a per-sample data-adaptive
+`L = max|t̃|`, or set it to the horizon length (native units) for reproducible,
+checkpoint-comparable chirps. The chosen value is recorded in the checkpoint.
 
 ---
 

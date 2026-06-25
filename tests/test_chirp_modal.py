@@ -87,10 +87,15 @@ def test_chirp_field_zero_coeffs_is_constant_pole():
 
 
 def test_chirp_field_integral_correctness():
-    """rho_bar(0)=0, monotone increasing, and d/dt rho_bar matches instantaneous rho."""
+    """rho_bar(0)=0, monotone increasing, and d/dt rho_bar matches instantaneous rho.
+
+    Uses a fixed time_scale L so the field is a pure pointwise function of t (the default
+    data-adaptive L = max|t_rel| would change between the +-h finite-difference calls).
+    """
     torch.manual_seed(0)
     B, K, C, M = 1, 3, 16, 6
-    field = ChirpModalField(k=K, cond_dim=C, num_basis=M)
+    L = 4.0
+    field = ChirpModalField(k=K, cond_dim=C, num_basis=M, time_scale=L)
     # Activate the time-varying part.
     torch.nn.init.normal_(field.to_coeffs[-1].weight, std=0.5)
     cond = torch.randn(B, C)
@@ -106,7 +111,7 @@ def test_chirp_field_integral_correctness():
     rho_bar, _ = field.integrated(cond, t_rel)
     assert (rho_bar[:, 1:, :] - rho_bar[:, :-1, :] > 0).all()
 
-    # Finite-difference derivative vs the closed-form instantaneous rho.
+    # Finite-difference derivative vs the closed-form instantaneous rho (freq normalized by L).
     h = 1e-3
     tc = torch.full((B, 1, 1), 1.234)
     rb_plus, _ = field.integrated(cond, tc + h)
@@ -115,10 +120,28 @@ def test_chirp_field_integral_correctness():
 
     rho_floor, _ = field._floor_poles(tc.dtype, tc.device)
     a_rho2, _ = field._coeffs(cond)  # [B,K,M]
-    two_pi_f = (2.0 * math.pi) * field.basis_freqs
+    two_pi_f = (2.0 * math.pi) * field.basis_freqs / L
     phi = 1.0 + torch.cos(tc * two_pi_f)  # [B,1,M]
     inst = rho_floor.view(1, 1, K) + torch.einsum("bkm,btm->btk", a_rho2, phi)
     torch.testing.assert_close(deriv, inst, atol=1e-3, rtol=1e-3)
+
+
+def test_chirp_is_nondegenerate_at_native_horizon():
+    """With time normalization, the time-varying part is non-negligible at a long horizon."""
+    torch.manual_seed(0)
+    B, K, C, M, H = 1, 3, 16, 6, 168.0
+    field = ChirpModalField(k=K, cond_dim=C, num_basis=M)
+    torch.nn.init.normal_(field.to_coeffs[-1].weight, std=0.5)  # activate time-variation
+    cond = torch.randn(B, C)
+    t_rel = torch.linspace(0.0, H, 400).view(1, 400, 1)
+    rho_bar, _ = field.integrated(cond, t_rel)  # [B,T,K]
+    # remove the best-fit linear-in-t ramp per mode; the residual is the genuine "wiggle".
+    t = t_rel.squeeze(-1).squeeze(0)
+    for k in range(K):
+        y = rho_bar[0, :, k]
+        slope = (t * y).sum() / (t * t).sum()
+        wiggle = (y - slope * t).abs().max()
+        assert wiggle / (slope * H).abs().clamp_min(1e-9) > 1e-2  # was ~2e-4 before the fix
 
 
 def test_chirp_contraction_bound():

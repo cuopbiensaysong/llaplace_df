@@ -315,6 +315,7 @@ class LapFormer(nn.Module):
         chirp_num_basis: int = 8,
         chirp_rho_min: float = 1e-4,
         chirp_use_mlp_residual: bool = False,
+        chirp_time_scale: Optional[float] = None,
     ) -> None:
         super().__init__()
         self.hidden_dim = int(hidden_dim)
@@ -352,6 +353,7 @@ class LapFormer(nn.Module):
                 num_basis=int(chirp_num_basis),
                 rho_min=float(chirp_rho_min),
                 omega_max=math.pi,
+                time_scale=chirp_time_scale,
             )
         else:
             synth_use_mlp_residual = use_mlp_residual

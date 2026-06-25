@@ -391,13 +391,21 @@ path, and the residues `theta [B,2K,D]` (the constant cₖ/bₖ) are reused unch
 - **`ChirpModalField`** (`models/laptrans.py`) — the one substantive new module.
   From the *same* pole-conditioning vector the LTI core uses, it predicts, per
   mode, nonnegative coefficients over a **fixed** Fourier basis
-  `φ_m(t̃)=1+cos(2π f_m t̃)` (≥0) with closed-form antiderivative `Φ_m` ("P-exact").
+  `φ_m(t̃)=1+cos(2π f_m t̃/L)` (≥0) with closed-form antiderivative `Φ_m` ("P-exact").
   This yields instantaneous `ρ_k(t̃)=ρ_floor_k+Σ_m a²·φ_m` and **exact integrated**
   `ρ̄_k(t̃)=ρ_floor_k·t̃+Σ_m a²·Φ_m` (ω analogous): `integrated(cond, t_rel)→(ρ̄,ω̄)`
   `[B,T,K]`, `seed_poles(cond)→(ρ₀,ω₀)` `[B,K]` (instantaneous at t̃=0, seeds
   residue extraction). The coeff head is **zero-initialized**, so at init the
   field reduces to constant poles and the chirp model **exactly equals** the LTI
   base (a strict generalization — and a unit test).
+- **Window scaling (`CHIRP_TIME_SCALE`)** — the basis frequencies `f_m` are
+  *cycles across the window*, so `_basis` divides `2π f_m` by a time scale `L`.
+  Without this, with raw native `t̃` (horizons ~100–168) the oscillatory part of
+  `Φ_m` has amplitude `1/(2π f_m)` ≪ the linear `t̃` term, so `ρ̄,ω̄` degenerate to
+  a constant-slope ramp (≈LTI). `_time_scale(t_rel)` returns the fixed
+  `CHIRP_TIME_SCALE` when set, else a per-sample data-adaptive
+  `L = max|t̃|.clamp_min(1e-6)` (the default, `None`). `seed_poles` is
+  scale-invariant (`φ_m(0)=2`) and unchanged.
 - **Synthesis** — `LaplaceTransformEncoder.chirp_basis_matrix(ρ̄,ω̄)` builds
   `e^{-ρ̄}[cos ω̄, sin ω̄]`; `LaplacePseudoInverse.forward` takes optional
   `rho_bar/omega_bar` and uses it in place of the constant-pole `basis_matrix`.
@@ -412,8 +420,10 @@ path, and the residues `theta [B,2K,D]` (the constant cₖ/bₖ) are reused unch
   "lti")`, so **pre-chirp checkpoints rebuild as LTI** and eval/plotting need no
   extra flag (the core is read from metadata). Independent of `PREDICT_TYPE`.
 - **Tests** — `tests/test_chirp_modal.py`: LTI-equivalence at init, integral
-  correctness (ρ̄(0)=0, d/dt ρ̄ = instantaneous ρ), the contraction bound,
-  end-to-end `LapFormer` shapes, and checkpoint back-compat.
+  correctness (ρ̄(0)=0, d/dt ρ̄ = instantaneous ρ, with a fixed `time_scale` so
+  the finite-difference is pointwise), non-degeneracy at a native horizon (the
+  window-scaling check), the contraction bound, end-to-end `LapFormer` shapes,
+  and checkpoint back-compat.
 
 > **Output routing.** A chirp run is nested under a `modal-chirp/` segment by
 > `_apply_modal_type_output_routing` (`pipeline.py`), composing with any

@@ -131,6 +131,10 @@ DENOISER_MODAL_TYPE = "lti"
 CHIRP_NUM_BASIS = 8
 CHIRP_RHO_MIN = 1e-4
 CHIRP_USE_MLP_RESIDUAL = False
+# Window length that normalizes the chirp basis frequencies to the time axis. Set to the
+# horizon length (in native units) for reproducible, checkpoint-comparable chirps; leave
+# None to use a per-sample data-adaptive scale L = max|t_rel|.
+CHIRP_TIME_SCALE = None
 
 
 # ============================ Training Hyperparameters ============================

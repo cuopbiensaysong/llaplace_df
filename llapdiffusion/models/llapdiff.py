@@ -43,6 +43,7 @@ class LLapDiff(nn.Module):
         chirp_num_basis: int = 8,
         chirp_rho_min: float = 1e-4,
         chirp_use_mlp_residual: bool = False,
+        chirp_time_scale: Optional[float] = None,
     ) -> None:
         super().__init__()
         if predict_type not in {"eps", "v", "x0"}:
@@ -79,6 +80,7 @@ class LLapDiff(nn.Module):
             chirp_num_basis=chirp_num_basis,
             chirp_rho_min=chirp_rho_min,
             chirp_use_mlp_residual=chirp_use_mlp_residual,
+            chirp_time_scale=chirp_time_scale,
         )
         self.time_dim = hidden_dim
 

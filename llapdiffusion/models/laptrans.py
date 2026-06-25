@@ -343,10 +343,15 @@ class ChirpModalField(nn.Module):
     nonnegative Fourier basis with closed-form antiderivative (the "P-exact"
     parameterization):
 
-        phi_m(t) = 1 + cos(2 pi f_m t)            in [0, 2]
-        Phi_m(t) = t + sin(2 pi f_m t)/(2 pi f_m)  (antiderivative, Phi_m(0)=0)
+        phi_m(t) = 1 + cos(2 pi f_m t/L)               in [0, 2]
+        Phi_m(t) = t + sin(2 pi f_m t/L)/(2 pi f_m/L)   (antiderivative, Phi_m(0)=0)
         rho_k(t)     = rho_floor_k + sum_m a^rho_km^2 phi_m(t)        (> 0)
         rho_bar_k(t) = rho_floor_k t + sum_m a^rho_km^2 Phi_m(t)
+
+    The basis frequencies f_m are cycles ACROSS the window L (not per unit time): without
+    this normalization, at native horizons (L ~ 100-168) the oscillatory part of Phi_m has
+    negligible amplitude 1/(2 pi f_m) next to the linear term ~L, so the chirp collapses to
+    a constant-slope ramp (LTI). Dividing the frequencies by L restores resolution.
 
     The conditioning head ``to_coeffs`` is zero-initialized, so at init the coefficients
     vanish and the field reduces to constant per-mode poles -- i.e. the chirp synthesizer
@@ -362,6 +367,7 @@ class ChirpModalField(nn.Module):
         num_basis: int = 8,
         rho_min: float = 1e-4,
         omega_max: float = math.pi,
+        time_scale: Optional[float] = None,
     ) -> None:
         super().__init__()
         self.k = int(k)
@@ -369,13 +375,17 @@ class ChirpModalField(nn.Module):
         self.num_basis = int(num_basis)
         self.rho_min = float(rho_min)
         self.omega_max = float(omega_max)
+        # Window length L that normalizes the basis frequencies to the time axis. A fixed
+        # value gives reproducible, checkpoint-comparable chirps; None falls back to a
+        # per-sample data-adaptive L = max|t_rel| (robust to units and irregular sampling).
+        self.time_scale = None if time_scale is None else float(time_scale)
 
         # Per-mode floor poles (the constant term; init mirrors
         # LaplaceTransformEncoder.reset_parameters so chirp@init == LTI base poles).
         self._rho_base = nn.Parameter(torch.empty(self.k))
         self._omega_base = nn.Parameter(torch.empty(self.k))
 
-        # Fixed nonnegative basis frequencies (cycles per unit relative-time).
+        # Fixed nonnegative basis frequencies (cycles across the window L; see _basis).
         freqs = torch.linspace(1.0, float(self.num_basis), self.num_basis)
         self.register_buffer("basis_freqs", freqs, persistent=True)
 
@@ -420,14 +430,30 @@ class ChirpModalField(nn.Module):
         c = self.to_coeffs(cond).view(-1, 2, self.k, self.num_basis)
         return c[:, 0].pow(2), c[:, 1].pow(2)
 
-    def _basis(self, t_rel: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Return (phi, Phi), each [B,T,M], for the nonnegative Fourier basis."""
+    def _time_scale(self, t_rel: torch.Tensor) -> torch.Tensor:
+        """Window length L that normalizes the basis frequencies, shape [B,1,1].
+
+        Uses the fixed config constant when set; otherwise a per-sample data-adaptive
+        L = max|t_rel| (robust to units / irregular sampling), clamped away from zero.
+        """
+        if self.time_scale is not None:
+            return torch.full((1, 1, 1), self.time_scale, dtype=t_rel.dtype, device=t_rel.device)
+        return t_rel.abs().amax(dim=(1, 2), keepdim=True).clamp_min(1e-6)
+
+    def _basis(
+        self, t_rel: torch.Tensor, time_scale: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Return (phi, Phi), each [B,T,M], for the nonnegative Fourier basis.
+
+        Frequencies are normalized by ``time_scale`` (L) so they resolve a few cycles
+        across the window rather than per unit relative-time.
+        """
         two_pi_f = (2.0 * math.pi) * self.basis_freqs.to(
             device=t_rel.device, dtype=t_rel.dtype
-        )  # [M]
-        wt = t_rel * two_pi_f  # [B,T,1]*[M] -> [B,T,M]
+        ) / time_scale  # [M] / [B,1,1] -> [B,1,M]
+        wt = t_rel * two_pi_f  # [B,T,1]*[B,1,M] -> [B,T,M]  (= 2 pi f * t/L)
         phi = 1.0 + torch.cos(wt)
-        Phi = t_rel + torch.sin(wt) / two_pi_f  # Phi_m(0)=0
+        Phi = t_rel + torch.sin(wt) / two_pi_f  # Phi_m(0)=0; sin term ~ (L/2pi f) sin(2pi f t/L)
         return phi, Phi
 
     def integrated(
@@ -436,7 +462,7 @@ class ChirpModalField(nn.Module):
         """Integrated poles rho_bar, omega_bar at query times, each [B,T,K]."""
         rho_floor, omega_floor = self._floor_poles(t_rel.dtype, t_rel.device)
         a_rho2, a_omega2 = self._coeffs(cond)  # [B,K,M]
-        _, Phi = self._basis(t_rel)  # [B,T,M]
+        _, Phi = self._basis(t_rel, self._time_scale(t_rel))  # [B,T,M]
         rho_var = torch.einsum("bkm,btm->btk", a_rho2, Phi)
         omega_var = torch.einsum("bkm,btm->btk", a_omega2, Phi)
         rho_bar = rho_floor.view(1, 1, self.k) * t_rel + rho_var
