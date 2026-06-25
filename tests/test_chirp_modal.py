@@ -169,6 +169,35 @@ def test_chirp_contraction_bound():
     assert (norm <= bound + 1e-5).all()
 
 
+def test_full_model_contraction_bound():
+    """Theorem B holds for the ACTUAL LapFormer/LLapDiff output, not just the synthesizer.
+
+    The LTI output head (LayerNorm + Linear) is dropped in chirp mode; without that fix a
+    trained-like head re-inflates the decaying envelope and the output plateaus.
+    """
+    torch.manual_seed(0)
+    B, T, D, K = 2, 64, 8, 4
+    model = LLapDiff(data_dim=D, hidden_dim=32, num_layers=2, num_heads=4,
+                     laplace_k=K, timesteps=50, denoiser_modal_type="chirp").eval()
+    assert not model.model._use_output_head  # head removed in chirp mode
+    # Simulate a *trained* model: perturb output-side params away from zero-init.
+    for name, p in model.named_parameters():
+        if any(s in name for s in ("head_proj", "head_norm", "output_skip_scale",
+                                   "chirp_field.to_coeffs")):
+            torch.nn.init.normal_(p, std=0.5) if p.dim() > 0 else p.data.fill_(0.7)
+
+    x = torch.randn(B, T, D)
+    tstep = torch.randint(0, 50, (B,))
+    dt = torch.linspace(0.0, 5.0, T).view(1, T).expand(B, T).contiguous()  # t_rel >= 0
+    with torch.no_grad():
+        y = model(x, tstep, dt=dt)
+
+    norm = y.norm(dim=-1)  # [B,T]
+    # (a) far end <= early peak (envelope decays) and (b) finite everywhere (Theorem B(iii)).
+    assert norm[:, -1].max() <= norm[:, : T // 4].max()
+    assert torch.isfinite(y).all()
+
+
 def test_lapformer_chirp_forward_shapes_and_finite():
     torch.manual_seed(0)
     B, T, D, K = 2, 5, 8, 6

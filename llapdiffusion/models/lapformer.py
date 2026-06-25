@@ -390,11 +390,16 @@ class LapFormer(nn.Module):
             ]
         )
 
-        self.head_norm = nn.LayerNorm(input_dim)
-        self.head_proj = nn.Linear(input_dim, input_dim)
-        nn.init.zeros_(self.head_proj.weight)
-        nn.init.zeros_(self.head_proj.bias)
-        self.output_skip_scale = nn.Parameter(torch.tensor(0.1))
+        # The LLapDiff backbone's output head (LayerNorm + Linear residual) re-inflates the
+        # decaying modal envelope, breaking the chirp stability certificate (Theorem B). In
+        # chirp mode drop it and return the certified modal sum directly; lti is untouched.
+        self._use_output_head = self.denoiser_modal_type != "chirp"
+        if self._use_output_head:
+            self.head_norm = nn.LayerNorm(input_dim)
+            self.head_proj = nn.Linear(input_dim, input_dim)
+            nn.init.zeros_(self.head_proj.weight)
+            nn.init.zeros_(self.head_proj.bias)
+            self.output_skip_scale = nn.Parameter(torch.tensor(0.1))
 
     def _select_summary_tokens(
         self,
@@ -577,4 +582,7 @@ class LapFormer(nn.Module):
             y_time = self.synthesis(theta, rho_bar=rho_bar, omega_bar=omega_bar)
         else:
             y_time = self.synthesis(theta, rho=rho, omega=omega, dt=dt, t=t, target_T=T)
+        if not self._use_output_head:
+            # chirp: certified output is the modal sum itself (Theorem B holds for y_time).
+            return y_time
         return self.output_skip_scale * y_time + self.head_proj(self.head_norm(y_time))
