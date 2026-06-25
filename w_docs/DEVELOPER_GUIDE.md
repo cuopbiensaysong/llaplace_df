@@ -410,18 +410,23 @@ path, and the residues `theta [B,2K,D]` (the constant cₖ/bₖ) are reused unch
   `e^{-ρ̄}[cos ω̄, sin ω̄]`; `LaplacePseudoInverse.forward` takes optional
   `rho_bar/omega_bar` and uses it in place of the constant-pole `basis_matrix`.
   With `CHIRP_USE_MLP_RESIDUAL=False` (default) the residual MLP is absent —
-  stability is by construction (`‖ŷ(t̃)‖ ≤ e^{-ρ_min·t̃}·Σ_k√(‖cₖ‖²+‖bₖ‖²)`,
-  bound constant `1`).
-- **Output head dropped in chirp mode.** The LLapDiff backbone's output head
-  (`output_skip_scale·y + head_proj(head_norm(y))`) is an *uncertified* residual,
-  and its `LayerNorm` re-inflates the decaying envelope back to ~unit scale — so
-  it would break Theorem B for the model's *actual* output even though the
-  synthesizer `y_time` satisfies it. `LapFormer` gates the head on
-  `self._use_output_head = denoiser_modal_type != "chirp"`: in chirp mode the head
-  modules are not built and `forward` returns the modal sum `y_time` directly
-  (the certified output). The lti path is untouched (it relies on its own
-  synthesis MLP and never claimed this certificate). Chirp checkpoints therefore
-  have **no** `head_proj`/`head_norm`/`output_skip_scale` keys.
+  stability is by construction (`‖ŷ(t̃)‖ ≤ |s|·e^{-ρ_min·t̃}·Σ_k√(‖cₖ‖²+‖bₖ‖²)`,
+  with `s = output_skip_scale`).
+- **Uncertified residual dropped in chirp mode (scaling kept).** The backbone's
+  output head does *two* jobs: `output_skip_scale·y_time` is a **certified**
+  learnable magnitude — it rescales the `K`-mode modal sum (e.g. `K=256` on
+  PhysioNet, where the raw sum is ~10× the unit-scale latent) back to `z₀`'s
+  scale — while `head_proj(head_norm(y_time))` is an **uncertified** residual
+  whose `LayerNorm` re-inflates the decaying envelope to ~unit scale, breaking
+  Theorem B for the model's *actual* output even though the synthesizer `y_time`
+  satisfies it. `LapFormer` gates *only the residual* on
+  `self._use_output_head = denoiser_modal_type != "chirp"`: `output_skip_scale`
+  is always built (init `0.1`), but in chirp mode `head_norm`/`head_proj` are not,
+  and `forward` returns `output_skip_scale · y_time`. (Returning the *raw* sum
+  instead inflates predictions ~10×, blowing up the loss scale and CRPS — the
+  scaling is certified and must be kept.) The lti path is untouched. Chirp
+  checkpoints therefore have **no** `head_proj`/`head_norm` keys but **do** keep
+  `output_skip_scale`.
 - **Wiring** — `LapFormer.__init__` builds `self.chirp_field` and forces the
   synthesis residual off in chirp mode; `LapFormer.forward` branches to seed
   analysis with `seed_poles` and synthesize with `integrated` poles.
@@ -435,8 +440,10 @@ path, and the residues `theta [B,2K,D]` (the constant cₖ/bₖ) are reused unch
   the finite-difference is pointwise), non-degeneracy at a native horizon (the
   window-scaling check), the synthesizer contraction bound **and the full-model
   contraction bound** (`test_full_model_contraction_bound`, with a trained-like
-  perturbed head, confirming the dropped head leaves the output decaying to ~0),
-  end-to-end `LapFormer` shapes, and checkpoint back-compat.
+  perturbed head, confirming the output decays to ~0), a scaling regression guard
+  (`test_output_scale_preserved_for_chirp`, asserts chirp keeps `output_skip_scale`
+  while dropping the residual), end-to-end `LapFormer` shapes, and checkpoint
+  back-compat.
 
 > **Output routing.** A chirp run is nested under a `modal-chirp/` segment by
 > `_apply_modal_type_output_routing` (`pipeline.py`), composing with any

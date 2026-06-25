@@ -172,8 +172,9 @@ def test_chirp_contraction_bound():
 def test_full_model_contraction_bound():
     """Theorem B holds for the ACTUAL LapFormer/LLapDiff output, not just the synthesizer.
 
-    The LTI output head (LayerNorm + Linear) is dropped in chirp mode; without that fix a
-    trained-like head re-inflates the decaying envelope and the output plateaus.
+    The uncertified residual (LayerNorm + Linear) is dropped in chirp mode while the certified
+    output_skip_scale is kept; without dropping the residual a trained-like head re-inflates
+    the decaying envelope and the output plateaus.
     """
     torch.manual_seed(0)
     B, T, D, K = 2, 64, 8, 4
@@ -196,6 +197,17 @@ def test_full_model_contraction_bound():
     # (a) far end <= early peak (envelope decays) and (b) finite everywhere (Theorem B(iii)).
     assert norm[:, -1].max() <= norm[:, : T // 4].max()
     assert torch.isfinite(y).all()
+
+
+def test_output_scale_preserved_for_chirp():
+    """Regression guard: chirp must keep output_skip_scale (dropping it blows up the loss scale)."""
+    model = LLapDiff(data_dim=8, hidden_dim=32, num_layers=2, num_heads=4,
+                     laplace_k=4, timesteps=50, denoiser_modal_type="chirp")
+    assert hasattr(model.model, "output_skip_scale")
+    assert abs(float(model.model.output_skip_scale)) <= 1.0 + 1e-6  # init 0.1
+    # The uncertified residual is still gone.
+    assert not model.model._use_output_head
+    assert not hasattr(model.model, "head_proj")
 
 
 def test_lapformer_chirp_forward_shapes_and_finite():
