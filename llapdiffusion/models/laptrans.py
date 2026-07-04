@@ -368,6 +368,7 @@ class ChirpModalField(nn.Module):
         rho_min: float = 1e-4,
         omega_max: float = math.pi,
         time_scale: Optional[float] = None,
+        uq_head: bool = False,
     ) -> None:
         super().__init__()
         self.k = int(k)
@@ -398,6 +399,22 @@ class ChirpModalField(nn.Module):
         nn.init.zeros_(self.to_coeffs[-1].weight)
         nn.init.zeros_(self.to_coeffs[-1].bias)
 
+        # Optional Theorem-C UQ head (isotropic case, constant-in-time noise
+        # intensity): per-mode initial variance p0_k and noise intensity q_k,
+        # softplus-parameterized around learnable bases with zero-init conditioned
+        # deltas, so at init p0 = q = softplus(base) uniformly across the batch.
+        self.uq_head = bool(uq_head)
+        if self.uq_head:
+            init_raw = math.log(math.expm1(1e-2))  # softplus(base) = 0.01
+            self._p0_base = nn.Parameter(torch.full((self.k,), init_raw))
+            self._q_base = nn.Parameter(torch.full((self.k,), init_raw))
+            self.to_uq = nn.Sequential(
+                nn.SiLU(),
+                nn.Linear(self.cond_dim, 2 * self.k),
+            )
+            nn.init.zeros_(self.to_uq[-1].weight)
+            nn.init.zeros_(self.to_uq[-1].bias)
+
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
@@ -426,9 +443,23 @@ class ChirpModalField(nn.Module):
         return rho_floor, omega_floor  # [K], [K]
 
     def _coeffs(self, cond: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Nonnegative per-mode, per-basis coefficients a^2, each [B,K,M]."""
+        """Nonnegative per-mode, per-basis coefficients a^2, each [B,K,M].
+
+        The omega coefficients are smoothly rescaled so the instantaneous frequency
+        stays below omega_max pointwise: phi_m <= 2 gives sup_t omega <= floor + 2*sum_m a^2,
+        and the rescale bounds that sum by (omega_max - floor). The coefficients stay a
+        plain linear combination of the basis, so the closed-form antiderivative is
+        preserved; at zero coefficients the scale is 1 (LTI equivalence unchanged).
+        The decay coefficients need no cap (only positivity).
+        """
         c = self.to_coeffs(cond).view(-1, 2, self.k, self.num_basis)
-        return c[:, 0].pow(2), c[:, 1].pow(2)
+        a_rho2 = c[:, 0].pow(2)
+        a_omega2 = c[:, 1].pow(2)
+        _, omega_floor = self._floor_poles(cond.dtype, cond.device)
+        headroom = (self.omega_max - omega_floor).view(1, self.k, 1)  # [1,K,1], > 0
+        total = 2.0 * a_omega2.sum(dim=-1, keepdim=True)  # [B,K,1]
+        a_omega2 = a_omega2 * (headroom / (total + headroom))
+        return a_rho2, a_omega2
 
     def _time_scale(self, t_rel: torch.Tensor) -> torch.Tensor:
         """Window length L that normalizes the basis frequencies, shape [B,1,1].
@@ -455,6 +486,76 @@ class ChirpModalField(nn.Module):
         phi = 1.0 + torch.cos(wt)
         Phi = t_rel + torch.sin(wt) / two_pi_f  # Phi_m(0)=0; sin term ~ (L/2pi f) sin(2pi f t/L)
         return phi, Phi
+
+    def instantaneous(
+        self, cond: torch.Tensor, t_rel: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Instantaneous poles rho(t), omega(t) at query times, each [B,T,K].
+
+        The pointwise derivative of :meth:`integrated`; used by the pole-trajectory
+        tooling (viz / synthetic-recovery figures), not by the training path.
+        """
+        rho_floor, omega_floor = self._floor_poles(t_rel.dtype, t_rel.device)
+        a_rho2, a_omega2 = self._coeffs(cond)  # [B,K,M]
+        phi, _ = self._basis(t_rel, self._time_scale(t_rel))  # [B,T,M]
+        rho = rho_floor.view(1, 1, self.k) + torch.einsum("bkm,btm->btk", a_rho2, phi)
+        omega = omega_floor.view(1, 1, self.k) + torch.einsum("bkm,btm->btk", a_omega2, phi)
+        return rho, omega
+
+    def uq_params(self, cond: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Per-mode initial variance p0 and noise intensity q, each [B,K] (> 0)."""
+        if not self.uq_head:
+            raise RuntimeError("ChirpModalField was built without uq_head=True.")
+        delta_p0, delta_q = self.to_uq(cond).view(-1, 2, self.k).unbind(dim=1)
+        p0 = F.softplus(self._p0_base.view(1, self.k) + delta_p0)
+        q = F.softplus(self._q_base.view(1, self.k) + delta_q)
+        return p0, q
+
+    @staticmethod
+    def modal_variance(
+        rho_bar: torch.Tensor,
+        t_rel: torch.Tensor,
+        q: torch.Tensor,
+        p0: torch.Tensor,
+    ) -> torch.Tensor:
+        """Per-mode variance scalars s_k(t_r) = e^{-2 rho_bar_r} p0_k + v_k(t_r), [B,T,K].
+
+        v_k(t) = int_0^t e^{-2(rho_bar(t) - rho_bar(s))} q_k ds (Theorem C, Eq. 6, with
+        constant-in-time q_k), evaluated by an exponential-integrator recurrence over
+        the sorted query times (a virtual node at t=0, rho_bar=0 anchors the first
+        segment). With d_rho_r = rho_bar_r - rho_bar_{r-1} the per-segment integral is
+        exact for piecewise-constant instantaneous decay:
+
+            v_r = e^{-2 d_rho_r} v_{r-1} + q d_t_r (1 - e^{-2 d_rho_r}) / (2 d_rho_r)
+
+        Every exponent is <= 0 (rho_bar is nondecreasing), so the recurrence is
+        overflow-free; for constant poles it reproduces the Lyapunov closed form
+        q (1 - e^{-2 rho t}) / (2 rho) to float precision. This is the "solver-free
+        1-D quadrature" realization of the method doc's v_k (the integrand has no
+        elementary antiderivative under P-exact).
+        """
+        B, T, K = rho_bar.shape
+        t = t_rel.reshape(B, T)
+        v = torch.zeros(B, K, dtype=rho_bar.dtype, device=rho_bar.device)
+        prev_t = torch.zeros(B, dtype=rho_bar.dtype, device=rho_bar.device)
+        prev_rho = torch.zeros(B, K, dtype=rho_bar.dtype, device=rho_bar.device)
+        out = []
+        for r in range(T):
+            d_t = (t[:, r] - prev_t).clamp_min(0.0)  # [B]
+            d_rho = (rho_bar[:, r] - prev_rho).clamp_min(0.0)  # [B,K]
+            decay = torch.exp(-2.0 * d_rho)
+            # (1 - e^{-2x})/(2x) with the x -> 0 limit 1 - x (Taylor) for stability.
+            ratio = torch.where(
+                d_rho > 1e-6,
+                (-torch.expm1(-2.0 * d_rho)) / (2.0 * d_rho.clamp_min(1e-12)),
+                1.0 - d_rho,
+            )
+            v = decay * v + d_t.unsqueeze(-1) * q * ratio
+            s_r = torch.exp(-2.0 * rho_bar[:, r].clamp_min(0.0)) * p0 + v
+            out.append(s_r)
+            prev_t = t[:, r]
+            prev_rho = rho_bar[:, r]
+        return torch.stack(out, dim=1)  # [B,T,K]
 
     def integrated(
         self, cond: torch.Tensor, t_rel: torch.Tensor

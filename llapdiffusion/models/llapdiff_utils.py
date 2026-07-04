@@ -91,6 +91,12 @@ def sample_training_timesteps(
     sampler_name = str(sampler).strip().lower()
     if sampler_name in {"uniform", "rand", "random"}:
         return sample_t_uniform(scheduler, n, device, exclude_t0=exclude_t0)
+    if sampler_name in {"max_only", "max"}:
+        # One-shot regression arm: always train at the final (pure-noise) step, so
+        # x_t is information-free and the denoiser learns p(z0 | conditioning) alone.
+        return torch.full(
+            (int(n),), int(scheduler.timesteps) - 1, device=device, dtype=torch.long
+        )
     if sampler_name in {"karras", "sigma", "sigma_uniform"}:
         return sample_t_uniform_karras(
             scheduler,
@@ -100,7 +106,7 @@ def sample_training_timesteps(
             exclude_t0=exclude_t0,
         )
     raise ValueError(
-        f"Unknown training timestep sampler '{sampler}'. Use 'uniform' or 'karras'."
+        f"Unknown training timestep sampler '{sampler}'. Use 'uniform', 'karras', or 'max_only'."
     )
 
 
@@ -878,28 +884,52 @@ def diffusion_loss(
     target_mask: Optional[torch.Tensor] = None,
     minsnr_normalize: str = "auto",
     return_stats: bool = False,
+    loss_mode: str = "mse",
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, torch.Tensor]]]:
     """
-    MSE on x0/v/eps with optional horizon masking and MinSNR weighting.
+    MSE (or Gaussian NLL) on x0/v/eps with optional horizon masking and MinSNR weighting.
 
     target_mask:
         Optional boolean mask aligned to [B, H] (or broadcastable to that),
         used to ignore timesteps/horizons that have no observed supervision.
+    loss_mode:
+        "mse" (default) or "gaussian_nll". The NLL mode requires predict_type='x0'
+        and a model exposing return_variance (the Theorem-C chirp UQ head); the
+        per-element error becomes 0.5*(log var + (pred-target)^2/var), reduced and
+        MinSNR-weighted exactly like the MSE path.
     """
+    loss_mode = str(loss_mode).strip().lower()
+    if loss_mode not in {"mse", "gaussian_nll"}:
+        raise ValueError(f"Unknown loss_mode '{loss_mode}'. Use 'mse' or 'gaussian_nll'.")
+    if loss_mode == "gaussian_nll" and predict_type != "x0":
+        raise ValueError("loss_mode='gaussian_nll' requires predict_type='x0'.")
+
     if reuse_xt_eps is None:
         noise = torch.randn_like(x0_lat_norm)
         x_t, eps_true = scheduler.q_sample(x0_lat_norm, t, noise)
     else:
         x_t, eps_true = reuse_xt_eps
 
-    pred = model(
-        x_t,
-        t,
-        cond_summary=cond_summary,
-        cond_summary_raw=cond_summary_raw,
-        sc_feat=sc_feat,
-        dt=dt,
-    )
+    variance = None
+    if loss_mode == "gaussian_nll":
+        pred, variance = model(
+            x_t,
+            t,
+            cond_summary=cond_summary,
+            cond_summary_raw=cond_summary_raw,
+            sc_feat=sc_feat,
+            dt=dt,
+            return_variance=True,
+        )
+    else:
+        pred = model(
+            x_t,
+            t,
+            cond_summary=cond_summary,
+            cond_summary_raw=cond_summary_raw,
+            sc_feat=sc_feat,
+            dt=dt,
+        )
 
     if predict_type == "eps":
         target = eps_true
@@ -912,7 +942,11 @@ def diffusion_loss(
             f"Unknown predict_type '{predict_type}'. Use 'x0', 'v', or 'eps'."
         )
 
-    err = (pred - target).pow(2)
+    if loss_mode == "gaussian_nll":
+        var = variance.clamp_min(1e-6)
+        err = 0.5 * (torch.log(var) + (pred - target).pow(2) / var)
+    else:
+        err = (pred - target).pow(2)
 
     per_sample = _reduce_loss_per_sample(err, target_mask=target_mask)
 

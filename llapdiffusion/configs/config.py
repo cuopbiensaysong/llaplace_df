@@ -131,10 +131,22 @@ DENOISER_MODAL_TYPE = "lti"
 CHIRP_NUM_BASIS = 8
 CHIRP_RHO_MIN = 1e-4
 CHIRP_USE_MLP_RESIDUAL = False
-# Window length that normalizes the chirp basis frequencies to the time axis. Set to the
-# horizon length (in native units) for reproducible, checkpoint-comparable chirps; leave
-# None to use a per-sample data-adaptive scale L = max|t_rel|.
+# Window length that normalizes the chirp basis frequencies to the time axis. None
+# (default) resolves to the run's horizon (config.PRED) at model-build time — a fixed
+# per-run constant, so the function class does not depend on the sample. Set a number to
+# pin it explicitly, or the string "adaptive" to opt into the per-sample L = max|t_rel|.
 CHIRP_TIME_SCALE = None
+# LapFormer output head (skip-scale + LayerNorm/Linear residual): "auto" keeps the
+# original head for lti and drops the uncertified residual for chirp (Theorem B);
+# "on"/"off" force it either way (2x2 factorial ablation cells).
+DENOISER_OUTPUT_HEAD = "auto"
+# Theorem-C analytic UQ head (chirp core only, predict_type='x0', certified path):
+# per-mode initial variance p0_k and noise intensity q_k -> closed-form latent
+# Gaussian law evaluated by a stable 1-D quadrature.
+CHIRP_UQ_HEAD = False
+# Diffusion training loss: "mse" (default) or "gaussian_nll" (requires CHIRP_UQ_HEAD;
+# trains mean and variance jointly for calibrated analytic UQ).
+DIFF_LOSS_MODE = "mse"
 
 
 # ============================ Training Hyperparameters ============================

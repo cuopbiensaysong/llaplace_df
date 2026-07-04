@@ -78,6 +78,9 @@ Installed console scripts (from `pyproject.toml`):
 | `llapdiff-checkpoint-eval`  | `llapdiffusion.tools.llapdiff_checkpoint_eval:main`       |
 | `llapdiff-artifact-prep`    | `llapdiffusion.tools.run_multidataset_artifact_prep:main` |
 | `llapdiff-synthetic-regime` | `llapdiffusion.tools.run_synthetic_regime_shift:main`     |
+| `llapdiff-synthetic-chirp`  | `llapdiffusion.tools.run_synthetic_chirp_benchmark:main`  |
+| `llapdiff-uq-eval`          | `llapdiffusion.tools.run_analytic_uq_eval:main`           |
+| `llapdiff-u1-sweep`         | `llapdiffusion.tools.run_u1_sweep:main`                   |
 | `llapdiff-plot-poles`       | `llapdiffusion.viz.plot_llapdiff_poles:main`              |
 | `llapdiff-baselines`        | `llapdiffusion.tools.run_baselines:main`                  |
 
@@ -466,6 +469,8 @@ residual-MLP correction) and `chirp` (time-varying poles, residual MLP dropped).
 This is *orthogonal* to `--predict-type`, and like predict-type it **routes
 outputs**: a `chirp` run is nested under a `modal-chirp/` segment (composing with
 any `predict-<type>/`), so it never overwrites the default `lti` checkpoints.
+Forced output-head modes (`--output-head on|off`) and explicit seeds (`--seed N`)
+add further `head-<mode>/` and `seed-<n>/` segments in that order (§5.13).
 
 ---
 
@@ -635,10 +640,108 @@ field, default 8), `CHIRP_RHO_MIN` (minimum decay floor `ρ_min`, default 1e-4),
 `CHIRP_TIME_SCALE` (window length `L` that normalizes the basis frequencies to
 the time axis). The basis frequencies are *cycles across the window*, so they
 must be scaled by `L`; otherwise at native horizons (`L ≈ 100–168`) the
-time-varying part is negligible and the chirp collapses to ~LTI. Leave
-`CHIRP_TIME_SCALE = None` (default) to use a per-sample data-adaptive
-`L = max|t̃|`, or set it to the horizon length (native units) for reproducible,
-checkpoint-comparable chirps. The chosen value is recorded in the checkpoint.
+time-varying part is negligible and the chirp collapses to ~LTI.
+`CHIRP_TIME_SCALE = None` (the default) resolves to **the run's horizon**
+(`config.PRED`) at model-build time — a fixed per-run constant, so the pole
+function class does not depend on the sample. Set a number to pin `L`
+explicitly, or the string `"adaptive"` to opt into the per-sample
+`L = max|t̃|`. The resolved value is recorded in the checkpoint. The
+instantaneous frequency is capped below `π` per native step (Nyquist), so
+chirp poles cannot alias regardless of the learned coefficients.
+
+### 5.13 Ablation arms (output head) and multi-seed runs
+
+Two flags exist for controlled comparisons (e.g. the poles × head 2×2
+factorial); both default to the historical behavior:
+
+- `--output-head {auto,on,off}` — the LapFormer output head (the learnable
+  skip-scale plus a LayerNorm+Linear residual). `auto` (default) keeps the head
+  for `lti` and drops the uncertified residual for `chirp`; `on`/`off` force it
+  either way, e.g. `--output-head off` gives an LTI control without the head,
+  and `--modal-type chirp --output-head on` probes whether the head is
+  redundant once poles vary. Without the head, the learnable output scale is
+  clamped to `|s| ≤ 1` (the stability-bound constant).
+- `--seed N` — seeds all three training stages (torch/numpy/random). Without
+  it, runs use `config.SEED` (42) and keep historical paths.
+
+**Routing.** Non-default values get their own artifact segments, composing with
+the predict-type and modal-type segments in this order:
+
+```
+ldt/output/<ds>/[predict-<type>/][modal-chirp/][head-<on|off>/][seed-<n>/]pred-<H>/...
+```
+
+so ablation arms and seeds never overwrite each other or the default runs.
+Example — the four factorial cells at seed 3 (physionet h=12):
+
+```bash
+llapdiff-train --dataset-key physionet --preds 12 --seed 3                                   # lti + head
+llapdiff-train --dataset-key physionet --preds 12 --output-head off --seed 3                 # lti − head
+llapdiff-train --dataset-key physionet --preds 12 --modal-type chirp --output-head on --seed 3  # chirp + head
+llapdiff-train --dataset-key physionet --preds 12 --modal-type chirp --seed 3                # chirp − head
+```
+
+The head mode and seed-relevant model config are recorded in the checkpoint;
+`llapdiff-checkpoint-eval` rebuilds the exact variant from metadata. The VAE
+and summarizer are shared by all arms/seeds (stage-1/2 skip logic + unrouted
+`ldt/vae`/`ldt/summarizer` paths), which is exactly what a fair comparison
+requires — train them once, then every arm reuses the same frozen upstream.
+
+### 5.14 Ground-truth chirp benchmark (synthetic)
+
+`llapdiff-synthetic-chirp` trains lti-vs-chirp arms on synthetic signals whose
+instantaneous pole functions are **known by construction** (linear/quadratic
+frequency chirps, damping ramps, growth-then-decay, plus the piecewise
+`synthetic_freq_shift` as a regime switch) and, for the chirp arm, overlays the
+recovered ρₖ(t̃), ωₖ(t̃) trajectories against the generator's ground truth:
+
+```bash
+llapdiff-synthetic-chirp --arms lti chirp --seeds 0 1 2 \
+  --output-root ldt/results/chirp_benchmark
+```
+
+Outputs: `chirp_benchmark_raw/summary.{csv,json}` (forecast CRPS/MAE/MSE per
+task × arm × seed, plus best-mode pole-recovery RMSE for chirp),
+`recovery/*.json`, and `figures/*_pole_recovery.pdf`. Both arms share the same
+frozen VAE/summarizer per (task, seed). Ground truth is persisted in the cache
+(`pole_truth/*.npz`; `load_ground_truth_poles`). Keep the default
+`--series-length 768` or larger — the purged split needs the val band to exceed
+one horizon (the tool validates this). `--smoke` gives a 1-epoch end-to-end
+check. For real-data chirp checkpoints, `llapdiff-plot-poles` now also saves a
+`*_pole_trajectories.pdf` (instantaneous ρ/ω curves over the horizon) next to
+the usual pole scatter.
+
+### 5.15 Analytic UQ (Theorem C) and sampling sweeps
+
+The chirp core optionally predicts a **closed-form Gaussian predictive law** in
+latent space (per-mode initial variance `p0ₖ` and noise intensity `qₖ`, with the
+variance integral evaluated by a stable solver-free quadrature). Enable in
+`configs/config.py`: `CHIRP_UQ_HEAD = True` and `DIFF_LOSS_MODE = "gaussian_nll"`
+(mean and variance trained jointly), and train with
+`--modal-type chirp --predict-type x0` (the law is for ẑ₀; the certified no-head
+path is required — the model refuses otherwise). Setting
+`TRAIN_T_SAMPLER = "max_only"` additionally turns the arm into a **one-shot
+conditional regression** (no informative diffusion input).
+
+Evaluate calibration with:
+
+```bash
+llapdiff-uq-eval --dataset-key physionet --pred 12 \
+  --checkpoint <chirp-uq ckpt> --out-json ldt/results/uq_eval.json
+```
+
+which reports latent PIT calibration error, a reliability (coverage) curve,
+Gaussian NLL, and mean RMSE, using either a single one-shot forward
+(`--mean-source oneshot`, default) or the deterministic DDIM mean
+(`--mean-source ddim`). Sweep the sampling knobs of any checkpoint on the
+**validation** split with:
+
+```bash
+llapdiff-u1-sweep --dataset-key physionet --pred 12 --checkpoint <ckpt> \
+  --guidance 1.0 1.25 1.5 2.0 --steps 16 32 64
+```
+
+(per-cell CRPS/MAE/MSE plus the dynamic-threshold clip fraction).
 
 ---
 
@@ -762,6 +865,8 @@ summarizer per §3.5, then point `--checkpoint` at the matching
 | `--preds H1 [H2 ...]`                        | Subset of preset horizons; omit for all.               |
 | `--predict-type {v,x0,eps}`                  | Diffusion parameterization (default `v`).              |
 | `--modal-type {lti,chirp}`                   | Denoiser dynamical core: constant poles + MLP (`lti`, default) or time-varying poles (`chirp`, §5.12). |
+| `--output-head {auto,on,off}`                | Force the LapFormer output head on/off for ablations; `auto` = lti-on/chirp-off (§5.13). |
+| `--seed N`                                   | Seed all three stages; routes artifacts into `seed-<N>/` (§5.13).                        |
 | `--coverage F`                               | Hide `F` of observed context entries (`0 ≤ F < 1`).    |
 | `--batch-size N`                             | Override preset batch size.                            |
 | `--target-col COL` / `--target-cols`         | Single or multi-target forecasting.                    |

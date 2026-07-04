@@ -127,10 +127,11 @@ def test_chirp_field_integral_correctness():
 
 
 def test_chirp_is_nondegenerate_at_native_horizon():
-    """With time normalization, the time-varying part is non-negligible at a long horizon."""
+    """With window-scaled frequencies (fixed L = horizon, the operative default via
+    config resolution), the time-varying part sits in the intended O(0.01-0.1) band."""
     torch.manual_seed(0)
     B, K, C, M, H = 1, 3, 16, 6, 168.0
-    field = ChirpModalField(k=K, cond_dim=C, num_basis=M)
+    field = ChirpModalField(k=K, cond_dim=C, num_basis=M, time_scale=H)
     torch.nn.init.normal_(field.to_coeffs[-1].weight, std=0.5)  # activate time-variation
     cond = torch.randn(B, C)
     t_rel = torch.linspace(0.0, H, 400).view(1, 400, 1)
@@ -141,7 +142,63 @@ def test_chirp_is_nondegenerate_at_native_horizon():
         y = rho_bar[0, :, k]
         slope = (t * y).sum() / (t * t).sum()
         wiggle = (y - slope * t).abs().max()
-        assert wiggle / (slope * H).abs().clamp_min(1e-9) > 1e-2  # was ~2e-4 before the fix
+        ratio = wiggle / (slope * H).abs().clamp_min(1e-9)
+        assert 1e-2 < ratio < 0.5  # was ~2e-4 before the window-scaling fix
+
+
+def test_omega_stays_below_omega_max():
+    """The omega-coefficient rescale keeps instantaneous omega below omega_max (= pi)
+    pointwise, even with large trained-like coefficients; rho stays uncapped."""
+    torch.manual_seed(0)
+    B, K, C, M, L = 3, 4, 16, 6, 10.0
+    field = ChirpModalField(k=K, cond_dim=C, num_basis=M, time_scale=L)
+    torch.nn.init.normal_(field.to_coeffs[-1].weight, std=2.0)
+    torch.nn.init.normal_(field.to_coeffs[-1].bias, std=2.0)
+    cond = torch.randn(B, C)
+
+    _, omega0 = field.seed_poles(cond)
+    assert (omega0 < math.pi).all()
+
+    t_rel = torch.linspace(0.0, L, 200).view(1, 200, 1).expand(B, 200, 1).contiguous()
+    _, omega_floor = field._floor_poles(t_rel.dtype, t_rel.device)
+    _, a_omega2 = field._coeffs(cond)
+    phi, _ = field._basis(t_rel, field._time_scale(t_rel))
+    inst = omega_floor.view(1, 1, K) + torch.einsum("bkm,btm->btk", a_omega2, phi)
+    assert (inst <= math.pi + 1e-5).all()
+
+
+def test_chirp_field_instantaneous_matches_integrated_derivative():
+    """instantaneous() is the pointwise derivative of integrated() (fixed L)."""
+    torch.manual_seed(0)
+    B, K, C, M, L = 2, 3, 16, 6, 4.0
+    field = ChirpModalField(k=K, cond_dim=C, num_basis=M, time_scale=L)
+    torch.nn.init.normal_(field.to_coeffs[-1].weight, std=0.5)
+    cond = torch.randn(B, C)
+
+    h = 1e-3
+    tc = torch.full((B, 1, 1), 1.234)
+    rb_plus, ob_plus = field.integrated(cond, tc + h)
+    rb_minus, ob_minus = field.integrated(cond, tc - h)
+    rho_fd = (rb_plus - rb_minus) / (2 * h)
+    omega_fd = (ob_plus - ob_minus) / (2 * h)
+
+    rho_inst, omega_inst = field.instantaneous(cond, tc)
+    torch.testing.assert_close(rho_fd, rho_inst, atol=1e-3, rtol=1e-3)
+    torch.testing.assert_close(omega_fd, omega_inst, atol=1e-3, rtol=1e-3)
+
+
+def test_chirp_time_scale_resolution():
+    """None -> the run's horizon (PRED); 'adaptive' -> per-sample; numbers pass through."""
+    from llapdiffusion.trainers.train_val_llapdiff import _resolve_chirp_time_scale
+
+    chirp = dict(DENOISER_MODAL_TYPE="chirp", PRED=12)
+    assert _resolve_chirp_time_scale(SimpleNamespace(CHIRP_TIME_SCALE=None, **chirp)) == 12.0
+    assert _resolve_chirp_time_scale(SimpleNamespace(CHIRP_TIME_SCALE="adaptive", **chirp)) is None
+    assert _resolve_chirp_time_scale(SimpleNamespace(CHIRP_TIME_SCALE=33, **chirp)) == 33.0
+    with pytest.raises(ValueError):
+        _resolve_chirp_time_scale(SimpleNamespace(CHIRP_TIME_SCALE="bogus", **chirp))
+    # lti configs don't need PRED (the value is unused by the lti core).
+    assert _resolve_chirp_time_scale(SimpleNamespace(CHIRP_TIME_SCALE=None)) is None
 
 
 def test_chirp_contraction_bound():
@@ -210,6 +267,81 @@ def test_output_scale_preserved_for_chirp():
     assert not hasattr(model.model, "head_proj")
 
 
+def test_output_head_matrix_builds_all_four_cells():
+    """The head flag is decoupled from the modal type, so every 2x2 factorial cell
+    (lti/chirp x head on/off, plus the 'auto' default) builds and runs."""
+    import itertools
+
+    torch.manual_seed(0)
+    B, T, D, K = 2, 5, 8, 4
+    x = torch.randn(B, T, D)
+    ts = torch.randint(0, 50, (B,))
+    dt = torch.sort(torch.rand(B, T), dim=1).values
+    for modal, head in itertools.product(("lti", "chirp"), ("auto", "on", "off")):
+        model = LLapDiff(
+            data_dim=D, hidden_dim=32, num_layers=2, num_heads=4, laplace_k=K,
+            timesteps=50, denoiser_modal_type=modal, output_head=head,
+        ).eval()
+        expect_head = (modal != "chirp") if head == "auto" else (head == "on")
+        assert model.model._use_output_head is expect_head, (modal, head)
+        assert hasattr(model.model, "head_proj") is expect_head, (modal, head)
+        assert hasattr(model.model, "output_skip_scale")  # scaling exists in every cell
+        with torch.no_grad():
+            y = model(x, ts, dt=dt)
+        assert y.shape == (B, T, D) and torch.isfinite(y).all(), (modal, head)
+
+
+def test_no_head_path_clamps_skip_scale():
+    """On the certified (no-head) path the Theorem-B constant is clamped to |s| <= 1."""
+    torch.manual_seed(0)
+    B, T, D = 2, 5, 8
+    model = LLapDiff(data_dim=D, hidden_dim=32, num_layers=2, num_heads=4,
+                     laplace_k=4, timesteps=50, denoiser_modal_type="chirp").eval()
+    x = torch.randn(B, T, D)
+    ts = torch.randint(0, 50, (B,))
+    dt = torch.sort(torch.rand(B, T), dim=1).values
+    with torch.no_grad():
+        model.model.output_skip_scale.fill_(1.0)
+        y_at_one = model(x, ts, dt=dt)
+        model.model.output_skip_scale.fill_(5.0)
+        y_at_five = model(x, ts, dt=dt)
+    torch.testing.assert_close(y_at_one, y_at_five)  # 5.0 clamps to 1.0
+
+
+def test_chirp_output_scale_o1_at_init():
+    """Loss-scale regression guard (the naive Finding-1 patch): unit-scale input must
+    give O(1) output at init — the raw K=256 modal sum without the skip scale is ~10x."""
+    torch.manual_seed(0)
+    B, T, D, K = 2, 16, 16, 256
+    model = LLapDiff(data_dim=D, hidden_dim=64, num_layers=2, num_heads=4,
+                     laplace_k=K, timesteps=50, denoiser_modal_type="chirp").eval()
+    x = torch.randn(B, T, D)
+    ts = torch.randint(0, 50, (B,))
+    dt = torch.sort(torch.rand(B, T), dim=1).values
+    with torch.no_grad():
+        y = model(x, ts, dt=dt)
+    rms = y.pow(2).mean().sqrt()
+    assert rms < 5.0  # dropping the skip scale regresses this to ~15+
+
+
+def test_set_torch_seed_determinism():
+    """Same seed -> identical model init and identical RNG stream (multi-seed cells)."""
+    from llapdiffusion.models.llapdiff_utils import set_torch
+
+    def build():
+        model = LLapDiff(data_dim=8, hidden_dim=32, num_layers=2, num_heads=4,
+                         laplace_k=4, timesteps=50, denoiser_modal_type="chirp")
+        params = torch.cat([p.detach().flatten() for p in model.parameters()])
+        return params, torch.randn(64)
+
+    set_torch(123)
+    params_a, draw_a = build()
+    set_torch(123)
+    params_b, draw_b = build()
+    torch.testing.assert_close(params_a, params_b)
+    torch.testing.assert_close(draw_a, draw_b)
+
+
 def test_lapformer_chirp_forward_shapes_and_finite():
     torch.manual_seed(0)
     B, T, D, K = 2, 5, 8, 6
@@ -234,6 +366,8 @@ def test_checkpoint_missing_modal_type_defaults_to_lti():
     payload = {"model_config": {"llapdiff": {"data_dim": 8, "hidden_dim": 32}}}
     cfg = _llapdiff_config_from_checkpoint(payload)
     assert cfg["denoiser_modal_type"] == "lti"
+    # Pre-decoupled-head checkpoints rebuild with the modal-type-dependent head.
+    assert cfg["output_head"] == "auto"
 
 
 def test_run_preds_routes_chirp_into_its_own_dirs(monkeypatch, tmp_path):
@@ -309,3 +443,32 @@ def test_run_preds_default_lti_keeps_base_dirs(monkeypatch, tmp_path):
     assert pipeline.run_preds([5], config=cfg) == {5: {"eval_stats": {}}}
     assert calls == [(tmp_path / "out", tmp_path / "ckpt")]
     assert cfg.OUT_DIR == str(tmp_path / "out")
+
+
+def test_run_preds_routes_head_and_seed_segments(monkeypatch, tmp_path):
+    """Forced head modes and explicit seeds nest inside the modal segment, so the
+    2x2 factorial cells and their seeds never overwrite each other."""
+    from llapdiffusion import pipeline
+
+    calls = []
+    cfg = SimpleNamespace(
+        PREDICT_TYPE="v",
+        DENOISER_MODAL_TYPE="chirp",
+        DENOISER_OUTPUT_HEAD="on",
+        REQUESTED_SEED_ARG=3,
+        OUT_DIR=str(tmp_path / "out"),
+        CKPT_DIR=str(tmp_path / "ckpt"),
+        POLE_PLOT_DIR=str(tmp_path / "out" / "pole_plots"),
+    )
+
+    def fake_run_single_pred(pred, **kwargs):
+        calls.append((kwargs["base_out_dir"], kwargs["base_ckpt_dir"]))
+        return {"eval_stats": {}}
+
+    monkeypatch.setattr(pipeline, "run_single_pred", fake_run_single_pred)
+
+    assert pipeline.run_preds([5], config=cfg) == {5: {"eval_stats": {}}}
+    expected_out = tmp_path / "out" / "modal-chirp" / "head-on" / "seed-3"
+    expected_ckpt = tmp_path / "ckpt" / "modal-chirp" / "head-on" / "seed-3"
+    assert calls == [(expected_out, expected_ckpt)]
+    assert cfg.POLE_PLOT_DIR == str(expected_out / "pole_plots")

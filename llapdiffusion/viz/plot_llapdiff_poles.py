@@ -399,6 +399,83 @@ def _extract_conditioned_poles(
     return rho.detach().cpu(), omega.detach().cpu()
 
 
+@torch.no_grad()
+def extract_chirp_pole_trajectories(
+    model: LLapDiff,
+    *,
+    t_idx: int,
+    cond_summary: torch.Tensor,
+    cond_summary_raw: torch.Tensor,
+    t_grid: torch.Tensor,
+    top_modes: int = 4,
+) -> Dict[str, torch.Tensor]:
+    """Instantaneous pole trajectories of a chirp model for real conditioning.
+
+    ``t_grid`` is a 1-D tensor of relative query times (native steps). Modes are
+    ranked per example by their time-variation energy (sum of squared basis
+    coefficients), so the returned top modes are the ones the model actually
+    makes time-varying. Returns CPU tensors:
+    ``rho``/``omega`` [B, T, top_modes], ``mode_indices`` [B, top_modes],
+    ``variation_energy`` [B, K], ``t_grid`` [T].
+    """
+    chirp_field = model.model.chirp_field
+    if chirp_field is None:
+        raise ValueError("Checkpoint uses the lti core; pole trajectories require a chirp model.")
+
+    device = next(model.parameters()).device
+    batch = cond_summary.size(0)
+    t = torch.full((batch,), int(t_idx), device=device, dtype=torch.long)
+    t_vec = model._time_embed(t).to(cond_summary.dtype)
+    cond_vec = model.model.make_pole_cond(
+        t_vec,
+        cond_summary=cond_summary,
+        cond_summary_raw=cond_summary_raw,
+    )
+
+    t_rel = t_grid.to(device=device, dtype=cond_vec.dtype).view(1, -1, 1).expand(batch, -1, 1)
+    rho, omega = chirp_field.instantaneous(cond_vec, t_rel.contiguous())  # [B,T,K]
+
+    a_rho2, a_omega2 = chirp_field._coeffs(cond_vec)  # [B,K,M]
+    energy = a_rho2.sum(dim=-1) + a_omega2.sum(dim=-1)  # [B,K]
+    k_top = min(int(top_modes), energy.shape[1])
+    mode_indices = energy.topk(k_top, dim=1).indices  # [B,k_top]
+    gather_idx = mode_indices.unsqueeze(1).expand(-1, rho.shape[1], -1)  # [B,T,k_top]
+
+    return {
+        "rho": rho.gather(2, gather_idx).detach().cpu(),
+        "omega": omega.gather(2, gather_idx).detach().cpu(),
+        "mode_indices": mode_indices.detach().cpu(),
+        "variation_energy": energy.detach().cpu(),
+        "t_grid": t_grid.detach().cpu(),
+    }
+
+
+def _plot_pole_trajectories(traj: Dict[str, torch.Tensor], save_path: Path, *, title: str) -> None:
+    """Two-panel rho(t)/omega(t) figure: solid = top mode, faint = next modes."""
+    t = traj["t_grid"].numpy()
+    rho = traj["rho"].numpy()  # [B,T,k_top]
+    omega = traj["omega"].numpy()
+    cmap = plt.get_cmap("tab10")
+
+    fig, (ax_rho, ax_omega) = plt.subplots(1, 2, figsize=(11, 4.2))
+    for b in range(rho.shape[0]):
+        color = cmap(b % 10)
+        for k in range(rho.shape[2]):
+            alpha = 0.95 if k == 0 else 0.25
+            label = f"example {b}" if k == 0 else None
+            ax_rho.plot(t, rho[b, :, k], color=color, alpha=alpha, label=label)
+            ax_omega.plot(t, omega[b, :, k], color=color, alpha=alpha)
+    ax_rho.set_xlabel("relative time t̃ (native steps)")
+    ax_rho.set_ylabel("instantaneous ρ(t̃)")
+    ax_omega.set_xlabel("relative time t̃ (native steps)")
+    ax_omega.set_ylabel("instantaneous ω(t̃) [rad/step]")
+    ax_rho.legend(loc="best", fontsize=8)
+    fig.suptitle(title)
+    fig.tight_layout()
+    fig.savefig(save_path)
+    plt.close(fig)
+
+
 def _pick_timesteps(total_steps: int, n: int) -> Sequence[int]:
     if n <= 1:
         return [total_steps // 2]
@@ -530,6 +607,25 @@ def main() -> None:
     plt.savefig(save_path)
     plt.close()
     print(f"Saved pole plot to: {save_path}")
+
+    # Chirp core: additionally plot the pole *trajectories* rho_k(t), omega_k(t)
+    # over the forecast window (the static scatter above only shows t=0 seeds).
+    if model.model.chirp_field is not None:
+        t_grid = torch.arange(1, int(pred) + 1, dtype=torch.float32)
+        traj = extract_chirp_pole_trajectories(
+            model,
+            t_idx=int(timesteps[len(timesteps) // 2]),
+            cond_summary=cond_summary,
+            cond_summary_raw=cond_summary_raw,
+            t_grid=t_grid,
+        )
+        traj_path = output_dir / f"{dataset_key}_pred{pred}_{checkpoint.stem}_pole_trajectories.pdf"
+        _plot_pole_trajectories(
+            traj,
+            traj_path,
+            title=f"Chirp pole trajectories ({dataset_key}, pred={pred}, split={args.split})",
+        )
+        print(f"Saved pole-trajectory plot to: {traj_path}")
 
 
 if __name__ == "__main__":

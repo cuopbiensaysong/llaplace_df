@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import Optional, Tuple, Union
+from typing import Dict, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -44,10 +44,17 @@ class LLapDiff(nn.Module):
         chirp_rho_min: float = 1e-4,
         chirp_use_mlp_residual: bool = False,
         chirp_time_scale: Optional[float] = None,
+        output_head: str = "auto",
+        chirp_uq_head: bool = False,
     ) -> None:
         super().__init__()
         if predict_type not in {"eps", "v", "x0"}:
             raise ValueError("predict_type must be either 'eps', 'v', or 'x0'")
+        if chirp_uq_head and predict_type != "x0":
+            raise ValueError(
+                "chirp_uq_head requires predict_type='x0': the analytic Gaussian law "
+                "(Theorem C) is a law for z0, so the mean must be the x0 prediction."
+            )
 
         self.predict_type = predict_type
         self.self_conditioning = bool(self_conditioning)
@@ -81,6 +88,8 @@ class LLapDiff(nn.Module):
             chirp_rho_min=chirp_rho_min,
             chirp_use_mlp_residual=chirp_use_mlp_residual,
             chirp_time_scale=chirp_time_scale,
+            output_head=output_head,
+            chirp_uq_head=chirp_uq_head,
         )
         self.time_dim = hidden_dim
 
@@ -102,6 +111,7 @@ class LLapDiff(nn.Module):
         cond_summary_raw: Optional[torch.Tensor] = None,
         sc_feat: Optional[torch.Tensor] = None,
         dt: Optional[torch.Tensor] = None,
+        return_variance: bool = False,
     ) -> torch.Tensor:
         t_emb = self._time_embed(t).to(x_t.dtype)
         out_tokens = self.model(
@@ -111,6 +121,7 @@ class LLapDiff(nn.Module):
             cond_summary_raw=cond_summary_raw,
             sc_feat=sc_feat,
             dt=dt,
+            return_variance=return_variance,
         )
         return out_tokens
 
@@ -137,6 +148,7 @@ class LLapDiff(nn.Module):
         generator: Optional[torch.Generator] = None,
         dynamic_thresh_p: float = 0.0,
         dynamic_thresh_max: float = 1.0,
+        clip_stats: Optional[Dict[str, float]] = None,
     ) -> torch.Tensor:
         """
         Sample trajectories with DDIM and optional CFG.
@@ -254,6 +266,13 @@ class LLapDiff(nn.Module):
                 return x0
             x = x0.float()
             s = torch.quantile(x.reshape(B, -1).abs(), q=p, dim=1).clamp_min(1.0).view(B, 1, 1)
+            if clip_stats is not None:
+                # Fraction of elements the threshold actually clips (U1 diagnostics).
+                frac = ((x.abs() / s) > max_val).float().mean()
+                clip_stats["clipped_fraction_sum"] = (
+                    clip_stats.get("clipped_fraction_sum", 0.0) + float(frac)
+                )
+                clip_stats["steps"] = clip_stats.get("steps", 0) + 1
             x = (x / s).clamp(-max_val, max_val)
             return x.to(dtype=x0.dtype)
 

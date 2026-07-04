@@ -28,6 +28,19 @@ DEFAULT_FREQ = "1h"
 MAX_WINDOW = 96
 MAX_HORIZON = 48
 
+# Piecewise (regime-shift) tasks used by the boundary-crossing protocol.
+SHIFT_TASKS = ("synthetic_freq_shift", "synthetic_decay_shift")
+# Smoothly time-varying ground-truth pole tasks (the chirp benchmark, H2). The
+# freq-shift task doubles as the piecewise-pole "regime switch" benchmark case.
+CHIRP_TASKS = (
+    "synthetic_linear_chirp",
+    "synthetic_quadratic_chirp",
+    "synthetic_ramp_damping_up",
+    "synthetic_ramp_damping_down",
+    "synthetic_growth_decay",
+)
+ALL_TASKS = SHIFT_TASKS + CHIRP_TASKS
+
 
 @dataclass
 class SyntheticRegimeCacheConfig:
@@ -56,37 +69,93 @@ class SyntheticRegimeCacheConfig:
     phase_min: float = 0.0
     phase_max: float = 2.0 * np.pi
     keep_time_meta: str = "end"
+    # Total log-amplitude the envelope gains before change_point in the
+    # growth-then-decay task (the Theorem-B' budget case; e.g. log 2 = c_g).
+    growth_log_amplitude: float = float(np.log(2.0))
+    # Share one (base_frequency, base_decay) draw across all entities (amplitude,
+    # baseline, phase, and noise stay per-entity). The chirp benchmark uses this so
+    # a joint date row has a single well-defined ground-truth pole function.
+    shared_poles: bool = False
 
 
 def _validate_task(task: str) -> str:
     value = str(task).strip().lower()
-    if value not in {"synthetic_freq_shift", "synthetic_decay_shift"}:
+    if value not in set(ALL_TASKS):
         raise ValueError(
-            f"Unsupported synthetic task '{task}'. "
-            "Expected one of {'synthetic_freq_shift', 'synthetic_decay_shift'}."
+            f"Unsupported synthetic task '{task}'. Expected one of {sorted(ALL_TASKS)}."
         )
     return value
 
 
-def _generate_signal(cfg: SyntheticRegimeCacheConfig, rng: np.random.Generator) -> np.ndarray:
+def _pole_profiles(
+    cfg: SyntheticRegimeCacheConfig,
+    *,
+    base_frequency: float,
+    base_decay: float,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Per-step ground-truth pole profiles (frequency [cycles/step], decay [1/step]).
+
+    Every task is a special case of the chirp-modal closed form
+    ``amplitude * exp(-cumsum(decay)) * sin(phase0 + cumsum(2*pi*frequency))``:
+    the task only decides how the instantaneous poles vary over the series.
+    """
+    T = int(cfg.series_length)
+    ramp = np.linspace(0.0, 1.0, T, dtype=np.float64)  # u = t/(T-1)
+    frequency = np.full((T,), float(base_frequency), dtype=np.float64)
+    decay = np.full((T,), float(base_decay), dtype=np.float64)
+
+    if cfg.task == "synthetic_freq_shift":
+        frequency[cfg.change_point :] = float(cfg.freq_multiplier) * base_frequency
+    elif cfg.task == "synthetic_decay_shift":
+        decay[cfg.change_point :] = float(cfg.decay_multiplier) * base_decay
+    elif cfg.task == "synthetic_linear_chirp":
+        frequency = base_frequency * (1.0 + (float(cfg.freq_multiplier) - 1.0) * ramp)
+    elif cfg.task == "synthetic_quadratic_chirp":
+        frequency = base_frequency * (1.0 + (float(cfg.freq_multiplier) - 1.0) * ramp**2)
+    elif cfg.task == "synthetic_ramp_damping_up":
+        decay = base_decay * (1.0 + (float(cfg.decay_multiplier) - 1.0) * ramp)
+    elif cfg.task == "synthetic_ramp_damping_down":
+        decay = base_decay * (float(cfg.decay_multiplier) - (float(cfg.decay_multiplier) - 1.0) * ramp)
+    elif cfg.task == "synthetic_growth_decay":
+        # Envelope rises by exp(growth_log_amplitude) up to the change point
+        # (instantaneous decay is negative there), then damps.
+        decay = np.full((T,), float(cfg.decay_multiplier) * base_decay, dtype=np.float64)
+        decay[: cfg.change_point] = -float(cfg.growth_log_amplitude) / float(cfg.change_point)
+    else:  # pragma: no cover - guarded by _validate_task
+        raise ValueError(f"Unhandled synthetic task '{cfg.task}'.")
+
+    return frequency.astype(np.float32), decay.astype(np.float32)
+
+
+def _generate_signal(
+    cfg: SyntheticRegimeCacheConfig,
+    rng: np.random.Generator,
+    *,
+    base_frequency: Optional[float] = None,
+    base_decay: Optional[float] = None,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return (signal, frequency, decay); the pole arrays are the ground truth.
+
+    Explicit ``base_frequency``/``base_decay`` override the per-entity draw
+    (used when ``cfg.shared_poles`` shares one pole function across entities).
+    """
     amplitude = float(rng.uniform(cfg.amplitude_min, cfg.amplitude_max))
     baseline = float(rng.uniform(cfg.baseline_min, cfg.baseline_max))
     phase0 = float(rng.uniform(cfg.phase_min, cfg.phase_max))
-    base_frequency = float(rng.uniform(cfg.frequency_min, cfg.frequency_max))
-    base_decay = float(rng.uniform(cfg.decay_min, cfg.decay_max))
+    if base_frequency is None:
+        base_frequency = float(rng.uniform(cfg.frequency_min, cfg.frequency_max))
+    if base_decay is None:
+        base_decay = float(rng.uniform(cfg.decay_min, cfg.decay_max))
 
-    frequency = np.full((cfg.series_length,), base_frequency, dtype=np.float32)
-    decay = np.full((cfg.series_length,), base_decay, dtype=np.float32)
-    if cfg.task == "synthetic_freq_shift":
-        frequency[cfg.change_point :] = np.float32(float(cfg.freq_multiplier) * base_frequency)
-    else:
-        decay[cfg.change_point :] = np.float32(float(cfg.decay_multiplier) * base_decay)
+    frequency, decay = _pole_profiles(
+        cfg, base_frequency=base_frequency, base_decay=base_decay
+    )
 
     phase_path = phase0 + np.cumsum((2.0 * np.pi * frequency).astype(np.float64))
     envelope = np.exp(-np.cumsum(decay.astype(np.float64)))
     noise = rng.normal(0.0, cfg.noise_std, size=(cfg.series_length,)).astype(np.float64)
     signal = baseline + amplitude * envelope * np.sin(phase_path) + noise
-    return signal.astype(np.float32, copy=False)
+    return signal.astype(np.float32, copy=False), frequency, decay
 
 
 def prepare_synthetic_regime_cache(cfg: SyntheticRegimeCacheConfig) -> Mapping[str, object]:
@@ -126,9 +195,19 @@ def prepare_synthetic_regime_cache(cfg: SyntheticRegimeCacheConfig) -> Mapping[s
     ends: List[np.ndarray] = []
     generation_rows: List[Dict[str, object]] = []
 
+    pole_truth_dir = paths.cache_root / "pole_truth"
+    pole_truth_dir.mkdir(parents=True, exist_ok=True)
+
+    shared_frequency = shared_decay = None
+    if cfg.shared_poles:
+        shared_frequency = float(rng.uniform(cfg.frequency_min, cfg.frequency_max))
+        shared_decay = float(rng.uniform(cfg.decay_min, cfg.decay_max))
+
     for asset in assets:
         aid = asset_to_id[asset]
-        signal = _generate_signal(cfg, rng)
+        signal, frequency, decay = _generate_signal(
+            cfg, rng, base_frequency=shared_frequency, base_decay=shared_decay
+        )
         features = signal.reshape(-1, 1).astype(np.float32, copy=False)
         targets = signal.astype(np.float32, copy=False)
         times = start_time + np.arange(cfg.series_length).astype("timedelta64[h]")
@@ -140,6 +219,14 @@ def prepare_synthetic_regime_cache(cfg: SyntheticRegimeCacheConfig) -> Mapping[s
         np.save(paths.times / f"{aid}.npy", times.astype("datetime64[ns]"))
         np.save(paths.obs_masks / f"{aid}.npy", obs_mask)
         np.save(paths.fill_masks / f"{aid}.npy", fill_mask)
+        # Ground-truth instantaneous poles in model units (per native step):
+        # rho = decay, omega = 2*pi*frequency [rad/step]. Consumed by the chirp
+        # benchmark's recovery figure (load_ground_truth_poles).
+        np.savez(
+            pole_truth_dir / f"{aid}.npz",
+            rho=decay.astype(np.float32),
+            omega=(2.0 * np.pi * frequency).astype(np.float32),
+        )
         norm_acc.update(aid, features, targets)
 
         total_rows = int(features.shape[0])
@@ -195,6 +282,8 @@ def prepare_synthetic_regime_cache(cfg: SyntheticRegimeCacheConfig) -> Mapping[s
             "freq_multiplier": float(cfg.freq_multiplier),
             "decay_multiplier": float(cfg.decay_multiplier),
             "noise_std": float(cfg.noise_std),
+            "growth_log_amplitude": float(cfg.growth_log_amplitude),
+            "shared_poles": bool(cfg.shared_poles),
         },
     }
     with paths.meta.open("w") as f:
@@ -208,6 +297,31 @@ def prepare_synthetic_regime_cache(cfg: SyntheticRegimeCacheConfig) -> Mapping[s
         "window_count": int(global_pairs.shape[0]),
         "change_point": int(cfg.change_point),
     }
+
+
+def load_ground_truth_poles(data_dir: PathLike) -> Dict[int, Dict[str, np.ndarray]]:
+    """Load the per-entity ground-truth instantaneous poles saved by the generator.
+
+    Returns ``{asset_id: {"rho": [T], "omega": [T]}}`` in model units (per native
+    step; omega in rad/step). Raises if the cache predates pole-truth persistence.
+    """
+    paths = CachePaths.from_dir(data_dir)
+    truth_dir = paths.cache_root / "pole_truth"
+    if not truth_dir.exists():
+        raise FileNotFoundError(
+            f"No pole_truth/ directory under '{paths.cache_root}'. "
+            "Regenerate the cache (overwrite=True) with the current generator."
+        )
+    truth: Dict[int, Dict[str, np.ndarray]] = {}
+    for npz_path in sorted(truth_dir.glob("*.npz")):
+        payload = np.load(npz_path)
+        truth[int(npz_path.stem)] = {
+            "rho": payload["rho"].astype(np.float32),
+            "omega": payload["omega"].astype(np.float32),
+        }
+    if not truth:
+        raise FileNotFoundError(f"pole_truth/ under '{paths.cache_root}' is empty.")
+    return truth
 
 
 def _validate_cache(paths: CachePaths) -> Dict[str, object]:
@@ -369,13 +483,17 @@ def build_regime_eval_loader(
 
 
 __all__ = [
+    "ALL_TASKS",
+    "CHIRP_TASKS",
     "DATASET_NAME",
     "DEFAULT_FREQ",
     "MAX_HORIZON",
     "MAX_WINDOW",
+    "SHIFT_TASKS",
     "SyntheticRegimeCacheConfig",
     "build_context_end_eval_loader",
     "build_regime_eval_loader",
+    "load_ground_truth_poles",
     "prepare_synthetic_regime_cache",
     "run_experiment",
 ]

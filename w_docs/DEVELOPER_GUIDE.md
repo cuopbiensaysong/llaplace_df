@@ -75,12 +75,18 @@ The console script `llapdiff-train` maps (via `pyproject.toml`) to
 5. Build `training_overrides` from the `--target-mask-aux-*` flags
   (`_training_overrides_from_args`, line 644).
 6. Resolve the horizon list (`args.preds` or the preset's full set).
-7. `**_apply_predict_type_output_routing`** then
-  `**_apply_modal_type_output_routing`**: for a non-default `--predict-type`
-   (`x0`/`eps`) append `predict-<type>`, and for a non-default `--modal-type`
-   (`chirp`) append `modal-<core>`, to `OUT_DIR`/`CKPT_DIR` so neither overwrites
-   the default `v`/`lti` outputs. The two compose (`predict-x0/modal-chirp/`).
-   Capture `base_out_dir` / `base_ckpt_dir`.
+7. **Output routing** (`_apply_predict_type_output_routing` →
+  `_apply_modal_type_output_routing` → `_apply_output_head_routing` →
+   `_apply_seed_output_routing`): non-default `--predict-type` (`x0`/`eps`),
+   `--modal-type` (`chirp`), `--output-head` (`on`/`off`), and an explicit
+   `--seed` each append their own segment to `OUT_DIR`/`CKPT_DIR`, composing as
+   `predict-x0/modal-chirp/head-on/seed-3/`, so no arm overwrites another.
+   Seed routing keys on `REQUESTED_SEED_ARG` (set only when `--seed` is passed);
+   `SEED`/`REQUESTED_SEED_ARG`/`DENOISER_OUTPUT_HEAD` are not preset-stamped, so
+   they survive the double preset application. Capture `base_out_dir` /
+   `base_ckpt_dir`. `--seed` also sets `config.SEED`, which all three trainers
+   consume (`set_torch` in the VAE + diffusion trainers, `set_seed` in the
+   summarizer).
 8. **Loop over horizons** → `run_single_pred(...)` for each (line 840).
 9. Print a summary table; optionally write `--summary-json`.
 
@@ -402,10 +408,18 @@ path, and the residues `theta [B,2K,D]` (the constant cₖ/bₖ) are reused unch
   *cycles across the window*, so `_basis` divides `2π f_m` by a time scale `L`.
   Without this, with raw native `t̃` (horizons ~100–168) the oscillatory part of
   `Φ_m` has amplitude `1/(2π f_m)` ≪ the linear `t̃` term, so `ρ̄,ω̄` degenerate to
-  a constant-slope ramp (≈LTI). `_time_scale(t_rel)` returns the fixed
-  `CHIRP_TIME_SCALE` when set, else a per-sample data-adaptive
-  `L = max|t̃|.clamp_min(1e-6)` (the default, `None`). `seed_poles` is
-  scale-invariant (`φ_m(0)=2`) and unchanged.
+  a constant-slope ramp (≈LTI). `_resolve_chirp_time_scale`
+  (`train_val_llapdiff.py`) maps the config to the model kwarg: `None` (default)
+  → **the run's `config.PRED`** (a fixed per-run constant, so the pole function
+  class is sample-independent); a number → itself; `"adaptive"` → the module's
+  per-sample `L = max|t̃|.clamp_min(1e-6)` fallback. The resolved value is
+  persisted in the checkpoint. `seed_poles` is scale-invariant (`φ_m(0)=2`).
+- **ω cap (Nyquist).** `_coeffs` smoothly rescales the ω coefficients so
+  `sup_t̃ ω = floor + 2Σ_m a² ≤ ω_max = π` pointwise (per native step): the raw
+  squares are multiplied by `headroom/(2Σa² + headroom)` with
+  `headroom = π − floor`. The coefficients stay a plain linear combination of
+  the basis (closed-form antiderivative preserved), the scale is 1 at zero
+  coefficients (LTI-at-init unchanged), and ρ needs no cap (only positivity).
 - **Synthesis** — `LaplaceTransformEncoder.chirp_basis_matrix(ρ̄,ω̄)` builds
   `e^{-ρ̄}[cos ω̄, sin ω̄]`; `LaplacePseudoInverse.forward` takes optional
   `rho_bar/omega_bar` and uses it in place of the constant-pole `basis_matrix`.
@@ -419,31 +433,53 @@ path, and the residues `theta [B,2K,D]` (the constant cₖ/bₖ) are reused unch
   scale — while `head_proj(head_norm(y_time))` is an **uncertified** residual
   whose `LayerNorm` re-inflates the decaying envelope to ~unit scale, breaking
   Theorem B for the model's *actual* output even though the synthesizer `y_time`
-  satisfies it. `LapFormer` gates *only the residual* on
-  `self._use_output_head = denoiser_modal_type != "chirp"`: `output_skip_scale`
-  is always built (init `0.1`), but in chirp mode `head_norm`/`head_proj` are not,
-  and `forward` returns `output_skip_scale · y_time`. (Returning the *raw* sum
-  instead inflates predictions ~10×, blowing up the loss scale and CRPS — the
-  scaling is certified and must be kept.) The lti path is untouched. Chirp
-  checkpoints therefore have **no** `head_proj`/`head_norm` keys but **do** keep
+  satisfies it. `LapFormer` gates *only the residual* on the **decoupled flag**
+  `output_head` (`DENOISER_OUTPUT_HEAD` / `--output-head`,
+  `normalize_output_head_mode` in `lapformer.py`): `"auto"` (default) means
+  head-on for lti / head-off for chirp; `"on"`/`"off"` force it either way so
+  every poles × head ablation cell is buildable. `output_skip_scale` is always
+  built (init `0.1`); on the no-head path `forward` returns
+  `clamp(s, |s|≤1) · y_time` — the clamp pins the Theorem-B bound constant.
+  (Returning the *raw* sum instead inflates predictions ~10×, blowing up the
+  loss scale and CRPS — the scaling is certified and must be kept.) Head-off
+  checkpoints have **no** `head_proj`/`head_norm` keys but **do** keep
   `output_skip_scale`.
+- **Analytic UQ head (Theorem C).** `CHIRP_UQ_HEAD=True` adds per-mode softplus
+  heads `p0_k` (initial variance) and `q_k` (constant-in-time noise intensity) to
+  `ChirpModalField` (`uq_params`), and `modal_variance` evaluates
+  `s_k(t)=e^{-2ρ̄}p0 + v_k(t)` with an **exponential-integrator recurrence** —
+  overflow-free (all exponents ≤ 0) and exact for constant poles (reproduces the
+  Lyapunov closed form `q(1−e^{-2ρt})/2ρ`); the v_k integrand has no elementary
+  antiderivative under P-exact, so this is the "solver-free 1-D quadrature".
+  `LapFormer.forward(..., return_variance=True)` returns `(mean, var)` with the
+  diagonal Eq.-7 readout `Var(z_d)=Σ_k s_k(t)(c_kd²+b_kd²)`, scaled by the squared
+  clamped skip scale. Guards: requires chirp + `predict_type='x0'` + the certified
+  (no-head) path. `DIFF_LOSS_MODE="gaussian_nll"` switches `diffusion_loss` to
+  `0.5(log σ² + err²/σ²)` under the same masking/MinSNR weighting;
+  `TRAIN_T_SAMPLER="max_only"` gives the one-shot (no-diffusion) arm. Calibration
+  metrics live in `models/uq_metrics.py`; reporting in `tools/run_analytic_uq_eval.py`.
 - **Wiring** — `LapFormer.__init__` builds `self.chirp_field` and forces the
   synthesis residual off in chirp mode; `LapFormer.forward` branches to seed
   analysis with `seed_poles` and synthesize with `integrated` poles.
 - **Persistence / back-compat** — `_llapdiff_model_kwargs` writes
-  `denoiser_modal_type` + `chirp_*` into the checkpoint's `model_config`;
-  `_llapdiff_config_from_checkpoint` does `setdefault("denoiser_modal_type",
-  "lti")`, so **pre-chirp checkpoints rebuild as LTI** and eval/plotting need no
-  extra flag (the core is read from metadata). Independent of `PREDICT_TYPE`.
+  `denoiser_modal_type` + `chirp_*` + `output_head` into the checkpoint's
+  `model_config`; `_llapdiff_config_from_checkpoint` does
+  `setdefault("denoiser_modal_type", "lti")`, `setdefault("chirp_time_scale",
+  None)` and `setdefault("output_head", "auto")`, so **pre-chirp checkpoints
+  rebuild as LTI** (and pre-flag checkpoints with the modal-type-dependent head)
+  and eval/plotting need no extra flag — everything is read from metadata.
+  Independent of `PREDICT_TYPE`.
 - **Tests** — `tests/test_chirp_modal.py`: LTI-equivalence at init, integral
   correctness (ρ̄(0)=0, d/dt ρ̄ = instantaneous ρ, with a fixed `time_scale` so
   the finite-difference is pointwise), non-degeneracy at a native horizon (the
-  window-scaling check), the synthesizer contraction bound **and the full-model
-  contraction bound** (`test_full_model_contraction_bound`, with a trained-like
-  perturbed head, confirming the output decays to ~0), a scaling regression guard
-  (`test_output_scale_preserved_for_chirp`, asserts chirp keeps `output_skip_scale`
-  while dropping the residual), end-to-end `LapFormer` shapes, and checkpoint
-  back-compat.
+  window-scaling check), the ω cap, the synthesizer contraction bound **and the
+  full-model contraction bound** (`test_full_model_contraction_bound`, with a
+  trained-like perturbed head, confirming the output decays to ~0), scaling
+  guards (`test_output_scale_preserved_for_chirp`, `test_chirp_output_scale_o1_at_init`,
+  `test_no_head_path_clamps_skip_scale`), the 2×2 build matrix
+  (`test_output_head_matrix_builds_all_four_cells`), seed determinism,
+  time-scale resolution, routing composition, end-to-end `LapFormer` shapes,
+  and checkpoint back-compat.
 
 > **Output routing.** A chirp run is nested under a `modal-chirp/` segment by
 > `_apply_modal_type_output_routing` (`pipeline.py`), composing with any
@@ -499,6 +535,9 @@ checkpoint metadata. If the checkpoint records it, you don't pass `--predict-typ
 | Change checkpoint selection metric / early stop                               | `trainers/train_val_llapdiff.py` (~2493-2850); `PRIMARY_EVAL_METRIC`, `EARLY_STOP`                          |
 | Change the diffusion network / Laplace poles                                  | `models/llapdiff.py`, `models/lapformer.py`                                                                 |
 | Add/modify the chirp time-varying-pole core (§7.5)                            | `models/laptrans.py` (`ChirpModalField`, `chirp_basis_matrix`), `models/lapformer.py` (chirp branch); toggle/tunables in `configs/config.py` (`DENOISER_MODAL_TYPE`, `CHIRP_*`) + `pipeline.py` (`--modal-type`) |
+| Add a synthetic ground-truth pole task / change the chirp benchmark            | `datasets/synthetic_regime_dataset.py` (`_pole_profiles`, `CHIRP_TASKS`, `load_ground_truth_poles`); runner in `tools/run_synthetic_chirp_benchmark.py` (`llapdiff-synthetic-chirp`) |
+| Plot chirp pole trajectories / recovery figures                                | `viz/plot_llapdiff_poles.py` (`extract_chirp_pole_trajectories`, `_plot_pole_trajectories`); Prop.-A.1 figure in `tools/plot_companion_vs_normal_form.py` |
+| Change the analytic UQ head / variance quadrature / NLL loss (§7.5)            | `models/laptrans.py` (`uq_params`, `modal_variance`), `models/lapformer.py` (`return_variance`), `models/llapdiff_utils.py` (`diffusion_loss` loss_mode); metrics `models/uq_metrics.py`; eval `tools/run_analytic_uq_eval.py`; sweep `tools/run_u1_sweep.py` |
 | Change the VAE architecture / KL schedule / recon loss                        | `latent_space/latent_vae.py`, `trainers/train_val_latent.py`                                                |
 | Change the summarizer architecture / its loss weights                         | `models/summarizer.py`, `trainers/train_val_summarizer.py`                                                  |
 | Change what the dataloader emits per batch                                    | the per-dataset loader; consumers expect `meta['delta_t'                                                    |
@@ -537,12 +576,16 @@ checkpoint metadata. If the checkpoint records it, you don't pass `--predict-typ
   (`DIFF_AMP=False`); summarizer AMP is off for the four high-context air/NOAA
     datasets. Don't blanket-enable AMP expecting speedups without checking
     stability.
-12. **Modal core routing.** `--modal-type chirp` nests outputs under
-  `modal-chirp/` (composing with `predict-<type>/`); the default `lti` keeps the
-    historical paths. Chirp and lti therefore don't collide, but a chirp
-    checkpoint lives at `ldt/output/<ds>/[predict-<t>/]modal-chirp/pred-<H>/…` —
-    point `--checkpoint` there for eval. The core is also recorded in the
-    checkpoint, so eval rebuilds it regardless. (§7.5)
+12. **Arm/seed routing.** Non-default `--modal-type`, `--output-head`, and an
+  explicit `--seed` nest outputs under composed segments
+    `[predict-<t>/]modal-chirp/head-<mode>/seed-<n>/`; defaults keep the
+    historical paths. Arms and seeds therefore don't collide, but a routed
+    checkpoint lives deep in that tree — point `--checkpoint` there for eval.
+    The core/head are recorded in the checkpoint, so eval rebuilds the exact
+    variant regardless. Note the VAE/summarizer paths are **not** routed:
+    all arms and seeds share the same frozen stage-1/2 artifacts (that is the
+    parity requirement for fair comparisons, but it also means a seed only
+    varies stages it actually retrains). (§7.5)
 
 ---
 

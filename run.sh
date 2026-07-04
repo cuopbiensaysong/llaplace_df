@@ -15,3 +15,6 @@ llapdiff-train --dataset-key noaa_us --preds 168 --verbose --summary-json ldt/re
 llapdiff-train --dataset-key noaa_uk --preds 168 --verbose --summary-json ldt/results/noaa_uk_pred168.json
 llapdiff-train --dataset-key us_equity --preds 100 --verbose --summary-json ldt/results/us_equity_pred100.json
 llapdiff-train --dataset-key crypto --preds 100 --verbose --summary-json ldt/results/crypto_pred100.json
+
+
+llapdiff-train --dataset-key physionet --preds 12 --modal-type chirp --summary-json ldt/results/physionet_h12_chirp.json --verbose --debug

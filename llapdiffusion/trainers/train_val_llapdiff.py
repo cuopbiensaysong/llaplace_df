@@ -580,6 +580,43 @@ def _load_module_state(module: nn.Module, state_dict: Dict[str, torch.Tensor], *
         print(f"[load] unexpected keys for {module.__class__.__name__}: {unexpected}")
 
 
+_UQ_HEAD_KEY_MARKERS = (
+    "chirp_field.to_uq",
+    "chirp_field._p0_base",
+    "chirp_field._q_base",
+)
+
+
+def _load_diff_init_state(
+    diff_model: nn.Module,
+    init_state: Dict[str, torch.Tensor],
+    *,
+    verbose: bool = False,
+) -> None:
+    """Warm-start the diffusion model from DIFF_INIT_CKPT.
+
+    Strict load with one tolerated exception: a CHIRP_UQ_HEAD model may warm-start
+    from an MSE-trained (no-UQ) chirp checkpoint — the freshly initialized UQ-head
+    tensors are the only keys allowed to be missing (the recommended recipe for
+    stabilizing Gaussian-NLL training). Any other mismatch fails loudly.
+    """
+    own_keys = set(diff_model.state_dict().keys())
+    missing = own_keys - set(init_state.keys())
+    unexpected = set(init_state.keys()) - own_keys
+    uq_only_missing = bool(missing) and all(
+        any(marker in key for marker in _UQ_HEAD_KEY_MARKERS) for key in missing
+    )
+    if uq_only_missing and not unexpected:
+        _load_module_state(diff_model, init_state, strict=False)
+        if verbose:
+            print(
+                "[init] DIFF_INIT_CKPT lacks the UQ head; kept fresh init for: "
+                f"{sorted(missing)}"
+            )
+        return
+    _load_module_state(diff_model, init_state, strict=True)
+
+
 def _init_pole_probe(
     diff_model: nn.Module,
     summarizer: nn.Module,
@@ -992,6 +1029,7 @@ def evaluate_val_diagnostics(
             reuse_xt_eps=(x_t, eps_true),
             target_mask=obs_any,
             return_stats=True,
+            loss_mode=_diff_loss_mode(config),
         )
         raw_sum += float(stats["raw_loss"].item()) * Beff
         num_samples += Beff
@@ -1177,6 +1215,7 @@ def evaluate_regression(
     verbose: bool = False,
     progress_enabled: bool = False,
     progress_label: Optional[str] = None,
+    clip_stats: Optional[Dict[str, float]] = None,
 ):
     """
     Evaluate probabilistic forecasts in observation space (set-VAE pipeline).
@@ -1292,6 +1331,7 @@ def evaluate_regression(
                     dynamic_thresh_max=dynamic_thresh_max,
                     rho=rho,
                     generator=generator,
+                    clip_stats=clip_stats,
                 )
                 y_hat_sample = decode_latents_with_vae(
                     vae, x0_norm, entity_pad=entity_pad, mu_mean=mu_mean, mu_std=mu_std
@@ -1394,6 +1434,40 @@ def _save_checkpoint(out_path: Path, payload: Dict[str, object]) -> None:
     torch.save(payload, out_path)
 
 
+def _diff_loss_mode(config_obj: object) -> str:
+    """Training loss mode: 'mse' or 'gaussian_nll' (needs the Theorem-C UQ head)."""
+    mode = str(getattr(config_obj, "DIFF_LOSS_MODE", "mse")).strip().lower()
+    if mode not in {"mse", "gaussian_nll"}:
+        raise ValueError(f"Unknown DIFF_LOSS_MODE '{mode}'. Use 'mse' or 'gaussian_nll'.")
+    if mode == "gaussian_nll" and not bool(getattr(config_obj, "CHIRP_UQ_HEAD", False)):
+        raise ValueError("DIFF_LOSS_MODE='gaussian_nll' requires CHIRP_UQ_HEAD=True.")
+    return mode
+
+
+def _resolve_chirp_time_scale(config_obj: object) -> Optional[float]:
+    """Window length L for the chirp basis (a fixed constant per run).
+
+    ``None`` (the default) resolves to the run's horizon ``config.PRED`` so the pole
+    function class does not depend on the sample; a number pins L explicitly; the
+    string ``"adaptive"`` opts into the per-sample L = max|t_rel| inside the model.
+    The resolved value is persisted in the checkpoint's model config.
+    """
+    value = getattr(config_obj, "CHIRP_TIME_SCALE", None)
+    if isinstance(value, str):
+        mode = value.strip().lower()
+        if mode == "adaptive":
+            return None
+        raise ValueError(
+            f"Unknown CHIRP_TIME_SCALE '{value}'. Use None (horizon), a number, or 'adaptive'."
+        )
+    if value is None:
+        modal_type = str(getattr(config_obj, "DENOISER_MODAL_TYPE", "lti")).strip().lower()
+        if modal_type != "chirp":
+            return None  # unused by the lti core; don't require PRED
+        return float(getattr(config_obj, "PRED"))
+    return float(value)
+
+
 def _llapdiff_model_kwargs(config_obj: object) -> Dict[str, object]:
     return {
         "data_dim": int(getattr(config_obj, "VAE_LATENT_CHANNELS")),
@@ -1417,11 +1491,9 @@ def _llapdiff_model_kwargs(config_obj: object) -> Dict[str, object]:
         "chirp_num_basis": int(getattr(config_obj, "CHIRP_NUM_BASIS", 8)),
         "chirp_rho_min": float(getattr(config_obj, "CHIRP_RHO_MIN", 1e-4)),
         "chirp_use_mlp_residual": bool(getattr(config_obj, "CHIRP_USE_MLP_RESIDUAL", False)),
-        "chirp_time_scale": (
-            None
-            if getattr(config_obj, "CHIRP_TIME_SCALE", None) is None
-            else float(getattr(config_obj, "CHIRP_TIME_SCALE"))
-        ),
+        "chirp_time_scale": _resolve_chirp_time_scale(config_obj),
+        "output_head": str(getattr(config_obj, "DENOISER_OUTPUT_HEAD", "auto")),
+        "chirp_uq_head": bool(getattr(config_obj, "CHIRP_UQ_HEAD", False)),
     }
 
 
@@ -1465,6 +1537,9 @@ def _llapdiff_config_from_checkpoint(payload: object) -> Dict[str, object]:
     # Checkpoints predating the chirp variant are LTI; keep them loadable unchanged.
     config.setdefault("denoiser_modal_type", "lti")
     config.setdefault("chirp_time_scale", None)
+    # Checkpoints predating the decoupled head flag used the modal-type-dependent head.
+    config.setdefault("output_head", "auto")
+    config.setdefault("chirp_uq_head", False)
     return config
 
 
@@ -1920,7 +1995,7 @@ def run(
         init_state = init_payload.get("model") if isinstance(init_payload, dict) else init_payload
         if init_state is None:
             raise ValueError(f"DIFF_INIT_CKPT does not contain model weights: {init_ckpt_path}")
-        _load_module_state(diff_model, init_state, strict=True)
+        _load_diff_init_state(diff_model, init_state, verbose=verbose)
         if isinstance(init_payload, dict):
             init_ema_state = init_payload.get("ema")
         if verbose:
@@ -2351,6 +2426,7 @@ def run(
                         reuse_xt_eps=(x_t_c, eps_true_c),
                         target_mask=target_mask_c,
                         return_stats=True,
+                        loss_mode=_diff_loss_mode(config),
                     )
                     loss = loss + loss_c * w_c
                     raw_loss = raw_loss + loss_c_stats["raw_loss"] * w_c
@@ -2380,6 +2456,7 @@ def run(
                         reuse_xt_eps=(x_t[idx_u], eps_true[idx_u]),
                         target_mask=obs_any[idx_u],
                         return_stats=True,
+                        loss_mode=_diff_loss_mode(config),
                     )
                     loss = loss + loss_u * w_u
                     raw_loss = raw_loss + loss_u_stats["raw_loss"] * w_u
