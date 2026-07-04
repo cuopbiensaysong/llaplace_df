@@ -30,7 +30,7 @@ PREDICT_TYPE_DIR_PREFIX = "predict"
 
 
 import debugpy
-debugpy.listen(5678)
+debugpy.listen(5677)
 print("Waiting for debugger to attach...")
 debugpy.wait_for_client()
 print("Debugger attached")

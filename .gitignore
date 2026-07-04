@@ -37,3 +37,5 @@ Thumbs.db
 chirp_modal_method.md
 method.pdf
 .vscode/*
+.claude/*
+.cursor/*
