@@ -285,8 +285,11 @@ Tier-2 (`CHIRP_*`, K, time constant) applies to CMD only. Selection on val only.
 > code bug.
 >
 > **Recipe (two-stage warm start, code-supported):**
-> 1. Train the plain chirp MSE arm first — cell (d),
+> 1. Train a plain chirp MSE run **with `--predict-type x0`** first:
 >    `llapdiff-train … --modal-type chirp --predict-type x0 --seed <s>`.
+>    Note this is an **additional run**, not G3 cell (d) — the factorial cells are
+>    v-prediction, and the UQ law requires an x0-trained mean. It routes separately
+>    (`predict-x0/modal-chirp/seed-<s>/`), so nothing collides.
 > 2. In `config.py` set `CHIRP_UQ_HEAD = True`, `DIFF_LOSS_MODE = "gaussian_nll"`,
 >    and `DIFF_INIT_CKPT = "<path to the stage-1 best checkpoint>"`
 >    (all three are base-config, not preset-stamped), then rerun the same
@@ -318,3 +321,11 @@ critical path.
    every training command gives you most of this for free.
 5. **Claims language**: 1-seed deltas are "directionally encouraging", nothing
    more, until the seeded table exists.
+6. **Revert class-(2) `config.py` edits between experiment families.** The U2/U3
+   knobs (`CHIRP_UQ_HEAD`, `DIFF_LOSS_MODE`, `TRAIN_T_SAMPLER`, `DIFF_INIT_CKPT`)
+   persist for every subsequent run; a stale UQ config makes a later MSE arm
+   **fail loudly at model build** (the guards fire — no silent corruption, but
+   the run dies). Run `git diff llapdiffusion/configs/config.py` before launching
+   each family. Related: train AND evaluate everything on this combined branch —
+   checkpoints from it embed metadata (`chirp_uq_head`, `output_head`,
+   `chirp_time_scale`) that the older phase-backup branches cannot rebuild.
