@@ -1,9 +1,19 @@
-"""Latent-space calibration eval for the Theorem-C analytic UQ head (U2/U3).
+"""Calibration eval for the Theorem-C analytic UQ head (U2/U3).
 
-Loads a chirp+UQ checkpoint, reads the analytic Gaussian predictive law
-N(mean, Var) at the test (or val) queries in ONE forward pass, and reports latent
-PIT calibration error, reliability (central-interval coverage), Gaussian NLL, and
-mean RMSE. Two mean sources:
+Loads a chirp+UQ checkpoint and reports:
+
+1. **Latent space** (the space where the law is exactly Gaussian): PIT calibration
+   error, reliability (central-interval coverage), Gaussian NLL, mean RMSE — from
+   one analytic read of N(mean, Var) at the test (or val) queries.
+2. **Data space** (default; disable with ``--latent-only``): CRPS/MAE/MSE of the
+   analytic law propagated through the decoder — an ensemble of latent Gaussian
+   draws, one decoder pass per draw, scored by the UNCHANGED
+   ``evaluate_regression`` machinery (same masking, same CRPS estimator, same
+   sample count as the sampled baseline) — plus the sampled-diffusion baseline on
+   the same split with wall-clock for both, i.e. the plan's "analytic vs sampled
+   CRPS at matched wall-clock" comparison.
+
+Two mean sources:
 
 - ``oneshot`` (default): a single forward at the final diffusion step with
   information-free noise input — the U3 "no-diffusion" read of the model.
@@ -17,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -74,10 +85,78 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint", type=str, required=True)
     parser.add_argument("--split", choices=("val", "test"), default="test")
     parser.add_argument("--mean-source", choices=("oneshot", "ddim"), default="oneshot")
-    parser.add_argument("--max-batches", type=int, default=None)
+    parser.add_argument("--max-batches", type=int, default=None,
+                        help="Cap for the latent-space pass only; data space runs the full split.")
     parser.add_argument("--num-bins", type=int, default=20)
+    parser.add_argument("--latent-only", action="store_true",
+                        help="Skip the data-space (decoder-propagated) evaluation.")
+    parser.add_argument("--skip-sampled", action="store_true",
+                        help="Data space: skip the (expensive) sampled-diffusion baseline.")
+    parser.add_argument("--num-samples", type=int, default=None,
+                        help="Ensemble size for BOTH data-space arms (default config NUM_EVAL_SAMPLES=25).")
     parser.add_argument("--out-json", type=str, default=None)
     return parser.parse_args()
+
+
+class AnalyticLawSampler:
+    """Duck-typed stand-in for LLapDiff inside ``evaluate_regression``.
+
+    ``generate`` returns draws from the Theorem-C analytic Gaussian law
+    N(mean, Var) instead of running reverse diffusion, so the unchanged
+    evaluate_regression machinery scores the analytic predictive law with the
+    exact same masking, decoding, and CRPS estimator as the sampled baseline.
+    (mean, Var) are computed once per batch (cached on the conditioning tensors);
+    each subsequent sample costs one Gaussian draw + one decoder pass downstream.
+    Everything else (``eval()``, ``cond_adapter``, ``scheduler``, ...) delegates
+    to the wrapped model.
+    """
+
+    def __init__(self, model, cfg, *, mean_source: str, device: torch.device) -> None:
+        self._model = model
+        self._cfg = cfg
+        self._mean_source = str(mean_source)
+        self._device = device
+        self._cache_key = None
+        self._mean: Optional[torch.Tensor] = None
+        self._std: Optional[torch.Tensor] = None
+
+    def __getattr__(self, name):
+        return getattr(self._model, name)
+
+    @torch.no_grad()
+    def generate(
+        self,
+        shape,
+        *,
+        cond_summary=None,
+        cond_summary_raw=None,
+        dt=None,
+        generator: Optional[torch.Generator] = None,
+        **_ignored,
+    ) -> torch.Tensor:
+        key = (id(cond_summary), id(cond_summary_raw), id(dt), tuple(shape))
+        if key != self._cache_key:
+            mean, var = _predict_mean_var(
+                self._model,
+                self._cfg,
+                mu_shape=tuple(shape),
+                cond_summary=cond_summary,
+                cond_summary_raw=cond_summary_raw,
+                dt_model=dt,
+                mean_source=self._mean_source,
+                device=self._device,
+            )
+            self._cache_key = key
+            self._mean = mean
+            self._std = var.clamp_min(1e-6).sqrt()
+        if generator is not None:
+            noise = torch.randn(
+                self._mean.shape, device=self._mean.device,
+                dtype=self._mean.dtype, generator=generator,
+            )
+        else:
+            noise = torch.randn_like(self._mean)
+        return self._mean + self._std * noise
 
 
 @torch.no_grad()
@@ -199,6 +278,57 @@ def main() -> None:
         "reliability": reliability_curve(u),
         "mean_predicted_std": float(var.clamp_min(1e-6).sqrt().mean().item()),
     }
+
+    if not args.latent_only:
+        # Data-space comparison: the analytic law propagated through the decoder
+        # (Gaussian latent draws -> decode) vs the sampled-diffusion baseline, scored
+        # by the SAME evaluate_regression code with the SAME ensemble size and seed.
+        if args.num_samples is not None:
+            cfg.NUM_EVAL_SAMPLES = int(args.num_samples)
+        num_samples = int(getattr(cfg, "NUM_EVAL_SAMPLES", 25))
+        sampling = tv._sampling_kwargs(cfg, prefix="TEST")
+        common = dict(
+            device=device, mu_mean=mu_mean, mu_std=mu_std, config=cfg, ema=None,
+            self_cond=bool(getattr(cfg, "SELF_COND", False)),
+            disable_conditioning=False, verbose=False,
+            generator_seed=int(getattr(cfg, "SEED", 42)),
+        )
+
+        analytic_model = AnalyticLawSampler(
+            diff_model, cfg, mean_source=str(args.mean_source), device=device
+        )
+        start = time.perf_counter()
+        analytic = tv.evaluate_regression(
+            analytic_model, vae, summarizer, loader, **common, **sampling
+        )
+        analytic_wall = time.perf_counter() - start
+        report["data_space_analytic"] = {
+            "crps": analytic.get("crps"),
+            "mae": analytic.get("mae"),
+            "mse": analytic.get("mse"),
+            "num_samples": num_samples,
+            "mean_source": str(args.mean_source),
+            "wall_seconds": analytic_wall,
+        }
+
+        if not args.skip_sampled:
+            start = time.perf_counter()
+            sampled = tv.evaluate_regression(
+                diff_model, vae, summarizer, loader, **common, **sampling
+            )
+            sampled_wall = time.perf_counter() - start
+            report["data_space_sampled"] = {
+                "crps": sampled.get("crps"),
+                "mae": sampled.get("mae"),
+                "mse": sampled.get("mse"),
+                "num_samples": num_samples,
+                "ddim_steps": int(sampling["steps"]),
+                "wall_seconds": sampled_wall,
+            }
+            report["analytic_speedup_x"] = (
+                sampled_wall / analytic_wall if analytic_wall > 0 else None
+            )
+
     payload = json.dumps(report, indent=2, sort_keys=True)
     if args.out_json:
         out_path = Path(args.out_json).resolve()

@@ -212,6 +212,57 @@ def test_generate_clip_stats_populated():
     assert off_stats == {}
 
 
+def test_analytic_law_sampler_draws_caching_and_delegation(monkeypatch):
+    """The evaluate_regression stand-in: generate() draws from N(mean, Var) with the
+    law computed ONCE per conditioning batch, and everything else delegates."""
+    from types import SimpleNamespace
+
+    from llapdiffusion.tools import run_analytic_uq_eval as uq
+
+    torch.manual_seed(0)
+    model = _uq_model().eval()
+    device = torch.device("cpu")
+    sampler = uq.AnalyticLawSampler(model, SimpleNamespace(), mean_source="oneshot", device=device)
+
+    # Delegation of non-generate attributes.
+    assert sampler.scheduler is model.scheduler
+    assert sampler.eval() is model  # nn.Module.eval returns self (the wrapped model)
+
+    calls = {"n": 0}
+    real = uq._predict_mean_var
+
+    def counting(*a, **k):
+        calls["n"] += 1
+        return real(*a, **k)
+
+    monkeypatch.setattr(uq, "_predict_mean_var", counting)
+
+    B, T, D = 3, 6, 8
+    cond = torch.randn(B, 5, 32)
+    dt = torch.sort(torch.rand(B, T), dim=1).values
+    draws = torch.stack([
+        sampler.generate((B, T, D), cond_summary=cond, cond_summary_raw=cond, dt=dt)
+        for _ in range(400)
+    ])
+    assert calls["n"] == 1  # cached across repeated generate calls for the same batch
+
+    # Draw statistics match the cached law.
+    torch.testing.assert_close(draws.mean(0), sampler._mean, atol=0.15, rtol=0.2)
+    torch.testing.assert_close(draws.std(0), sampler._std, atol=0.15, rtol=0.2)
+
+    # New conditioning -> law recomputed.
+    cond2 = torch.randn(B, 5, 32)
+    sampler.generate((B, T, D), cond_summary=cond2, cond_summary_raw=cond2, dt=dt)
+    assert calls["n"] == 2
+
+    # A seeded generator gives reproducible draws.
+    g1 = torch.Generator().manual_seed(7)
+    g2 = torch.Generator().manual_seed(7)
+    d1 = sampler.generate((B, T, D), cond_summary=cond2, cond_summary_raw=cond2, dt=dt, generator=g1)
+    d2 = sampler.generate((B, T, D), cond_summary=cond2, cond_summary_raw=cond2, dt=dt, generator=g2)
+    torch.testing.assert_close(d1, d2)
+
+
 def test_pit_metrics_calibrated_vs_overconfident():
     torch.manual_seed(0)
     n = 20000

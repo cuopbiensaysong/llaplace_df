@@ -147,6 +147,20 @@ CHIRP_UQ_HEAD = False
 # Diffusion training loss: "mse" (default) or "gaussian_nll" (requires CHIRP_UQ_HEAD;
 # trains mean and variance jointly for calibrated analytic UQ).
 DIFF_LOSS_MODE = "mse"
+# Theorem-B' growth budget c_g (chirp core): a learned, capped envelope excursion
+# admitting within-window amplitude growth up to a factor e^{c_g}. 0.0 disables the
+# head and recovers Theorem B exactly. T2 sweep: {0, log 2, log 5}.
+CHIRP_GROWTH_BUDGET = 0.0
+# L2 penalty weight on the chirp pole-variation coefficients (Tier-2 ablation):
+# shrinks the pole functions toward the constant-pole LTI special case. 0.0 (default)
+# disables it; applies to training only (never the val diagnostics), chirp core only.
+CHIRP_COEFF_L2 = 0.0
+# Pole-function parameterization (chirp core, Phase-4 ablation): "p_exact" (default:
+# nonneg Fourier basis with closed-form antiderivative), "p_mono" (monotone integrated
+# poles directly; closed-form derivative), or "p_grid" (pointwise positive poles +
+# trapezoid integration on the query grid — numerical error grows with gap width,
+# the deliberate contrast case).
+CHIRP_PARAMETERIZATION = "p_exact"
 
 
 # ============================ Training Hyperparameters ============================

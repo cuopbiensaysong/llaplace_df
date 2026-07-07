@@ -1494,6 +1494,8 @@ def _llapdiff_model_kwargs(config_obj: object) -> Dict[str, object]:
         "chirp_time_scale": _resolve_chirp_time_scale(config_obj),
         "output_head": str(getattr(config_obj, "DENOISER_OUTPUT_HEAD", "auto")),
         "chirp_uq_head": bool(getattr(config_obj, "CHIRP_UQ_HEAD", False)),
+        "chirp_growth_budget": float(getattr(config_obj, "CHIRP_GROWTH_BUDGET", 0.0)),
+        "chirp_parameterization": str(getattr(config_obj, "CHIRP_PARAMETERIZATION", "p_exact")),
     }
 
 
@@ -1540,6 +1542,8 @@ def _llapdiff_config_from_checkpoint(payload: object) -> Dict[str, object]:
     # Checkpoints predating the decoupled head flag used the modal-type-dependent head.
     config.setdefault("output_head", "auto")
     config.setdefault("chirp_uq_head", False)
+    config.setdefault("chirp_growth_budget", 0.0)
+    config.setdefault("chirp_parameterization", "p_exact")
     return config
 
 
@@ -2427,6 +2431,7 @@ def run(
                         target_mask=target_mask_c,
                         return_stats=True,
                         loss_mode=_diff_loss_mode(config),
+                        coeff_l2=float(getattr(config, "CHIRP_COEFF_L2", 0.0)),
                     )
                     loss = loss + loss_c * w_c
                     raw_loss = raw_loss + loss_c_stats["raw_loss"] * w_c
@@ -2457,6 +2462,7 @@ def run(
                         target_mask=obs_any[idx_u],
                         return_stats=True,
                         loss_mode=_diff_loss_mode(config),
+                        coeff_l2=float(getattr(config, "CHIRP_COEFF_L2", 0.0)),
                     )
                     loss = loss + loss_u * w_u
                     raw_loss = raw_loss + loss_u_stats["raw_loss"] * w_u

@@ -46,6 +46,8 @@ class LLapDiff(nn.Module):
         chirp_time_scale: Optional[float] = None,
         output_head: str = "auto",
         chirp_uq_head: bool = False,
+        chirp_growth_budget: float = 0.0,
+        chirp_parameterization: str = "p_exact",
     ) -> None:
         super().__init__()
         if predict_type not in {"eps", "v", "x0"}:
@@ -90,6 +92,8 @@ class LLapDiff(nn.Module):
             chirp_time_scale=chirp_time_scale,
             output_head=output_head,
             chirp_uq_head=chirp_uq_head,
+            chirp_growth_budget=chirp_growth_budget,
+            chirp_parameterization=chirp_parameterization,
         )
         self.time_dim = hidden_dim
 
@@ -98,6 +102,19 @@ class LLapDiff(nn.Module):
     # -------------------------------
     def _time_embed(self, t: torch.Tensor) -> torch.Tensor:
         return F.silu(self.time_embed(t.long()))
+
+    def pole_coefficient_penalty(
+        self,
+        t: torch.Tensor,
+        *,
+        cond_summary: Optional[torch.Tensor] = None,
+        cond_summary_raw: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """L2 penalty on the chirp pole-variation coefficients (CHIRP_COEFF_L2)."""
+        t_emb = self._time_embed(t)
+        return self.model.pole_coefficient_penalty(
+            t_emb, cond_summary=cond_summary, cond_summary_raw=cond_summary_raw
+        )
 
     # -------------------------------
     # Forward call

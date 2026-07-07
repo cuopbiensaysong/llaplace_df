@@ -81,6 +81,8 @@ Installed console scripts (from `pyproject.toml`):
 | `llapdiff-synthetic-chirp`  | `llapdiffusion.tools.run_synthetic_chirp_benchmark:main`  |
 | `llapdiff-uq-eval`          | `llapdiffusion.tools.run_analytic_uq_eval:main`           |
 | `llapdiff-u1-sweep`         | `llapdiffusion.tools.run_u1_sweep:main`                   |
+| `llapdiff-t1-poles`         | `llapdiffusion.tools.run_t1_pole_invariance:main`         |
+| `llapdiff-t4-timing`        | `llapdiffusion.tools.run_t4_timing:main`                  |
 | `llapdiff-plot-poles`       | `llapdiffusion.viz.plot_llapdiff_poles:main`              |
 | `llapdiff-baselines`        | `llapdiffusion.tools.run_baselines:main`                  |
 
@@ -649,6 +651,22 @@ explicitly, or the string `"adaptive"` to opt into the per-sample
 instantaneous frequency is capped below `π` per native step (Nyquist), so
 chirp poles cannot alias regardless of the learned coefficients.
 
+Further chirp knobs (all base-config, recorded in the checkpoint):
+`CHIRP_GROWTH_BUDGET` (Theorem-B′ capped envelope excursion `c_g`; `0.0`
+disables it and recovers the strict contraction) and `CHIRP_PARAMETERIZATION`
+(`"p_exact"` default; `"p_mono"` = monotone integrated poles with closed-form
+derivative; `"p_grid"` = pointwise positive poles + trapezoid integration on
+the query grid — numerical, by design the ablation's contrast case).
+`CHIRP_COEFF_L2` (default 0.0, training-only, not persisted in the model)
+adds an L2 penalty on the conditioned pole-variation coefficients, shrinking
+the pole functions toward the constant-pole LTI special case — the "is the
+time variation load-bearing?" ablation. Works for all three parameterizations;
+the growth head is excluded (its excursion is governed by `c_g`). Scale
+intuition: the penalty equals the mean squared coefficient-head output
+(≈ 1e-6 at init, growing quadratically with the learned variation), so pick λ
+such that λ·penalty is a few percent of the training loss at the coefficient
+scale you want to discourage.
+
 ### 5.13 Ablation arms (output head) and multi-seed runs
 
 Two flags exist for controlled comparisons (e.g. the poles × head 2×2
@@ -701,15 +719,27 @@ llapdiff-synthetic-chirp --arms lti chirp --seeds 0 1 2 \
 ```
 
 Outputs: `chirp_benchmark_raw/summary.{csv,json}` (forecast CRPS/MAE/MSE per
-task × arm × seed, plus best-mode pole-recovery RMSE for chirp),
+task × arm × seed × gap regime, plus best-mode pole-recovery RMSE for chirp),
 `recovery/*.json`, and `figures/*_pole_recovery.pdf`. Both arms share the same
 frozen VAE/summarizer per (task, seed). Ground truth is persisted in the cache
-(`pole_truth/*.npz`; `load_ground_truth_poles`). Keep the default
-`--series-length 768` or larger — the purged split needs the val band to exceed
-one horizon (the tool validates this). `--smoke` gives a 1-epoch end-to-end
-check. For real-data chirp checkpoints, `llapdiff-plot-poles` now also saves a
-`*_pole_trajectories.pdf` (instantaneous ρ/ω curves over the horizon) next to
-the usual pole scatter.
+(`pole_truth/*.npz` with `rho`, `omega`, and the sample `times`;
+`load_ground_truth_poles`). Keep the default `--series-length 768` or larger —
+the purged split needs the val band to exceed one horizon (the tool validates
+this). `--smoke` gives a 1-epoch end-to-end check. For real-data chirp
+checkpoints, `llapdiff-plot-poles` now also saves a `*_pole_trajectories.pdf`
+(instantaneous ρ/ω curves over the horizon) next to the usual pole scatter.
+
+**Sampling grid.** By default the benchmark signals are **irregularly sampled
+with Gamma renewal gaps** (`--gap-distribution gamma`, `--gap-mean 1.0`,
+`--gap-shape 4.0`): i.i.d. gaps with mean `gap_mean` and
+`Var(Δ) = gap_mean²/gap_shape`, so the gap-variance regime is tunable at fixed
+mean (`shape 1` = Poisson; larger shape → closer to regular). Pass
+`--gap-distribution regular` for the historical dense hourly grid. The grid is
+drawn once per cache and shared across entities (a synchronized-but-irregular
+network — required by the joint-panel batching); realized gap moments are
+recorded in the cache `meta.json`. If you change `--gap-mean` away from 1.0,
+also set `CHIRP_TIME_SCALE ≈ PRED·gap_mean` in `configs/config.py` so the chirp
+basis window matches the horizon's actual time span.
 
 ### 5.15 Analytic UQ (Theorem C) and sampling sweeps
 
@@ -733,7 +763,14 @@ llapdiff-uq-eval --dataset-key physionet --pred 12 \
 which reports latent PIT calibration error, a reliability (coverage) curve,
 Gaussian NLL, and mean RMSE, using either a single one-shot forward
 (`--mean-source oneshot`, default) or the deterministic DDIM mean
-(`--mean-source ddim`). Sweep the sampling knobs of any checkpoint on the
+(`--mean-source ddim`). By default it also runs the **data-space comparison**:
+the analytic law is propagated through the decoder (an ensemble of latent
+Gaussian draws, one decoder pass each — no reverse diffusion) and scored by the
+same `evaluate_regression` machinery as a sampled-diffusion baseline on the
+same split with the same ensemble size and seed; the report includes CRPS/MAE/
+MSE for both arms, wall-clock seconds, and `analytic_speedup_x`. Control with
+`--num-samples` (default `NUM_EVAL_SAMPLES` = 25), `--skip-sampled`, and
+`--latent-only`. Sweep the sampling knobs of any checkpoint on the
 **validation** split with:
 
 ```bash
@@ -741,7 +778,10 @@ llapdiff-u1-sweep --dataset-key physionet --pred 12 --checkpoint <ckpt> \
   --guidance 1.0 1.25 1.5 2.0 --steps 16 32 64
 ```
 
-(per-cell CRPS/MAE/MSE plus the dynamic-threshold clip fraction).
+(per-cell CRPS/MAE/MSE plus the dynamic-threshold clip fraction; add
+`--dynamic-thresh-p 0.995` [and optionally `--dynamic-thresh-max`] to run the
+clip-rate check at a specific quantile — the effective `dynamic_thresh_p` is
+recorded in every output row).
 
 ---
 

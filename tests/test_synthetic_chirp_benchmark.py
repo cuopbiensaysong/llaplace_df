@@ -142,6 +142,91 @@ def test_companion_form_error_dwarfs_normal_form_error():
     assert comp_err.max() > 1e3 * norm_err.max()
 
 
+def test_regular_sampling_bitcompatible_grid(tmp_path):
+    """Default gap_distribution='regular' keeps the historical dense hourly grid."""
+    cfg = _prep(tmp_path, "synthetic_linear_chirp")
+    truth = load_ground_truth_poles(cfg.data_dir)
+    times = truth[0]["times"].astype(np.float64)
+    np.testing.assert_allclose(np.diff(times), 1.0, atol=1e-9)  # unit gaps
+    assert times[0] == 0.0
+    import json
+    meta = json.loads((tmp_path / "synthetic_linear_chirp" / "cache_ratio_index" / "meta.json").read_text())
+    gen = meta["generation_config"]
+    assert gen["gap_distribution"] == "regular"
+    assert gen["gap_var_realized"] == 0.0
+
+
+def test_gamma_gaps_statistics_shared_grid_and_meta(tmp_path):
+    """Gamma renewal gaps: irregular strictly-increasing shared grid with the
+    advertised tunable moments (Var = mean^2 / shape), recorded in the meta."""
+    cfg = _prep(
+        tmp_path, "synthetic_linear_chirp",
+        gap_distribution="gamma", gap_mean=1.0, gap_shape=2.0,
+    )
+    truth = load_ground_truth_poles(cfg.data_dir)
+    times = truth[0]["times"].astype(np.float64)
+    gaps = np.diff(times)
+    assert (gaps > 0).all()
+    assert gaps.std() > 0.1  # genuinely irregular
+    assert abs(gaps.mean() - 1.0) < 0.25
+    # All entities share the SAME grid (joint-panel batching requirement).
+    for aid in (1, 2):
+        np.testing.assert_array_equal(truth[aid]["times"], truth[0]["times"])
+    import json
+    meta = json.loads((tmp_path / "synthetic_linear_chirp" / "cache_ratio_index" / "meta.json").read_text())
+    gen = meta["generation_config"]
+    assert gen["gap_distribution"] == "gamma" and gen["gap_shape"] == 2.0
+    # Var(Delta) = mean^2/shape = 0.5 — realized within statistical slack (n=160).
+    assert 0.2 < gen["gap_var_realized"] < 1.0
+
+
+def test_gap_aware_discretization_matches_closed_form():
+    """With constant poles, unit amplitude, zero baseline/phase/noise, the generated
+    signal equals sin(2*pi*f*t) * exp(-d*t) at the cumulative renewal times — the
+    gap-aware discretization is exact for constant poles."""
+    from llapdiffusion.datasets.synthetic_regime_dataset import _generate_signal
+
+    cfg = SyntheticRegimeCacheConfig(
+        task="synthetic_freq_shift",
+        series_length=120, change_point=119, window=32, horizon=16,
+        amplitude_min=1.0, amplitude_max=1.0,
+        baseline_min=0.0, baseline_max=0.0,
+        phase_min=0.0, phase_max=0.0,
+        noise_std=0.0,
+        gap_distribution="gamma", gap_mean=1.0, gap_shape=3.0,
+    )
+    rng = np.random.default_rng(5)
+    gaps = np.maximum(rng.gamma(3.0, 1.0 / 3.0, size=120), 1e-3)
+    f0, d0 = 0.03, 0.008
+    signal, frequency, decay = _generate_signal(
+        cfg, np.random.default_rng(9), gaps, base_frequency=f0, base_decay=d0
+    )
+    t_cum = np.cumsum(gaps)  # historical convention: the first gap is counted
+    expected = np.exp(-d0 * t_cum) * np.sin(2 * np.pi * f0 * t_cum)
+    np.testing.assert_allclose(
+        signal[: cfg.change_point].astype(np.float64),
+        expected[: cfg.change_point],
+        atol=1e-5,
+    )
+    np.testing.assert_allclose(frequency[: cfg.change_point], f0, rtol=1e-6)
+    np.testing.assert_allclose(decay, d0, rtol=1e-6)
+
+
+def test_benchmark_gap_tag_in_cache_dir(tmp_path):
+    from types import SimpleNamespace
+
+    from llapdiffusion.tools.run_synthetic_chirp_benchmark import _cache_dir, _gap_tag
+
+    args = SimpleNamespace(
+        data_root=str(tmp_path), series_length=768, change_point=None,
+        num_entities=8, gap_distribution="gamma", gap_mean=1.0, gap_shape=4.0,
+    )
+    assert _gap_tag(args) == "gaps-gamma-m1-k4"
+    assert "gaps-gamma-m1-k4" in str(_cache_dir("synthetic_linear_chirp", args))
+    args.gap_distribution = "regular"
+    assert "gaps-regular" in str(_cache_dir("synthetic_linear_chirp", args))
+
+
 def test_benchmark_geometry_validation():
     """The purged split needs the val band to exceed one horizon; short series must
     be rejected with a helpful message (288/96/48 is the classic structural trap)."""
@@ -164,6 +249,7 @@ def test_benchmark_configure_sets_arm_fields(tmp_path):
     args = SimpleNamespace(
         window=32, horizon=16, series_length=160, change_point=None, num_entities=3,
         data_root=str(tmp_path / "data"), artifact_root=str(tmp_path / "art"),
+        gap_distribution="gamma", gap_mean=1.0, gap_shape=4.0,
         smoke=True, verbose=False, debug=False,
     )
     cfg = _configure("synthetic_linear_chirp", "chirp", 3, args)

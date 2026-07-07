@@ -68,10 +68,16 @@ def test_synthesis_equivalence_lti_vs_chirp():
 
 
 def test_chirp_field_zero_coeffs_is_constant_pole():
-    """At init the coeff head is zero, so integrated poles are exactly rho_floor * t."""
+    """With zero coefficients the integrated poles are exactly rho_floor * t.
+
+    (Init is eps-close to zero, not exactly zero — exact zero is a stationary point
+    of the squared parameterization — so the exact-LTI property is tested by zeroing
+    the head explicitly.)
+    """
     torch.manual_seed(0)
     B, T, K, C = 2, 6, 5, 16
     field = ChirpModalField(k=K, cond_dim=C, num_basis=8)
+    torch.nn.init.zeros_(field.to_coeffs[-1].weight)
     cond = torch.randn(B, C)
     t_rel = _t_rel(B, T)
 
@@ -165,6 +171,26 @@ def test_omega_stays_below_omega_max():
     phi, _ = field._basis(t_rel, field._time_scale(t_rel))
     inst = omega_floor.view(1, 1, K) + torch.einsum("bkm,btm->btk", a_omega2, phi)
     assert (inst <= math.pi + 1e-5).all()
+
+
+def test_chirp_coeffs_receive_gradient_at_init():
+    """Regression guard for the zero-init stationary trap: d(a^2)/dW = 2a*h vanishes
+    at a = 0, which silently froze the pole coefficients (chirp trained as constant
+    poles). The eps-init must give the head a nonzero gradient under a training loss."""
+    torch.manual_seed(0)
+    model = LLapDiff(data_dim=8, hidden_dim=32, num_layers=2, num_heads=4,
+                     laplace_k=4, timesteps=50, denoiser_modal_type="chirp")
+    x = torch.randn(2, 6, 8)
+    t = torch.randint(1, 50, (2,))
+    dt = torch.sort(torch.rand(2, 6), dim=1).values
+    loss = (model(x, t, dt=dt) - torch.randn(2, 6, 8)).pow(2).mean()
+    loss.backward()
+    grads = {n: p.grad for n, p in model.named_parameters() if "to_coeffs" in n}
+    assert grads and all(g is not None for g in grads.values())
+    assert max(g.abs().max().item() for g in grads.values()) > 0.0
+    # ... while staying eps-close to the LTI special case at init.
+    a_rho2, a_omega2 = model.model.chirp_field._coeffs(torch.randn(2, 64))
+    assert float(a_rho2.max()) < 1e-4 and float(a_omega2.max()) < 1e-4
 
 
 def test_chirp_field_instantaneous_matches_integrated_derivative():

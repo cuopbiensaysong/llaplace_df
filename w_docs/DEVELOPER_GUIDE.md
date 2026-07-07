@@ -401,9 +401,13 @@ path, and the residues `theta [B,2K,D]` (the constant cₖ/bₖ) are reused unch
   This yields instantaneous `ρ_k(t̃)=ρ_floor_k+Σ_m a²·φ_m` and **exact integrated**
   `ρ̄_k(t̃)=ρ_floor_k·t̃+Σ_m a²·Φ_m` (ω analogous): `integrated(cond, t_rel)→(ρ̄,ω̄)`
   `[B,T,K]`, `seed_poles(cond)→(ρ₀,ω₀)` `[B,K]` (instantaneous at t̃=0, seeds
-  residue extraction). The coeff head is **zero-initialized**, so at init the
-  field reduces to constant poles and the chirp model **exactly equals** the LTI
-  base (a strict generalization — and a unit test).
+  residue extraction). The coeff head is **eps-initialized** (std 1e-4): at init
+  the coefficients are ~1e-8, so the chirp model starts numerically at the LTI
+  base (strict generalization — and a unit test). ⚠️ It must NOT be exactly
+  zero-initialized: `a = 0` is a stationary point of the squared parameterization
+  (`d(a²)/dW = 2a·h = 0`), which silently froze the head — every chirp trained
+  before 2026-07-05 had constant, condition-independent poles
+  (`test_chirp_coeffs_receive_gradient_at_init` guards this).
 - **Window scaling (`CHIRP_TIME_SCALE`)** — the basis frequencies `f_m` are
   *cycles across the window*, so `_basis` divides `2π f_m` by a time scale `L`.
   Without this, with raw native `t̃` (horizons ~100–168) the oscillatory part of
@@ -458,6 +462,20 @@ path, and the residues `theta [B,2K,D]` (the constant cₖ/bₖ) are reused unch
   `0.5(log σ² + err²/σ²)` under the same masking/MinSNR weighting;
   `TRAIN_T_SAMPLER="max_only"` gives the one-shot (no-diffusion) arm. Calibration
   metrics live in `models/uq_metrics.py`; reporting in `tools/run_analytic_uq_eval.py`.
+- **Growth budget (Theorem B′, `CHIRP_GROWTH_BUDGET`)** — when `c_g > 0` a
+  `to_growth` head (linear pre-sigmoid, zero-init, no stationary trap) produces
+  the capped excursion `γ_k(t̃) = c_g[σ(g_k(t̃)) − σ(g_k(0))]` subtracted from
+  `ρ̄` (`_growth_terms`, closed-form derivative for the instantaneous path);
+  bound becomes `e^{c_g}·e^{-ρ_min t̃}·Σ√(…)`. `modal_variance` supports the
+  resulting signed increments (bounded exponents). `c_g = 0` builds no head.
+- **Parameterizations (`CHIRP_PARAMETERIZATION`)** — `p_exact` (default,
+  above); `p_mono` (`_pmono_poles`: monotone integrated poles
+  `Σ u_m[softplus(v_m τ + b_m) − softplus(b_m)]`, u/v ≥ 0 via softplus — alive
+  at init — with the ω cap on `sup_t̃`); `p_grid` (`_pgrid_inst/_pgrid_integrated`:
+  pointwise `ρ = ρ_min + softplus(base + δ·ψ)`, `ω = ω_max·σ(…)`, cumulative
+  trapezoid over the query grid — deliberately numerical for the ablation).
+  All start at/near the LTI floors, avoid the squared-zero-init trap, and
+  compose with the growth/UQ heads.
 - **Wiring** — `LapFormer.__init__` builds `self.chirp_field` and forces the
   synthesis residual off in chirp mode; `LapFormer.forward` branches to seed
   analysis with `seed_poles` and synthesize with `integrated` poles.
@@ -536,6 +554,7 @@ checkpoint metadata. If the checkpoint records it, you don't pass `--predict-typ
 | Change the diffusion network / Laplace poles                                  | `models/llapdiff.py`, `models/lapformer.py`                                                                 |
 | Add/modify the chirp time-varying-pole core (§7.5)                            | `models/laptrans.py` (`ChirpModalField`, `chirp_basis_matrix`), `models/lapformer.py` (chirp branch); toggle/tunables in `configs/config.py` (`DENOISER_MODAL_TYPE`, `CHIRP_*`) + `pipeline.py` (`--modal-type`) |
 | Add a synthetic ground-truth pole task / change the chirp benchmark            | `datasets/synthetic_regime_dataset.py` (`_pole_profiles`, `CHIRP_TASKS`, `load_ground_truth_poles`); runner in `tools/run_synthetic_chirp_benchmark.py` (`llapdiff-synthetic-chirp`) |
+| Change the benchmark's renewal-gap sampling (Var(Δ) regimes)                    | `datasets/synthetic_regime_dataset.py` (`_sample_gaps`; gap-aware discretization in `_generate_signal` — regular ≡ unit gaps, bit-compatible and RNG-neutral; grid shared per cache for the joint-panel collate); tool flags `--gap-distribution/--gap-mean/--gap-shape` |
 | Plot chirp pole trajectories / recovery figures                                | `viz/plot_llapdiff_poles.py` (`extract_chirp_pole_trajectories`, `_plot_pole_trajectories`); Prop.-A.1 figure in `tools/plot_companion_vs_normal_form.py` |
 | Change the analytic UQ head / variance quadrature / NLL loss (§7.5)            | `models/laptrans.py` (`uq_params`, `modal_variance`), `models/lapformer.py` (`return_variance`), `models/llapdiff_utils.py` (`diffusion_loss` loss_mode); metrics `models/uq_metrics.py`; eval `tools/run_analytic_uq_eval.py`; sweep `tools/run_u1_sweep.py` |
 | Change the VAE architecture / KL schedule / recon loss                        | `latent_space/latent_vae.py`, `trainers/train_val_latent.py`                                                |

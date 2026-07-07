@@ -327,6 +327,8 @@ class LapFormer(nn.Module):
         chirp_time_scale: Optional[float] = None,
         output_head: str = "auto",
         chirp_uq_head: bool = False,
+        chirp_growth_budget: float = 0.0,
+        chirp_parameterization: str = "p_exact",
     ) -> None:
         super().__init__()
         self.hidden_dim = int(hidden_dim)
@@ -369,6 +371,8 @@ class LapFormer(nn.Module):
                 omega_max=math.pi,
                 time_scale=chirp_time_scale,
                 uq_head=self.chirp_uq_head,
+                growth_budget=float(chirp_growth_budget),
+                parameterization=chirp_parameterization,
             )
         else:
             synth_use_mlp_residual = use_mlp_residual
@@ -512,6 +516,25 @@ class LapFormer(nn.Module):
             use_raw=self.pole_pool_use_raw_summary,
         )
         return torch.cat([t_vec, summary_pool], dim=-1)
+
+    def pole_coefficient_penalty(
+        self,
+        t_vec: torch.Tensor,
+        *,
+        cond_summary: Optional[torch.Tensor] = None,
+        cond_summary_raw: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """L2 penalty on the chirp field's conditioned pole coefficients
+        (CHIRP_COEFF_L2 ablation); rebuilds the same pole-conditioning vector the
+        forward pass uses. Requires the chirp core."""
+        if self.chirp_field is None:
+            raise RuntimeError("pole_coefficient_penalty requires denoiser_modal_type='chirp'.")
+        cond_vec = self.make_pole_cond(
+            t_vec,
+            cond_summary=cond_summary,
+            cond_summary_raw=cond_summary_raw,
+        )
+        return self.chirp_field.coefficient_penalty(cond_vec)
 
     def forward(
         self,

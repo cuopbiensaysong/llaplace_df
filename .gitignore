@@ -39,3 +39,7 @@ method.pdf
 chirp_modal_method.md
 w_plan/chirp_modal_method_update.md
 w_plan/cmd_plan_v2.md
+.claude/
+.cursor/
+.vscode/
+imgs/

@@ -20,7 +20,7 @@ conda activate llapdiff
 git checkout update_method
 
 # 2. Confirm the gates are green before spending GPU time
-python -m pytest tests/ -q          # expect: all passed (241 at time of writing)
+python -m pytest tests/ -q          # expect: all passed (290 at time of writing)
 
 # 3. Warm the shared stage-1/2 artifacts ONCE per (dataset, horizon).
 #    All arms and seeds reuse the same frozen VAE + summarizer (the parity
@@ -34,14 +34,39 @@ Sanity: `ldt/vae/saved_model/<ds>/pred-<H>_ch-<C>_entity_elbo.pt` and
 `ldt/summarizer/saved_model/<ds>/<H>-<C>-summarizer.pt` must exist for every
 horizon you plan to run (channel table in `USAGE.md` §3.4).
 
-> **Do not reuse any chirp checkpoint trained before 2026-06-25.** The basis
-> rescale (Finding 2) and head change (Finding 1) changed the function class;
-> old chirp checkpoints load but are not comparable. The lab numbers 0.469 and
-> pre-fix 0.367 are excluded from all paper tables (plan §6, table hygiene).
+> 🔴 **Do not reuse ANY chirp checkpoint trained before 2026-07-05.** Two
+> generations of invalidation:
+> 1. *Before 2026-06-25:* the Finding-1/-2 fixes changed the function class
+>    (basis rescale, head change). Lab numbers 0.469 / pre-fix 0.367 stay out of
+>    all paper tables (plan §6).
+> 2. *Before 2026-07-05 (CRITICAL — found via the T1 smoke):* the pole-coefficient
+>    head `to_coeffs` was zero-initialized **and squared**, and `a = 0` is a
+>    stationary point (`d(a²)/dW = 2a·h = 0`) — the head received **exactly zero
+>    gradient** and never moved. Every "chirp" trained before this date actually
+>    had frozen, condition-independent, constant poles: the chirp arms were never
+>    time-varying, so any chirp-vs-lti comparison from those runs is meaningless.
+>    Fixed by eps-init (std 1e-4, ~1e-8 from LTI at init) + a permanent gradient
+>    regression test (`test_chirp_coeffs_receive_gradient_at_init`).
+>
+>    **Affected — retrain ALL of:** G3/H1 chirp cells (c) and (d), H2 chirp arms,
+>    U2/U3 UQ runs (they sit on the chirp core), and any T1/T2 inputs. lti cells
+>    are unaffected (they never had the head). This bug also retroactively
+>    explains why the Finding-2 basis rescale "changed nothing" on PhysioNet:
+>    with the coefficients frozen at zero there was no time-varying part for the
+>    rescale to act on.
+>
+>    **Audit any chirp checkpoint before trusting it** (dead head ⇒ absmax is
+>    exactly 0.0; healthy post-fix training ⇒ nonzero):
+>
+>    ```bash
+>    python -c "import torch; sd = torch.load('<ckpt>.pt', map_location='cpu')['model']; \
+>    print('to_coeffs absmax:', sd['model.chirp_field.to_coeffs.1.weight'].abs().max().item())"
+>    ```
 
 ---
 
 ## 1. Phase 0 — G2 + G3: the 2×2 factorial on PhysioNet h=12 (5 seeds)
+### ✅ EXECUTED 2026-07-05 — results and branch decision below; commands kept for reruns
 
 Four arms × seeds 0–4 = 20 stage-3 runs (stages 1–2 are reused, so each run is
 diffusion training only). Cell letters follow the plan's table:
@@ -75,16 +100,37 @@ llapdiff-checkpoint-eval --dataset-key physionet --pred 12 \
   --out-json ldt/results/g3/physionet_h12_<cell>_s<s>.json
 ```
 
-Collect test-CRPS into this table (mean ± std over the 5 seeds):
+### ✅ EXECUTED 2026-07-05 — results (test CRPS, mean ± std over seeds 0–4)
 
 | | + head | − head |
 |---|---|---|
-| **LTI** | (a) ____ ± ____ | (b) ____ ± ____ |
-| **Chirp** | (c) ____ ± ____ | (d) ____ ± ____ |
+| **LTI** | (a) 0.3710 ± 0.0117 | (b) 0.3719 ± 0.0125 |
+| **Chirp** | (c) 0.3706 ± 0.0024 | (d) **0.3709 ± 0.0018** |
 
-**Reads to look for** (plan §2 G3): (d) > (b) → time variation carries accuracy;
-(c) ≈ (d) → the head is redundant once poles vary (the kill-shot); (d) ≈ (a) →
-"delete the hack, keep the accuracy".
+Per-seed CRPS (note the paired-seed co-movement within each core family):
+
+| seed | (a) | (b) | (c) | (d) |
+|---|---|---|---|---|
+| 0 | 0.3617 | 0.3623 | 0.3691 | 0.3694 |
+| 1 | 0.3722 | 0.3728 | 0.3734 | 0.3736 |
+| 2 | 0.3680 | 0.3679 | 0.3676 | 0.3693 |
+| 3 | 0.3906 | 0.3929 | 0.3725 | 0.3714 |
+| 4 | 0.3626 | 0.3635 | 0.3706 | 0.3707 |
+
+**Reads** (plan §2 G3):
+- **(d) ≈ (a): holds exactly** (Δ = 0.0001) — "delete the hack, keep the accuracy".
+- **(c) ≈ (d): the kill-shot holds** (Δ = 0.0003) — the head is redundant once poles vary.
+- **(d) > (b): not observed at h=12** (Δ = 0.001, ≪ 1σ) — the risk register's expected
+  outcome at this horizon; the real test is NOAA-UK h=168.
+- (a) ≈ (b): the head doesn't help the LTI core here either.
+- **Unplanned finding:** chirp arms show **~6× lower seed variance** (0.0018–0.0024 vs
+  0.0117–0.0125; the lti arms' std is a seed-3 excursion the chirp arms don't have).
+  Attribution: both chirp cells are tight while the head-free lti control (b) is loose
+  → the stability comes from the **pole parameterization**, not head removal.
+  Replicate at h=168 before making it a paper claim.
+
+Full record incl. MAE/MSE, provenance and claims-language notes:
+`ldt/results/g3/G3_RESULTS.md`.
 
 ### G4 parity checklist (sign off before interpreting ANY CRPS)
 
@@ -100,13 +146,70 @@ Defaults already match LLapDiff's protocol — verify nothing was changed locall
 | Split | ratios / policy | 0.7/0.1/0.2 chronological (loader default) |
 | Upstream | VAE + summarizer | identical files across all arms (automatic via skip logic) |
 
-### Branch decision (plan §8, decided by cell (a))
+### Branch decision (plan §8, decided by cell (a)) — ✅ DECIDED 2026-07-05
 
-- **(a) ≈ 0.32** (paper number reproduces) → "close the gap": Tier-1 calibration
-  (guidance/DDIM sweep) is the critical path.
-- **(a) ≈ 0.36** (reproduction gap) → "match + certify": retire the 0.320 anchor,
-  headline is (d) ≈ (c) ≈ (a) with certification; shift effort to the synthetic
-  benchmark and theorem experiments.
+Cell (a) = **0.3710 ± 0.0117** → the **≈0.36 "reproduction gap" branch**:
+- The paper's 0.320 anchor does NOT reproduce in-harness (>4σ away) — retired from
+  the narrative; report the reproduction transparently.
+- The authors' released-checkpoint reference (0.367, `training_summaries`) IS
+  reproduced (<0.4σ) — the harness is faithful to the released artifacts.
+- **Story: "match + certify + strictly generalize"** — headline is (d) ≈ (c) ≈ (a)
+  with certification; effort shifts to the synthetic benchmark and theorem
+  experiments (H2 / T1 / T2) rather than CRPS-chasing.
+
+*(The two hypothetical branches, kept for the record: ≈0.32 → "close the gap",
+Tier-1 calibration critical path; ≈0.36 → the branch above.)*
+
+### Reproduction record (how these exact numbers were produced)
+
+**Environment.** Single NVIDIA H100 PCIe (driver 535.309.01, CUDA 12.2), conda env
+`llapdiff` (Python 3.11, torch 2.5.1+cu121), repo root as CWD, `pip install -e .`
+run beforehand (registers `llapdiff-train`). Code state: the combined branch with
+ALL fixes as of 2026-07-05 — crucially the ε-init fix (see the red box in §0);
+`python -m pytest tests/ -q` → 290 passed immediately before launch.
+
+**Pre-flight (all required).**
+1. `nvidia-smi` + `python -c "import torch; print(torch.cuda.is_available())"` → True.
+2. GPU smoke: build + forward + backward of all five model variants (chirp,
+   chirp+head, lti−head, chirp+UQ, chirp+growth) on CUDA — unit tests are CPU-only,
+   so this is the first CUDA exercise of the new code paths.
+3. Shared frozen stage-1/2 artifacts already staged (identical files for every arm
+   and seed — the parity requirement):
+   `ldt/vae/saved_model/physionet/pred-12_ch-16_entity_elbo.pt` and
+   `ldt/summarizer/saved_model/physionet/12-16-summarizer.pt` (both dated 2026-05-25;
+   stage-3-only fixes do not touch them).
+4. G4 parity checklist confirmed at defaults (table below): 25-sample CRPS, DDIM 64,
+   η=0 (`GEN_ETA=0.0`), EMA 0.999, guidance (1.0, 2.0)/1.0, dynamic thresholding off.
+
+**Launch.** Two sequential campaign scripts (kept in-repo, verbatim what ran):
+`ldt/scripts/run_g3_phase1_cell_a.sh` (cell (a) × seeds 0–4 — run FIRST; it alone
+decides the branch) and `ldt/scripts/run_g3_phase2_cells_dcb.sh` (cells (d), (c),
+(b) × seeds 0–4, in that order). Each run is exactly the §1 command with
+`--summary-json ldt/results/g3/summaries/physionet_h12_<cell>_s<s>.json` and a
+per-run log under `ldt/results/g3/logs/`. Runs are sequential on one GPU.
+
+**Observed runtime.** ~85–160 s per run (≈110 s median); the whole 20-run campaign
+took ≈33 min. Every run early-stopped at epoch ≈62 (EARLY_STOP=20 with per-epoch
+evals — the same selection rule in every arm, so this is parity-consistent).
+
+**Mid-campaign audit (do not skip for chirp arms).** On the first chirp run, verify
+the pole-coefficient head actually trained (§0 red box):
+`to_coeffs absmax = 1.3e-2` on cell-(d) seed 0 (vs 1e-4 init) → learning confirmed.
+A value of exactly 0.0 means a pre-fix binary/code state — abort and re-check.
+
+**Metrics.** The numbers above are the trainer's own final-test `eval_stats`
+(best checkpoint reloaded, 25 samples, parity defaults), read from the summary
+JSONs — aggregate with mean ± std over seeds. The separate
+`llapdiff-checkpoint-eval` pass (adds the imputation cases) was NOT run for the
+branch decision; run it in bulk against the routed `_best.pt` checkpoints when the
+imputation table is needed.
+
+**Reproducibility caveats.** Same-seed reruns reproduce these numbers
+*statistically*, not bitwise: `set_torch(seed)` fixes init and batching, but GPU
+kernels are nondeterministic by default (set `DETERMINISTIC=True` in `config.py`
+for bit-exact runs, at a speed cost). Using different stage-1/2 artifact files (or
+retraining them) shifts all arms together — keep the same VAE/summarizer files for
+any comparison against this table.
 
 ---
 
@@ -149,6 +252,22 @@ and for the chirp arm scores + plots recovered-vs-truth pole trajectories
 to `--tasks` for the piecewise regime-switch case; `--smoke` for a 1-epoch check.
 Geometry note: the purged split needs `val_ratio·(L−K−H+1) > H` — the default
 `--series-length 768` satisfies it (288 does NOT; the tool validates and explains).
+
+**Irregular sampling (the plan's H2 premise, added 2026-07-05).** Signals are
+sampled at **Gamma renewal gaps by default**: `--gap-distribution gamma`
+(default) with `--gap-mean 1.0 --gap-shape 4.0`, giving i.i.d. gaps with
+`Var(Δ) = gap_mean²/gap_shape` — sweep `--gap-shape` (e.g. 16 / 4 / 1) for
+low/medium/high gap-variance regimes at fixed mean (shape 1 = Poisson; use
+`--gap-distribution regular` for the historical dense grid, which is
+bit-identical to pre-change caches and consumes no extra RNG). One grid is
+drawn per cache and **shared by all entities** — the joint-panel collate
+requires a common query grid per row. The realized gap moments (the Theorem-D
+quantities E[Δ], Var(Δ), E[Δ²]) are recorded in the cache `meta.json`, the gap
+regime is tagged in the cache path, result rows, and summary grouping, and the
+ground-truth `pole_truth/*.npz` now also stores the sample `times` (native
+hours). ⚠️ Keep `--gap-mean 1.0` unless you also set `CHIRP_TIME_SCALE ≈
+PRED·gap_mean` in config.py — the chirp basis window `L` resolves to `PRED` in
+native units, which matches the horizon's time span only at unit mean gap.
 
 The **Prop. A.1 figure** (companion vs normal-form integration error):
 `python -m llapdiffusion.tools.plot_companion_vs_normal_form` (verified: companion
@@ -226,6 +345,9 @@ so an edit holds for every subsequent run** (record the value per run in your lo
 | `CHIRP_TIME_SCALE` | None (→ run's PRED) | Tier-2 time-constant sensitivity |
 | `CHIRP_USE_MLP_RESIDUAL` | False | keep False for certified arms |
 | `CHIRP_UQ_HEAD` | False | Theorem-C analytic UQ head (U2; needs chirp + x0 + certified path) |
+| `CHIRP_GROWTH_BUDGET` | 0.0 | Theorem-B′ growth budget c_g (T2 sweep {0, log 2, log 5}); 0 = Thm B exactly |
+| `CHIRP_PARAMETERIZATION` | "p_exact" | Phase-4 pole-field ablation: p_exact / p_mono / p_grid |
+| `CHIRP_COEFF_L2` | 0.0 | Tier-2 L2 on the pole-variation coefficients (shrinks toward LTI); training-only, chirp-only, all three parameterizations; growth head excluded (c_g governs it) |
 | `DIFF_LOSS_MODE` | "mse" | "gaussian_nll" trains mean+variance jointly (needs `CHIRP_UQ_HEAD`) |
 | `TRAIN_T_SAMPLER` | "uniform" | "max_only" = the U3 one-shot (no-diffusion) regression arm |
 | `DETERMINISTIC` | False | set True for bit-exact reruns (slower) |
@@ -263,14 +385,14 @@ Tier-2 (`CHIRP_*`, K, time constant) applies to CMD only. Selection on val only.
 
 | Item | Status | How to run / what's missing |
 |---|---|---|
-| U1 guidance/DDIM calibration sweep | **runnable** | `llapdiff-u1-sweep --dataset-key <ds> --pred <H> --checkpoint <ckpt> --guidance 1.0 1.25 1.5 2.0 --steps 16 32 64` — evaluates on **val** (pre-registration rule) and logs the dynamic-threshold clip fraction per cell |
-| U2 Theorem-C analytic UQ (q_k, p_k⁰, Gaussian NLL, PIT) | **runnable** | train with `CHIRP_UQ_HEAD=True`, `DIFF_LOSS_MODE="gaussian_nll"` (config.py; both base-config, survive presets) + `--modal-type chirp --predict-type x0`; then `llapdiff-uq-eval --dataset-key <ds> --pred <H> --checkpoint <ckpt>` reports latent PIT calibration error, reliability curve, NLL, RMSE. ⚠️ **Read the NLL warm-start warning below before launching.** |
-| U3 one-shot NLL (no diffusion) arm | **runnable** | same as U2 plus `TRAIN_T_SAMPLER="max_only"` in config.py (trains at the pure-noise step ⇒ conditional regression); eval with `llapdiff-uq-eval --mean-source oneshot` (the diffusion arms use `--mean-source ddim` for the same comparison) |
-| T1 pole-invariance across gap regimes | **mostly runnable** | training with `--coverage 0.0/0.2/…/0.8` works today; per-checkpoint trajectories via `llapdiff-plot-poles` / `extract_chirp_pole_trajectories`; only the cross-regime distance/Eq.-(8) comparison script is [needs implementation] |
-| T2 growth budget c_g ∈ {0, log2, log5} | **[needs implementation]** | γ-head (Theorem B′) + `CHIRP_GROWTH_BUDGET` config |
+| U1 guidance/DDIM calibration sweep | **runnable** | `llapdiff-u1-sweep --dataset-key <ds> --pred <H> --checkpoint <ckpt> --guidance 1.0 1.25 1.5 2.0 --steps 16 32 64` — evaluates on **val** (pre-registration rule) and logs the dynamic-threshold clip fraction per cell. The plan's specific clip check: add `--dynamic-thresh-p 0.995` and read `clip_fraction_mean` (recorded per row together with the effective p). First data point (G3 cell-(d) ckpt, physionet h=12, val): clip fraction **0.23%** at p=0.995 — ẑ₀ barely brushes the threshold after the head removal |
+| U2 Theorem-C analytic UQ (q_k, p_k⁰, Gaussian NLL, PIT) | **runnable** | train with `CHIRP_UQ_HEAD=True`, `DIFF_LOSS_MODE="gaussian_nll"` (config.py; both base-config, survive presets) + `--modal-type chirp --predict-type x0`; then `llapdiff-uq-eval --dataset-key <ds> --pred <H> --checkpoint <ckpt>` reports **latent** PIT calibration error/reliability/NLL/RMSE **and, by default, the data-space comparison**: the analytic law propagated through the decoder (latent Gaussian draws → decode, scored by the *unchanged* `evaluate_regression` — same masking/CRPS estimator/ensemble size) vs the sampled-diffusion baseline, with wall-clock for both (`analytic_speedup_x`; ~8× at 5 samples on the smoke, grows with DDIM steps). Flags: `--num-samples` (ensemble for BOTH arms; default 25), `--skip-sampled`, `--latent-only`. ⚠️ **Read the NLL warm-start warning below before launching.** |
+| U3 one-shot NLL (no diffusion) arm | **runnable** | same as U2 plus `TRAIN_T_SAMPLER="max_only"` in config.py (trains at the pure-noise step ⇒ conditional regression); the pre-registered three-way comparison is now one tool on the same split/ensemble/seed: sampled-diffusion (`data_space_sampled`), diffusion + analytic UQ (`--mean-source ddim` → `data_space_analytic`), one-shot NLL (`--mean-source oneshot` → `data_space_analytic`) |
+| T1 pole-invariance across gap regimes | **runnable** | `llapdiff-t1-poles --dataset-key <ds> --pred <H> --checkpoint <chirp ckpt> --coverages 0.0 0.2 0.4 0.6 0.8` — per-regime trajectory distance vs baseline + observed gap moments + Eq.-(8) implied multipliers, CSV/JSON + overlay figure. Read: distances ~flat, multipliers shift |
+| T2 growth budget c_g ∈ {0, log2, log5} | **runnable** | set `CHIRP_GROWTH_BUDGET` in config.py per arm (base-config; e.g. `math.log(2)`), train chirp as usual; c_g=0 is exactly Theorem B (no γ-head built). Bound becomes `e^{c_g}·e^{-ρ_min t̃}·Σ√(…)`. The synthetic `synthetic_growth_decay` task (budget log 2) is the matched benchmark case |
 | T3 imputation vs CSDI | **runnable** | `--imputation-random-mask-ratio 0.30` at eval; CSDI side via `llapdiff-baselines csdi-imputation` |
-| T4 efficiency table | **mostly runnable** | time `llapdiff-checkpoint-eval` across horizons; a dedicated timing script is [needs implementation] |
-| Phase-4 P-mono / P-grid parameterizations | **[needs implementation]** | alternative pole fields |
+| T4 efficiency table | **runnable** | `llapdiff-t4-timing --dataset-key <ds> --checkpoints <pred-24 ckpt> <pred-48 ckpt> … --repeats 5` — DDIM wall-clock + single-forward time per horizon (real conditioning), CSV |
+| Phase-4 P-exact / P-mono / P-grid ablation | **runnable** | set `CHIRP_PARAMETERIZATION` in config.py per arm: `"p_exact"` (default, closed-form antiderivative), `"p_mono"` (monotone integrated poles, closed-form derivative), `"p_grid"` (pointwise poles + trapezoid on the query grid — its integration error on wide gaps is part of the story). Recorded in checkpoint metadata; composes with growth/UQ heads |
 
 ### 🟡 Warning: do NOT train Gaussian-NLL from scratch (observed 2026-06-25)
 
@@ -299,9 +421,9 @@ Tier-2 (`CHIRP_*`, K, time constant) applies to CMD only. Selection on val only.
 > for: […]` (run with `--verbose`). Then check `llapdiff-uq-eval`: predicted std
 > should be O(target std), coverage near nominal — not the ≈0 signature above.
 
-When you have results from Phase 0/1 and want the [needs implementation] items
-built, bring the CRPS table — the §8 branch decides which of them are on the
-critical path.
+Every experiment in the plan (Phases 0–4) is now runnable from this branch —
+no [needs implementation] items remain. Bring the G2/G3 CRPS table back to
+decide the §8 branch and prioritize the rest of the queue.
 
 ---
 

@@ -67,6 +67,15 @@ def _parse_args() -> argparse.Namespace:
     # roughly val_ratio * (L - window - horizon + 1) > horizon (see _validate_geometry).
     # 288 (the regime tool's default) is structurally too short for 96/48 at 10% val.
     parser.add_argument("--series-length", type=int, default=768)
+    # Renewal-gap sampling (the plan's H2 premise: irregular, tunable Var(Delta)).
+    # Default gamma with shape 4 (Var = mean^2/4); use "regular" for the dense grid.
+    # Keep gap-mean at 1.0 so the run's horizon (in samples) matches the chirp time
+    # scale L = PRED in native units; if you change it, set CHIRP_TIME_SCALE ~
+    # PRED * gap_mean in config.py.
+    parser.add_argument("--gap-distribution", choices=("regular", "gamma"), default="gamma")
+    parser.add_argument("--gap-mean", type=float, default=1.0)
+    parser.add_argument("--gap-shape", type=float, default=4.0,
+                        help="Gamma shape k: Var(Delta) = gap_mean^2 / k. Sweep for Var(Delta) regimes.")
     parser.add_argument("--change-point", type=int, default=None, help="Defaults to 3/4 of the series.")
     parser.add_argument("--num-entities", type=int, default=64)
     parser.add_argument(
@@ -118,11 +127,18 @@ def _validate_geometry(args: argparse.Namespace, *, val_ratio: float = 0.1) -> N
         )
 
 
+def _gap_tag(args: argparse.Namespace) -> str:
+    if str(args.gap_distribution) == "regular":
+        return "gaps-regular"
+    return f"gaps-gamma-m{float(args.gap_mean):g}-k{float(args.gap_shape):g}"
+
+
 def _cache_dir(task: str, args: argparse.Namespace) -> Path:
     return (
         Path(args.data_root)
         / task
-        / f"len-{int(args.series_length)}_cp-{_resolve_change_point(args)}_entities-{int(args.num_entities)}"
+        / f"len-{int(args.series_length)}_cp-{_resolve_change_point(args)}_"
+          f"entities-{int(args.num_entities)}_{_gap_tag(args)}"
     ).resolve()
 
 
@@ -137,6 +153,9 @@ def _prepare_cache(task: str, args: argparse.Namespace) -> Mapping[str, object]:
         change_point=_resolve_change_point(args),
         seed=DATA_SEED,
         shared_poles=True,
+        gap_distribution=str(args.gap_distribution),
+        gap_mean=float(args.gap_mean),
+        gap_shape=float(args.gap_shape),
         overwrite=bool(args.overwrite_data),
     )
     return prepare_synthetic_regime_cache(cfg)
@@ -400,12 +419,17 @@ def _metric(payload: Mapping[str, object], name: str) -> Optional[float]:
 
 
 def _summary_rows(rows: Sequence[Mapping[str, object]]) -> List[Dict[str, object]]:
-    groups: Dict[Tuple[object, object], List[Mapping[str, object]]] = {}
+    groups: Dict[Tuple[object, object, object], List[Mapping[str, object]]] = {}
     for row in rows:
-        groups.setdefault((row.get("task"), row.get("arm")), []).append(row)
+        key = (row.get("task"), row.get("arm"), row.get("gap_regime"))
+        groups.setdefault(key, []).append(row)
     out = []
-    for (task, arm), group in sorted(groups.items(), key=lambda kv: (str(kv[0][0]), str(kv[0][1]))):
-        entry: Dict[str, object] = {"task": task, "arm": arm, "runs": len(group)}
+    for (task, arm, gap_regime), group in sorted(
+        groups.items(), key=lambda kv: tuple(str(v) for v in kv[0])
+    ):
+        entry: Dict[str, object] = {
+            "task": task, "arm": arm, "gap_regime": gap_regime, "runs": len(group),
+        }
         for metric in ("crps", "mae", "mse", "omega_rmse_best_mean", "rho_rmse_best_mean"):
             stat = _stats(r.get(metric) for r in group)
             entry[f"{metric}_mean"] = stat["mean"]
@@ -435,6 +459,7 @@ def main() -> None:
                     "task": task,
                     "arm": str(arm),
                     "seed": int(seed),
+                    "gap_regime": _gap_tag(args),
                     "checkpoint": checkpoint,
                     "crps": _metric(forecast, "crps"),
                     "mae": _metric(forecast, "mae"),

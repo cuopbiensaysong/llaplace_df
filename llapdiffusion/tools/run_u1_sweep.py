@@ -36,6 +36,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint", type=str, required=True)
     parser.add_argument("--guidance", nargs="+", type=float, default=(1.0, 1.25, 1.5, 2.0))
     parser.add_argument("--steps", nargs="+", type=int, default=(16, 32, 64))
+    parser.add_argument("--dynamic-thresh-p", type=float, default=None,
+                        help="Override the dynamic-thresholding quantile for the whole sweep "
+                        "(default: config, i.e. 0.0 = off). The plan's U1 clip check is "
+                        "--dynamic-thresh-p 0.995: does the post-head-removal x0 brush the "
+                        "threshold? Read clip_fraction_mean in the output rows.")
+    parser.add_argument("--dynamic-thresh-max", type=float, default=None,
+                        help="Override the thresholding clamp ceiling (default: config, 1.0).")
     parser.add_argument("--split", choices=("val", "test"), default="val",
                         help="Keep 'val' for tuning; 'test' only for the single final read.")
     parser.add_argument("--output-root", type=str,
@@ -70,6 +77,10 @@ def main() -> None:
             sampling["guidance_strength"] = float(w)
             sampling["steps"] = int(steps)
             sampling["eta"] = 0.0
+            if args.dynamic_thresh_p is not None:
+                sampling["dynamic_thresh_p"] = float(args.dynamic_thresh_p)
+            if args.dynamic_thresh_max is not None:
+                sampling["dynamic_thresh_max"] = float(args.dynamic_thresh_max)
             clip_stats: Dict[str, float] = {}
             payload = tv.evaluate_regression(
                 diff_model, vae, summarizer, loader,
@@ -85,6 +96,7 @@ def main() -> None:
                     "guidance": float(w),
                     "steps": int(steps),
                     "split": args.split,
+                    "dynamic_thresh_p": float(sampling.get("dynamic_thresh_p", 0.0)),
                     "crps": _metric(payload, "crps"),
                     "mae": _metric(payload, "mae"),
                     "mse": _metric(payload, "mse"),

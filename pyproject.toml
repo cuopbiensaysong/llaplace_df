@@ -55,6 +55,8 @@ llapdiff-synthetic-regime = "llapdiffusion.tools.run_synthetic_regime_shift:main
 llapdiff-synthetic-chirp = "llapdiffusion.tools.run_synthetic_chirp_benchmark:main"
 llapdiff-uq-eval = "llapdiffusion.tools.run_analytic_uq_eval:main"
 llapdiff-u1-sweep = "llapdiffusion.tools.run_u1_sweep:main"
+llapdiff-t1-poles = "llapdiffusion.tools.run_t1_pole_invariance:main"
+llapdiff-t4-timing = "llapdiffusion.tools.run_t4_timing:main"
 llapdiff-plot-poles = "llapdiffusion.viz.plot_llapdiff_poles:main"
 llapdiff-baselines = "llapdiffusion.tools.run_baselines:main"
 

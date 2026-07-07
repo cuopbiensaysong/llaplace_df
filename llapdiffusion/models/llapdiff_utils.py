@@ -885,6 +885,7 @@ def diffusion_loss(
     minsnr_normalize: str = "auto",
     return_stats: bool = False,
     loss_mode: str = "mse",
+    coeff_l2: float = 0.0,
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, torch.Tensor]]]:
     """
     MSE (or Gaussian NLL) on x0/v/eps with optional horizon masking and MinSNR weighting.
@@ -897,6 +898,11 @@ def diffusion_loss(
         and a model exposing return_variance (the Theorem-C chirp UQ head); the
         per-element error becomes 0.5*(log var + (pred-target)^2/var), reduced and
         MinSNR-weighted exactly like the MSE path.
+    coeff_l2:
+        Weight of the L2 penalty on the chirp pole-variation coefficients
+        (Tier-2 CHIRP_COEFF_L2 ablation; shrinks the pole functions toward the
+        constant-pole LTI special case). Requires the chirp core when > 0; added
+        unweighted (not MinSNR-scaled) after the reconstruction term.
     """
     loss_mode = str(loss_mode).strip().lower()
     if loss_mode not in {"mse", "gaussian_nll"}:
@@ -973,12 +979,21 @@ def diffusion_loss(
     ).to(device=per_sample.device, dtype=per_sample.dtype).detach()
     weighted_per_sample = weights * per_sample
     loss = weighted_per_sample.mean()
+
+    coeff_penalty = None
+    if float(coeff_l2) > 0.0:
+        coeff_penalty = model.pole_coefficient_penalty(
+            t, cond_summary=cond_summary, cond_summary_raw=cond_summary_raw
+        )
+        loss = loss + float(coeff_l2) * coeff_penalty
+
     if not return_stats:
         return loss
 
     stats = {
         "raw_loss": per_sample.mean().detach(),
         "weighted_loss": loss.detach(),
+        **({"coeff_penalty": coeff_penalty.detach()} if coeff_penalty is not None else {}),
         "per_sample_raw": per_sample.detach(),
         "per_sample_weighted": weighted_per_sample.detach(),
         "weights": weights.detach(),

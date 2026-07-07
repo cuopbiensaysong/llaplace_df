@@ -10,13 +10,25 @@ from llapdiffusion.models.time_utils import relative_time_offsets
 
 RHO_CONDITIONING_MODES = ("legacy_effective", "raw")
 MODAL_TYPES = ("lti", "chirp")
+CHIRP_PARAMETERIZATIONS = ("p_exact", "p_mono", "p_grid")
+
+
+def normalize_chirp_parameterization(value: str) -> str:
+    mode = str(value).strip().lower()
+    if mode not in CHIRP_PARAMETERIZATIONS:
+        raise ValueError(
+            f"Unknown chirp parameterization '{value}'. Use one of {CHIRP_PARAMETERIZATIONS}."
+        )
+    return mode
 
 __all__ = [
     "LaplaceTransformEncoder",
     "LaplacePseudoInverse",
     "ChirpModalField",
+    "CHIRP_PARAMETERIZATIONS",
     "RHO_CONDITIONING_MODES",
     "MODAL_TYPES",
+    "normalize_chirp_parameterization",
     "normalize_rho_conditioning_mode",
     "normalize_modal_type",
 ]
@@ -353,9 +365,11 @@ class ChirpModalField(nn.Module):
     negligible amplitude 1/(2 pi f_m) next to the linear term ~L, so the chirp collapses to
     a constant-slope ramp (LTI). Dividing the frequencies by L restores resolution.
 
-    The conditioning head ``to_coeffs`` is zero-initialized, so at init the coefficients
-    vanish and the field reduces to constant per-mode poles -- i.e. the chirp synthesizer
-    matches the LTI (LLapDiff) model. The integrals are analytic and evaluated in parallel
+    The conditioning head ``to_coeffs`` is eps-initialized (std 1e-4; exact zero is a
+    stationary point of the squared parameterization), so at init the coefficients are
+    ~1e-8 and the field is numerically indistinguishable from constant per-mode poles --
+    i.e. the chirp synthesizer starts at the LTI (LLapDiff) special case while remaining
+    trainable. The integrals are analytic and evaluated in parallel
     over all query times (no ODE solver). Positive instantaneous decay yields the
     contraction ||Phi_k|| = e^{-rho_bar_k} <= 1 used for stability by construction.
     """
@@ -369,6 +383,8 @@ class ChirpModalField(nn.Module):
         omega_max: float = math.pi,
         time_scale: Optional[float] = None,
         uq_head: bool = False,
+        growth_budget: float = 0.0,
+        parameterization: str = "p_exact",
     ) -> None:
         super().__init__()
         self.k = int(k)
@@ -376,6 +392,7 @@ class ChirpModalField(nn.Module):
         self.num_basis = int(num_basis)
         self.rho_min = float(rho_min)
         self.omega_max = float(omega_max)
+        self.parameterization = normalize_chirp_parameterization(parameterization)
         # Window length L that normalizes the basis frequencies to the time axis. A fixed
         # value gives reproducible, checkpoint-comparable chirps; None falls back to a
         # per-sample data-adaptive L = max|t_rel| (robust to units and irregular sampling).
@@ -390,19 +407,73 @@ class ChirpModalField(nn.Module):
         freqs = torch.linspace(1.0, float(self.num_basis), self.num_basis)
         self.register_buffer("basis_freqs", freqs, persistent=True)
 
-        # Conditioned time-varying coefficients (squared -> nonnegative). Zero-init so the
-        # model starts at the constant-pole (LTI) special case.
-        self.to_coeffs = nn.Sequential(
-            nn.SiLU(),
-            nn.Linear(self.cond_dim, 2 * self.k * self.num_basis),
-        )
-        nn.init.zeros_(self.to_coeffs[-1].weight)
-        nn.init.zeros_(self.to_coeffs[-1].bias)
+        if self.parameterization == "p_exact":
+            # Conditioned time-varying coefficients (squared -> nonnegative). Near-zero
+            # init: the model starts eps-close (a^2 ~ 1e-8) to the constant-pole (LTI)
+            # special case. NOT exactly zero — a = 0 is a stationary point of the squared
+            # parameterization (d(a^2)/dW = 2a·h = 0), so zero-init would freeze the head
+            # forever and the "chirp" would silently train as constant poles.
+            self.to_coeffs = nn.Sequential(
+                nn.SiLU(),
+                nn.Linear(self.cond_dim, 2 * self.k * self.num_basis),
+            )
+            nn.init.normal_(self.to_coeffs[-1].weight, std=1e-4)
+            nn.init.zeros_(self.to_coeffs[-1].bias)
+        elif self.parameterization == "p_mono":
+            # P-mono: monotone integrated poles directly. rho_bar = floor*t +
+            # sum_m u_m [softplus(v_m tau + b_m) - softplus(b_m)] with u_m >= 0
+            # (softplus of base+delta -> no stationary trap), v_m >= 0 (monotone in t),
+            # tau = t/L. Instantaneous poles are the closed-form derivative (positive).
+            init_u = math.log(math.expm1(1e-3))  # softplus(base) = 1e-3 -> near-LTI init
+            self._mono_u_base = nn.Parameter(torch.full((2, self.k, self.num_basis), init_u))
+            rates = torch.linspace(1.0, float(self.num_basis), self.num_basis)
+            self._mono_rate_raw = nn.Parameter(
+                torch.log(torch.expm1(rates)).view(1, self.num_basis).expand(self.k, -1).clone()
+            )
+            self._mono_shift = nn.Parameter(
+                torch.empty(self.k, self.num_basis).uniform_(-2.0, 2.0)
+            )
+            self.to_mono = nn.Sequential(
+                nn.SiLU(),
+                nn.Linear(self.cond_dim, 2 * self.k * self.num_basis),
+            )
+            nn.init.zeros_(self.to_mono[-1].weight)  # linear pre-softplus: no trap
+            nn.init.zeros_(self.to_mono[-1].bias)
+        else:  # p_grid
+            # P-grid: pointwise positive poles from cond + window-scaled basis features
+            # psi(t) = [1, phi_1..phi_M]; rho = rho_min + softplus(base + delta·psi),
+            # omega = omega_max * sigmoid(base + delta·psi) (Nyquist by construction).
+            # Integration is a cumulative trapezoid on the query grid (numerical — the
+            # deliberate contrast case for the parameterization ablation). Zero-init
+            # deltas start exactly at the LTI floors; the head is linear pre-nonlinearity,
+            # so there is no stationary trap.
+            self.to_grid = nn.Sequential(
+                nn.SiLU(),
+                nn.Linear(self.cond_dim, 2 * self.k * (self.num_basis + 1)),
+            )
+            nn.init.zeros_(self.to_grid[-1].weight)
+            nn.init.zeros_(self.to_grid[-1].bias)
 
         # Optional Theorem-C UQ head (isotropic case, constant-in-time noise
         # intensity): per-mode initial variance p0_k and noise intensity q_k,
         # softplus-parameterized around learnable bases with zero-init conditioned
         # deltas, so at init p0 = q = softplus(base) uniformly across the batch.
+        # Optional Theorem-B' bounded-growth head: a budgeted excursion
+        # gamma_k(t) = c_g [sigma(g_k(t)) - sigma(g_k(0))] subtracted from the
+        # integrated decay, so the envelope may genuinely grow but the total
+        # multiplicative growth over any subinterval is capped at e^{c_g}.
+        # c_g = 0 (default) disables the head and recovers Theorem B verbatim.
+        self.growth_budget = float(growth_budget)
+        if self.growth_budget < 0:
+            raise ValueError(f"growth_budget must be >= 0, got {growth_budget}")
+        if self.growth_budget > 0:
+            self.to_growth = nn.Sequential(
+                nn.SiLU(),
+                nn.Linear(self.cond_dim, self.k * self.num_basis),
+            )
+            nn.init.zeros_(self.to_growth[-1].weight)
+            nn.init.zeros_(self.to_growth[-1].bias)
+
         self.uq_head = bool(uq_head)
         if self.uq_head:
             init_raw = math.log(math.expm1(1e-2))  # softplus(base) = 0.01
@@ -487,20 +558,160 @@ class ChirpModalField(nn.Module):
         Phi = t_rel + torch.sin(wt) / two_pi_f  # Phi_m(0)=0; sin term ~ (L/2pi f) sin(2pi f t/L)
         return phi, Phi
 
+    def _pmono_params(
+        self, cond: torch.Tensor, time_scale: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """P-mono unit weights (u_rho, u_omega [B,K,M], omega capped), rates v and
+        shifts b [K,M]. u = softplus(base + delta(cond)) — alive at init, near-LTI."""
+        delta = self.to_mono(cond).view(-1, 2, self.k, self.num_basis)
+        u_rho = F.softplus(self._mono_u_base[0].unsqueeze(0) + delta[:, 0])
+        u_omega = F.softplus(self._mono_u_base[1].unsqueeze(0) + delta[:, 1])
+        v = F.softplus(self._mono_rate_raw)  # [K,M] >= 0 -> monotone in t
+        b = self._mono_shift
+        # Nyquist cap: sup_t inst omega_var = (1/L) sum_m u v <= omega_max - floor.
+        _, omega_floor = self._floor_poles(cond.dtype, cond.device)
+        headroom = (self.omega_max - omega_floor).view(1, self.k, 1)
+        sup = (u_omega * v.unsqueeze(0)).sum(dim=-1, keepdim=True) / time_scale.view(-1, 1, 1)
+        u_omega = u_omega * (headroom / (sup + headroom))
+        return u_rho, u_omega, v, b
+
+    def _pmono_poles(
+        self, cond: torch.Tensor, t_rel: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """P-mono instantaneous and integrated variable parts, each [B,T,K]:
+        bar_var = sum_m u [softplus(v tau + b) - softplus(b)], inst_var = its
+        closed-form t-derivative (>= 0), with tau = t / L."""
+        time_scale = self._time_scale(t_rel)
+        u_rho, u_omega, v, b = self._pmono_params(cond, time_scale)
+        tau = (t_rel / time_scale).unsqueeze(-1)  # [B,T,1,1]
+        arg = v.view(1, 1, self.k, self.num_basis) * tau + b.view(1, 1, self.k, self.num_basis)
+        sp = F.softplus(arg)  # [B,T,K,M]
+        sp0 = F.softplus(b).view(1, 1, self.k, self.num_basis)
+        sig = torch.sigmoid(arg)
+        inv_l = 1.0 / time_scale.view(-1, 1, 1)
+        rho_bar_var = (u_rho.unsqueeze(1) * (sp - sp0)).sum(dim=-1)
+        omega_bar_var = (u_omega.unsqueeze(1) * (sp - sp0)).sum(dim=-1)
+        rho_inst_var = (u_rho.unsqueeze(1) * sig * v.view(1, 1, self.k, -1)).sum(dim=-1) * inv_l
+        omega_inst_var = (u_omega.unsqueeze(1) * sig * v.view(1, 1, self.k, -1)).sum(dim=-1) * inv_l
+        return rho_inst_var, omega_inst_var, rho_bar_var, omega_bar_var
+
+    def _pgrid_inst(
+        self, cond: torch.Tensor, t_rel: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """P-grid pointwise poles, each [B,T,K]: rho = rho_min + softplus(base + d·psi),
+        omega = omega_max sigmoid(base + d·psi), psi = [1, phi_1..phi_M]."""
+        delta = self.to_grid(cond).view(-1, 2, self.k, self.num_basis + 1)
+        phi, _ = self._basis(t_rel, self._time_scale(t_rel))  # [B,T,M]
+        psi = torch.cat([torch.ones_like(phi[..., :1]), phi], dim=-1)  # [B,T,M+1]
+        rho_arg = self._rho_base.view(1, 1, self.k) + torch.einsum(
+            "bkm,btm->btk", delta[:, 0], psi
+        )
+        omega_arg = self._omega_base.view(1, 1, self.k) + torch.einsum(
+            "bkm,btm->btk", delta[:, 1], psi
+        )
+        rho = self.rho_min + F.softplus(rho_arg)
+        omega = self.omega_max * torch.sigmoid(omega_arg)
+        return rho, omega
+
+    def _pgrid_integrated(
+        self, cond: torch.Tensor, t_rel: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Cumulative-trapezoid integration of the pointwise poles over the query grid
+        (a virtual node at t=0 anchors the first segment). Numerical by design — the
+        contrast case in the P-exact/P-mono/P-grid ablation (integration error grows
+        with gap width)."""
+        B, T = t_rel.shape[0], t_rel.shape[1]
+        t = t_rel.reshape(B, T)
+        zero = torch.zeros(B, 1, 1, dtype=t_rel.dtype, device=t_rel.device)
+        rho0, omega0 = self._pgrid_inst(cond, zero)  # [B,1,K]
+        rho_t, omega_t = self._pgrid_inst(cond, t_rel)
+        tt = torch.cat([torch.zeros(B, 1, dtype=t.dtype, device=t.device), t], dim=1)
+        seg = (tt[:, 1:] - tt[:, :-1]).clamp_min(0.0).unsqueeze(-1)  # [B,T,1]
+        rho_all = torch.cat([rho0, rho_t], dim=1)  # [B,T+1,K]
+        omega_all = torch.cat([omega0, omega_t], dim=1)
+        rho_bar = (0.5 * seg * (rho_all[:, 1:] + rho_all[:, :-1])).cumsum(dim=1)
+        omega_bar = (0.5 * seg * (omega_all[:, 1:] + omega_all[:, :-1])).cumsum(dim=1)
+        return rho_bar, omega_bar
+
+    def _growth_terms(
+        self, cond: torch.Tensor, t_rel: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Theorem-B' excursion gamma(t) [B,T,K] and its derivative gamma'(t).
+
+        gamma_k(t) = c_g [sigma(g_k(t)) - sigma(g_k(0))] with g_k a signed expansion in
+        the same window-scaled basis: gamma(0)=0, gamma <= c_g (negative values only add
+        decay and are harmless). The derivative is closed-form:
+        gamma' = c_g sigma(g)(1-sigma(g)) g', with phi_m' = -sin(2 pi f_m t/L) 2 pi f_m/L.
+        """
+        g_coeff = self.to_growth(cond).view(-1, self.k, self.num_basis)  # [B,K,M], signed
+        time_scale = self._time_scale(t_rel)
+        phi, _ = self._basis(t_rel, time_scale)  # [B,T,M]
+        g_t = torch.einsum("bkm,btm->btk", g_coeff, phi)  # [B,T,K]
+        g_0 = 2.0 * g_coeff.sum(dim=-1)  # phi_m(0) = 2
+        sig_t = torch.sigmoid(g_t)
+        gamma = self.growth_budget * (sig_t - torch.sigmoid(g_0).unsqueeze(1))
+
+        two_pi_f = (2.0 * math.pi) * self.basis_freqs.to(
+            device=t_rel.device, dtype=t_rel.dtype
+        ) / time_scale  # [B,1,M]
+        phi_prime = -torch.sin(t_rel * two_pi_f) * two_pi_f  # [B,T,M]
+        g_prime = torch.einsum("bkm,btm->btk", g_coeff, phi_prime)
+        gamma_prime = self.growth_budget * sig_t * (1.0 - sig_t) * g_prime
+        return gamma, gamma_prime
+
     def instantaneous(
         self, cond: torch.Tensor, t_rel: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Instantaneous poles rho(t), omega(t) at query times, each [B,T,K].
 
         The pointwise derivative of :meth:`integrated`; used by the pole-trajectory
-        tooling (viz / synthetic-recovery figures), not by the training path.
+        tooling (viz / synthetic-recovery figures), not by the training path. Under a
+        growth budget (Theorem B') rho(t) may be negative where the envelope grows.
         """
-        rho_floor, omega_floor = self._floor_poles(t_rel.dtype, t_rel.device)
-        a_rho2, a_omega2 = self._coeffs(cond)  # [B,K,M]
-        phi, _ = self._basis(t_rel, self._time_scale(t_rel))  # [B,T,M]
-        rho = rho_floor.view(1, 1, self.k) + torch.einsum("bkm,btm->btk", a_rho2, phi)
-        omega = omega_floor.view(1, 1, self.k) + torch.einsum("bkm,btm->btk", a_omega2, phi)
+        if self.parameterization == "p_grid":
+            rho, omega = self._pgrid_inst(cond, t_rel)
+        elif self.parameterization == "p_mono":
+            rho_floor, omega_floor = self._floor_poles(t_rel.dtype, t_rel.device)
+            rho_var, omega_var, _, _ = self._pmono_poles(cond, t_rel)
+            rho = rho_floor.view(1, 1, self.k) + rho_var
+            omega = omega_floor.view(1, 1, self.k) + omega_var
+        else:
+            rho_floor, omega_floor = self._floor_poles(t_rel.dtype, t_rel.device)
+            a_rho2, a_omega2 = self._coeffs(cond)  # [B,K,M]
+            phi, _ = self._basis(t_rel, self._time_scale(t_rel))  # [B,T,M]
+            rho = rho_floor.view(1, 1, self.k) + torch.einsum("bkm,btm->btk", a_rho2, phi)
+            omega = omega_floor.view(1, 1, self.k) + torch.einsum("bkm,btm->btk", a_omega2, phi)
+        if self.growth_budget > 0:
+            _, gamma_prime = self._growth_terms(cond, t_rel)
+            rho = rho - gamma_prime
         return rho, omega
+
+    def coefficient_penalty(self, cond: torch.Tensor) -> torch.Tensor:
+        """Scalar L2 penalty on the conditioned pole-variation coefficients.
+
+        Penalizes the head outputs that make the poles time-varying and
+        condition-dependent, shrinking the field toward its constant-pole (LTI)
+        special case — the Tier-2 `CHIRP_COEFF_L2` ablation. Per parameterization:
+        p_exact penalizes the raw pre-square outputs ``a`` (mean a^2 = the
+        time-variation energy, i.e. the L1 of the nonnegative expansion
+        coefficients); p_mono the unit weights ``u``; p_grid the psi-deltas.
+        The growth head is deliberately excluded (its excursion is already
+        governed by the Theorem-B' budget c_g).
+        """
+        if self.parameterization == "p_exact":
+            raw = self.to_coeffs(cond)
+        elif self.parameterization == "p_mono":
+            delta = self.to_mono(cond).view(-1, 2, self.k, self.num_basis)
+            raw = torch.cat(
+                [
+                    F.softplus(self._mono_u_base[0].unsqueeze(0) + delta[:, 0]),
+                    F.softplus(self._mono_u_base[1].unsqueeze(0) + delta[:, 1]),
+                ],
+                dim=-1,
+            )
+        else:  # p_grid
+            raw = self.to_grid(cond)
+        return raw.pow(2).mean()
 
     def uq_params(self, cond: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Per-mode initial variance p0 and noise intensity q, each [B,K] (> 0)."""
@@ -528,11 +739,13 @@ class ChirpModalField(nn.Module):
 
             v_r = e^{-2 d_rho_r} v_{r-1} + q d_t_r (1 - e^{-2 d_rho_r}) / (2 d_rho_r)
 
-        Every exponent is <= 0 (rho_bar is nondecreasing), so the recurrence is
-        overflow-free; for constant poles it reproduces the Lyapunov closed form
-        q (1 - e^{-2 rho t}) / (2 rho) to float precision. This is the "solver-free
-        1-D quadrature" realization of the method doc's v_k (the integrand has no
-        elementary antiderivative under P-exact).
+        Without a growth budget rho_bar is nondecreasing, so every exponent is <= 0.
+        Under Theorem B' the excursion is bounded (|d_rho| <= c_g on any subinterval),
+        so signed increments are supported and exponents stay bounded (a -20 safety
+        floor guards float range; e^{40} is finite in float32). For constant poles it
+        reproduces the Lyapunov closed form q (1 - e^{-2 rho t}) / (2 rho) to float
+        precision. This is the "solver-free 1-D quadrature" realization of the method
+        doc's v_k (the integrand has no elementary antiderivative under P-exact).
         """
         B, T, K = rho_bar.shape
         t = t_rel.reshape(B, T)
@@ -542,16 +755,18 @@ class ChirpModalField(nn.Module):
         out = []
         for r in range(T):
             d_t = (t[:, r] - prev_t).clamp_min(0.0)  # [B]
-            d_rho = (rho_bar[:, r] - prev_rho).clamp_min(0.0)  # [B,K]
+            d_rho = (rho_bar[:, r] - prev_rho).clamp_min(-20.0)  # [B,K], signed under B'
             decay = torch.exp(-2.0 * d_rho)
-            # (1 - e^{-2x})/(2x) with the x -> 0 limit 1 - x (Taylor) for stability.
+            # (1 - e^{-2x})/(2x) with the |x| -> 0 limit 1 - x (Taylor) for stability.
+            near_zero = d_rho.abs() <= 1e-6
+            safe = torch.where(near_zero, torch.ones_like(d_rho), d_rho)
             ratio = torch.where(
-                d_rho > 1e-6,
-                (-torch.expm1(-2.0 * d_rho)) / (2.0 * d_rho.clamp_min(1e-12)),
+                near_zero,
                 1.0 - d_rho,
+                (-torch.expm1(-2.0 * d_rho)) / (2.0 * safe),
             )
             v = decay * v + d_t.unsqueeze(-1) * q * ratio
-            s_r = torch.exp(-2.0 * rho_bar[:, r].clamp_min(0.0)) * p0 + v
+            s_r = torch.exp(-2.0 * rho_bar[:, r].clamp_min(-20.0)) * p0 + v
             out.append(s_r)
             prev_t = t[:, r]
             prev_rho = rho_bar[:, r]
@@ -561,19 +776,44 @@ class ChirpModalField(nn.Module):
         self, cond: torch.Tensor, t_rel: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Integrated poles rho_bar, omega_bar at query times, each [B,T,K]."""
-        rho_floor, omega_floor = self._floor_poles(t_rel.dtype, t_rel.device)
-        a_rho2, a_omega2 = self._coeffs(cond)  # [B,K,M]
-        _, Phi = self._basis(t_rel, self._time_scale(t_rel))  # [B,T,M]
-        rho_var = torch.einsum("bkm,btm->btk", a_rho2, Phi)
-        omega_var = torch.einsum("bkm,btm->btk", a_omega2, Phi)
-        rho_bar = rho_floor.view(1, 1, self.k) * t_rel + rho_var
-        omega_bar = omega_floor.view(1, 1, self.k) * t_rel + omega_var
+        if self.parameterization == "p_grid":
+            rho_bar, omega_bar = self._pgrid_integrated(cond, t_rel)
+        elif self.parameterization == "p_mono":
+            rho_floor, omega_floor = self._floor_poles(t_rel.dtype, t_rel.device)
+            _, _, rho_var, omega_var = self._pmono_poles(cond, t_rel)
+            rho_bar = rho_floor.view(1, 1, self.k) * t_rel + rho_var
+            omega_bar = omega_floor.view(1, 1, self.k) * t_rel + omega_var
+        else:
+            rho_floor, omega_floor = self._floor_poles(t_rel.dtype, t_rel.device)
+            a_rho2, a_omega2 = self._coeffs(cond)  # [B,K,M]
+            _, Phi = self._basis(t_rel, self._time_scale(t_rel))  # [B,T,M]
+            rho_var = torch.einsum("bkm,btm->btk", a_rho2, Phi)
+            omega_var = torch.einsum("bkm,btm->btk", a_omega2, Phi)
+            rho_bar = rho_floor.view(1, 1, self.k) * t_rel + rho_var
+            omega_bar = omega_floor.view(1, 1, self.k) * t_rel + omega_var
+        if self.growth_budget > 0:
+            gamma, _ = self._growth_terms(cond, t_rel)
+            rho_bar = rho_bar - gamma  # Theorem B': rho_bar >= rho_min*t - c_g
         return rho_bar, omega_bar
 
     def seed_poles(self, cond: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Instantaneous poles at t=0 (phi_m(0)=2), used to seed residue extraction; [B,K]."""
+        """Instantaneous poles at t=0, used to seed residue extraction; [B,K].
+
+        Growth-budget excursions are deliberately excluded: seeds must stay positive
+        for the analysis attention, and gamma only reshapes the synthesis envelope.
+        """
+        zero = torch.zeros(cond.shape[0], 1, 1, dtype=cond.dtype, device=cond.device)
+        if self.parameterization == "p_grid":
+            rho0, omega0 = self._pgrid_inst(cond, zero)
+            return rho0.squeeze(1), omega0.squeeze(1)
         rho_floor, omega_floor = self._floor_poles(cond.dtype, cond.device)
-        a_rho2, a_omega2 = self._coeffs(cond)  # [B,K,M]
+        if self.parameterization == "p_mono":
+            rho_var, omega_var, _, _ = self._pmono_poles(cond, zero)
+            return (
+                rho_floor.view(1, self.k) + rho_var.squeeze(1),
+                omega_floor.view(1, self.k) + omega_var.squeeze(1),
+            )
+        a_rho2, a_omega2 = self._coeffs(cond)  # [B,K,M]  (phi_m(0) = 2)
         rho0 = rho_floor.view(1, self.k) + 2.0 * a_rho2.sum(dim=-1)
         omega0 = omega_floor.view(1, self.k) + 2.0 * a_omega2.sum(dim=-1)
         return rho0, omega0

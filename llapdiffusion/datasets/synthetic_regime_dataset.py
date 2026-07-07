@@ -76,6 +76,16 @@ class SyntheticRegimeCacheConfig:
     # baseline, phase, and noise stay per-entity). The chirp benchmark uses this so
     # a joint date row has a single well-defined ground-truth pole function.
     shared_poles: bool = False
+    # Sampling-time law (Theorem-D renewal gaps). "regular" keeps the historical
+    # dense unit grid (bit-identical caches, consumes no RNG); "gamma" draws i.i.d.
+    # gaps Delta ~ Gamma(shape=gap_shape, mean=gap_mean) in native steps (hours), so
+    # Var(Delta) = gap_mean^2 / gap_shape is tunable at fixed mean (shape -> inf is
+    # ~regular, shape = 1 is Poisson). The grid is drawn ONCE per cache and shared
+    # by all entities — the joint-panel collate requires a common query grid per row
+    # (a synchronized-but-irregular observation network).
+    gap_distribution: str = "regular"
+    gap_mean: float = 1.0
+    gap_shape: float = 4.0
 
 
 def _validate_task(task: str) -> str:
@@ -87,20 +97,45 @@ def _validate_task(task: str) -> str:
     return value
 
 
+def _sample_gaps(cfg: SyntheticRegimeCacheConfig, rng: np.random.Generator) -> np.ndarray:
+    """Per-sample time gaps Delta_j [T] in native steps (hours).
+
+    "regular" returns ones WITHOUT consuming RNG draws, so historical caches
+    regenerate bit-identically; "gamma" draws the renewal gaps (Theorem D's
+    Assumption G) with mean gap_mean and Var = gap_mean^2 / gap_shape.
+    """
+    dist = str(cfg.gap_distribution).strip().lower()
+    if dist == "regular":
+        return np.ones(int(cfg.series_length), dtype=np.float64)
+    if dist != "gamma":
+        raise ValueError(
+            f"Unsupported gap_distribution '{cfg.gap_distribution}'. Use 'regular' or 'gamma'."
+        )
+    mean, shape = float(cfg.gap_mean), float(cfg.gap_shape)
+    if mean <= 0 or shape <= 0:
+        raise ValueError("gap_mean and gap_shape must be > 0.")
+    gaps = rng.gamma(shape, mean / shape, size=int(cfg.series_length))
+    return np.maximum(gaps, 1e-3 * mean)  # keep timestamps strictly increasing
+
+
 def _pole_profiles(
     cfg: SyntheticRegimeCacheConfig,
     *,
     base_frequency: float,
     base_decay: float,
+    t_norm: np.ndarray,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Per-step ground-truth pole profiles (frequency [cycles/step], decay [1/step]).
+    """Per-sample ground-truth pole profiles (frequency [cycles/step], decay [1/step]).
 
-    Every task is a special case of the chirp-modal closed form
-    ``amplitude * exp(-cumsum(decay)) * sin(phase0 + cumsum(2*pi*frequency))``:
+    Every task is a special case of the gap-aware chirp-modal closed form
+    ``amplitude * exp(-cumsum(decay*gap)) * sin(phase0 + cumsum(2*pi*frequency*gap))``:
     the task only decides how the instantaneous poles vary over the series.
+    Smooth ramps are functions of ``t_norm`` (elapsed TIME normalized to [0, 1] —
+    identical to the index ramp under regular sampling); the piecewise shift tasks
+    keep their sample-index change point.
     """
     T = int(cfg.series_length)
-    ramp = np.linspace(0.0, 1.0, T, dtype=np.float64)  # u = t/(T-1)
+    ramp = np.asarray(t_norm, dtype=np.float64)  # u = t / t_end
     frequency = np.full((T,), float(base_frequency), dtype=np.float64)
     decay = np.full((T,), float(base_decay), dtype=np.float64)
 
@@ -130,12 +165,15 @@ def _pole_profiles(
 def _generate_signal(
     cfg: SyntheticRegimeCacheConfig,
     rng: np.random.Generator,
+    gaps: np.ndarray,
     *,
     base_frequency: Optional[float] = None,
     base_decay: Optional[float] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Return (signal, frequency, decay); the pole arrays are the ground truth.
 
+    ``gaps`` [T] are the per-sample time increments (ones under regular sampling —
+    the historical discretization is exactly the gap-aware one with unit gaps).
     Explicit ``base_frequency``/``base_decay`` override the per-entity draw
     (used when ``cfg.shared_poles`` shares one pole function across entities).
     """
@@ -147,12 +185,14 @@ def _generate_signal(
     if base_decay is None:
         base_decay = float(rng.uniform(cfg.decay_min, cfg.decay_max))
 
+    times_h = np.cumsum(gaps) - gaps[0]  # t_0 = 0
+    t_norm = times_h / max(float(times_h[-1]), 1e-12)
     frequency, decay = _pole_profiles(
-        cfg, base_frequency=base_frequency, base_decay=base_decay
+        cfg, base_frequency=base_frequency, base_decay=base_decay, t_norm=t_norm
     )
 
-    phase_path = phase0 + np.cumsum((2.0 * np.pi * frequency).astype(np.float64))
-    envelope = np.exp(-np.cumsum(decay.astype(np.float64)))
+    phase_path = phase0 + np.cumsum(2.0 * np.pi * frequency.astype(np.float64) * gaps)
+    envelope = np.exp(-np.cumsum(decay.astype(np.float64) * gaps))
     noise = rng.normal(0.0, cfg.noise_std, size=(cfg.series_length,)).astype(np.float64)
     signal = baseline + amplitude * envelope * np.sin(phase_path) + noise
     return signal.astype(np.float32, copy=False), frequency, decay
@@ -198,6 +238,12 @@ def prepare_synthetic_regime_cache(cfg: SyntheticRegimeCacheConfig) -> Mapping[s
     pole_truth_dir = paths.cache_root / "pole_truth"
     pole_truth_dir.mkdir(parents=True, exist_ok=True)
 
+    # One sampling grid per cache, shared by all entities (the joint-panel collate
+    # requires a common query grid per row). "regular" consumes no RNG draws.
+    gaps = _sample_gaps(cfg, rng)
+    times_h = np.cumsum(gaps) - gaps[0]  # native steps (hours), t_0 = 0
+    shared_times = start_time + np.round(times_h * 3.6e12).astype("timedelta64[ns]")
+
     shared_frequency = shared_decay = None
     if cfg.shared_poles:
         shared_frequency = float(rng.uniform(cfg.frequency_min, cfg.frequency_max))
@@ -206,11 +252,11 @@ def prepare_synthetic_regime_cache(cfg: SyntheticRegimeCacheConfig) -> Mapping[s
     for asset in assets:
         aid = asset_to_id[asset]
         signal, frequency, decay = _generate_signal(
-            cfg, rng, base_frequency=shared_frequency, base_decay=shared_decay
+            cfg, rng, gaps, base_frequency=shared_frequency, base_decay=shared_decay
         )
         features = signal.reshape(-1, 1).astype(np.float32, copy=False)
         targets = signal.astype(np.float32, copy=False)
-        times = start_time + np.arange(cfg.series_length).astype("timedelta64[h]")
+        times = shared_times
         obs_mask = np.ones_like(features, dtype=bool)
         fill_mask = np.ones_like(features, dtype=bool)
 
@@ -220,12 +266,14 @@ def prepare_synthetic_regime_cache(cfg: SyntheticRegimeCacheConfig) -> Mapping[s
         np.save(paths.obs_masks / f"{aid}.npy", obs_mask)
         np.save(paths.fill_masks / f"{aid}.npy", fill_mask)
         # Ground-truth instantaneous poles in model units (per native step):
-        # rho = decay, omega = 2*pi*frequency [rad/step]. Consumed by the chirp
+        # rho = decay, omega = 2*pi*frequency [rad/step], sampled at times_h
+        # (native hours; uniform under regular sampling). Consumed by the chirp
         # benchmark's recovery figure (load_ground_truth_poles).
         np.savez(
             pole_truth_dir / f"{aid}.npz",
             rho=decay.astype(np.float32),
             omega=(2.0 * np.pi * frequency).astype(np.float32),
+            times=times_h.astype(np.float32),
         )
         norm_acc.update(aid, features, targets)
 
@@ -284,6 +332,13 @@ def prepare_synthetic_regime_cache(cfg: SyntheticRegimeCacheConfig) -> Mapping[s
             "noise_std": float(cfg.noise_std),
             "growth_log_amplitude": float(cfg.growth_log_amplitude),
             "shared_poles": bool(cfg.shared_poles),
+            "gap_distribution": str(cfg.gap_distribution),
+            "gap_mean": float(cfg.gap_mean),
+            "gap_shape": float(cfg.gap_shape),
+            # Realized moments of the drawn grid (the Theorem-D quantities).
+            "gap_mean_realized": float(gaps.mean()),
+            "gap_var_realized": float(gaps.var()),
+            "gap_second_moment_realized": float((gaps**2).mean()),
         },
     }
     with paths.meta.open("w") as f:
@@ -315,10 +370,13 @@ def load_ground_truth_poles(data_dir: PathLike) -> Dict[int, Dict[str, np.ndarra
     truth: Dict[int, Dict[str, np.ndarray]] = {}
     for npz_path in sorted(truth_dir.glob("*.npz")):
         payload = np.load(npz_path)
-        truth[int(npz_path.stem)] = {
+        entry = {
             "rho": payload["rho"].astype(np.float32),
             "omega": payload["omega"].astype(np.float32),
         }
+        if "times" in payload:  # absent in caches predating renewal-gap sampling
+            entry["times"] = payload["times"].astype(np.float32)
+        truth[int(npz_path.stem)] = entry
     if not truth:
         raise FileNotFoundError(f"pole_truth/ under '{paths.cache_root}' is empty.")
     return truth
