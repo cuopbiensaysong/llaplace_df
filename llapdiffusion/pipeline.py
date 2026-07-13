@@ -26,7 +26,11 @@ from llapdiffusion.target_artifacts import (
 
 import warnings
 warnings.filterwarnings("ignore")
-
+# import debugpy
+# debugpy.listen(5678)
+# print("Waiting for debugger to attach...")
+# debugpy.wait_for_client()
+# print("Debugger attached")
 
 COVERAGE_HELP = "fraction of observed context entries to hide; 0 disables induced missingness"
 PREDICT_TYPE_DIR_PREFIX = "predict"
