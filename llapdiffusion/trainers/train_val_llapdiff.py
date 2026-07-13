@@ -1144,7 +1144,7 @@ def _sampling_kwargs(config_obj: object, *, prefix: str = "EVAL") -> Dict[str, o
     )
 
     return {
-        "steps": int(_read("STEPS", default=36, aliases=("GEN_STEPS",))),
+        "steps": int(_read("STEPS", default=64, aliases=("GEN_STEPS",))),
         "guidance_strength": guidance_strength,
         "guidance_power": float(_read("GUIDANCE_POWER", default=0.3)),
         "eta": float(_read("ETA", default=0.0, aliases=("GEN_ETA",))),

@@ -407,6 +407,11 @@ class ChirpModalField(nn.Module):
         freqs = torch.linspace(1.0, float(self.num_basis), self.num_basis)
         self.register_buffer("basis_freqs", freqs, persistent=True)
 
+        print(f"self.num_basis: {self.num_basis}")
+        print(f"self.rho_min: {self.rho_min}")
+        print(f"self.omega_max: {self.omega_max}")
+        print(f"self.time_scale: {self.time_scale}")
+
         if self.parameterization == "p_exact":
             # Conditioned time-varying coefficients (squared -> nonnegative). Near-zero
             # init: the model starts eps-close (a^2 ~ 1e-8) to the constant-pole (LTI)
@@ -835,6 +840,7 @@ class LaplacePseudoInverse(nn.Module):
         super().__init__()
         self.encoder = encoder
         self.use_mlp_residual = bool(use_mlp_residual)
+        print(f"self.use_mlp_residual: {self.use_mlp_residual}")
         D = encoder.feat_dim
         H = int(hidden_dim if hidden_dim is not None else D * 2)
 

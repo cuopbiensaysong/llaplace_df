@@ -128,7 +128,7 @@ RHO_CONDITIONING_MODE = "raw"
 # Denoiser dynamical core: "lti" (constant poles + residual MLP, original LLapDiff) or
 # "chirp" (time-varying poles, stable-by-construction, residual MLP off by default).
 DENOISER_MODAL_TYPE = "lti"
-CHIRP_NUM_BASIS = 8
+CHIRP_NUM_BASIS = 256
 CHIRP_RHO_MIN = 1e-4
 CHIRP_USE_MLP_RESIDUAL = False
 # Window length that normalizes the chirp basis frequencies to the time axis. None
@@ -171,7 +171,7 @@ MIN_LR = 3e-6
 WARMUP_FRAC = 0.095
 WEIGHT_DECAY = 5e-4
 GRAD_CLIP = 1.0
-EARLY_STOP = 20
+EARLY_STOP = 50
 EARLY_STOP_MIN_EPOCHS = 0
 
 DROPOUT = 0.0

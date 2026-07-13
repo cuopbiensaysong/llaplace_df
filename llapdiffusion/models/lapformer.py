@@ -375,7 +375,10 @@ class LapFormer(nn.Module):
                 parameterization=chirp_parameterization,
             )
         else:
-            synth_use_mlp_residual = use_mlp_residual
+            if output_head != "off":
+                synth_use_mlp_residual = use_mlp_residual
+            else:
+                synth_use_mlp_residual = False
             self.chirp_field = None
 
         self.synthesis = LaplacePseudoInverse(
@@ -431,6 +434,8 @@ class LapFormer(nn.Module):
                 "chirp_uq_head requires the certified output path (no LayerNorm head): "
                 "the analytic Gaussian law (Theorem C) applies to the scaled modal sum only."
             )
+        
+        print(f"self._use_output_head: {self._use_output_head}")
 
     def _select_summary_tokens(
         self,
