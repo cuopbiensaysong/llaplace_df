@@ -209,14 +209,17 @@ DIFF_PRECOMPUTE_DIR = None
 
 USE_EMA_EVAL = True
 EMA_DECAY = 0.999
-PRIMARY_EVAL_METRIC = "val_diag_mse_raw"
-VAL_METRIC_SOURCE = "raw"
-TEST_METRIC_SOURCE = "raw"
+PRIMARY_EVAL_METRIC = "crps"
+VAL_METRIC_SOURCE = "ema"
+TEST_METRIC_SOURCE = "ema"
 EMA_COMPARE = True
 DIFF_AMP = False
 FINAL_TEST_EVAL = "run"
 EVAL_EVERY = 1
-DOWNSTREAM_EVAL_EVERY = 0
+# Must be > 0 whenever PRIMARY_EVAL_METRIC == "crps": it gates the val CRPS eval that
+# feeds checkpoint selection and early stopping. At 0 the trainer computes no CRPS, so
+# it saves no best checkpoint and never early-stops (it falls back to the last epoch).
+DOWNSTREAM_EVAL_EVERY = 5
 VAL_DIAG_EVERY = 1
 IRREG_CHECK_EVERY = 0
 EMA_COMPARE_EVERY = 0

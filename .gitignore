@@ -43,3 +43,4 @@ w_plan/cmd_plan_v2.md
 .cursor/
 .vscode/
 imgs/
+finetuning/results/*
