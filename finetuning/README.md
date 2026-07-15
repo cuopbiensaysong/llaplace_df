@@ -158,15 +158,25 @@ twice.
 
 ```
 ldt/tuning/v1/physionet_h12/d/<trial-id>/output/modal-chirp/seed-0/pred-12/
-├── llapdiff_pred-12_best_ema.pt    ← best val-CRPS(EMA) epoch — the one the harness scores
-├── llapdiff_pred-12_best.pt        ← best by the primary metric (same rule here)
-└── llapdiff_pred-12_last.pt        ← final epoch
+└── llapdiff_pred-12_best_ema.pt    ← best val-CRPS(EMA) epoch — the ONLY file the harness loads
+```
+
+The trainer also writes `_best.pt` (best by the primary metric) and `_last.pt`
+(final epoch), each ~1.2 GB, but the tuner never reads them (scoring, sampling,
+and final eval all load the `loaded_checkpoint` recorded in `state.json`, which
+is `_best_ema.pt`). So after each trial trains, the harness **auto-prunes** those
+two siblings (`Combo._prune_trial_checkpoints`) — keeping ~1.2 GB per trial
+instead of ~3.6 GB. Pre-existing runs (trained before this behavior) still have
+the dead files; reclaim them once with:
+
+```bash
+find ldt/tuning -type f \( -name "*_best.pt" -o -name "*_last.pt" \) -delete
 ```
 
 The inner `modal-chirp/seed-0/pred-12/` segments are the pipeline's own arm/seed
 routing. Trials are rooted under `ldt/tuning/` so they can **never** collide
-with the paper runs in `ldt/output/`. Delete `ldt/tuning/<run-tag>/` to reclaim
-disk; `results/` (the numbers) is unaffected.
+with the paper runs in `ldt/output/` (which keep all variants). Delete
+`ldt/tuning/<run-tag>/` to reclaim disk; `results/` (the numbers) is unaffected.
 
 > A `*_emaweights.pt` sibling also appears after a `weights: ema` **final** eval:
 > `llapdiff-checkpoint-eval` always loads the `model` key, so `final_eval.py`

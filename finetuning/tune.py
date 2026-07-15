@@ -190,6 +190,20 @@ class Combo:
             and select.get("weights") == self.args.select_weights
         )
 
+    def _prune_trial_checkpoints(self, checkpoint: str) -> None:
+        """Keep only the checkpoint the tuner actually loads (the recorded
+        `loaded_checkpoint`); delete the sibling _best/_best_raw/_last variants the
+        trainer also writes but the harness never reads (~2/3 of the tuning disk)."""
+        ck = Path(checkpoint)
+        for sibling in ck.parent.glob("llapdiff_*.pt"):
+            if sibling.name == ck.name:
+                continue  # the keeper (robust to whichever variant is referenced)
+            if sibling.name.endswith(("_best.pt", "_best_raw.pt", "_last.pt")):
+                try:
+                    sibling.unlink()
+                except OSError:
+                    pass
+
     # ---------------- trials
     def ensure_trial(self, overrides: dict, stage: str, seed: int, *, need_score: bool) -> str | None:
         """Train (if needed) and score (if needed) one configuration.
@@ -254,6 +268,7 @@ class Combo:
             rec["trainer_best_primary_metric_name"] = llapdiff_stats.get("best_primary_metric_name")
             rec["status"] = "trained"
             self.save()
+            self._prune_trial_checkpoints(checkpoint)
 
         if need_score and not self._selection_matches(rec):
             split = self.args.select_split
