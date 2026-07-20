@@ -32,6 +32,7 @@ from llapdiffusion.configs.config_utils import clone_config, make_jsonable
 from llapdiffusion.logging_utils import apply_verbosity
 from llapdiffusion.datasets.synthetic_regime_dataset import (
     CHIRP_TASKS,
+    _SMOOTH_RAMP_TASKS,
     SyntheticRegimeCacheConfig,
     load_ground_truth_poles,
     prepare_synthetic_regime_cache,
@@ -45,7 +46,7 @@ from llapdiffusion.tools.run_synthetic_regime_shift import (
     _write_rows,
 )
 from llapdiffusion.trainers import train_val_llapdiff as tv
-from llapdiffusion.viz.plot_llapdiff_poles import extract_chirp_pole_trajectories
+from llapdiffusion.viz.plot_llapdiff_poles import modal_contributions
 
 
 DEFAULT_WORK_ROOT = Path.cwd()
@@ -76,6 +77,16 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--gap-mean", type=float, default=1.0)
     parser.add_argument("--gap-shape", type=float, default=4.0,
                         help="Gamma shape k: Var(Delta) = gap_mean^2 / k. Sweep for Var(Delta) regimes.")
+    # Within-window pole excursion (fix-plan P5): the legacy series-long ramp gives a
+    # ~6% sweep inside one horizon, so LTI is NOT structurally penalized within a
+    # window. A triangle re-sweep of ~(window+horizon) steps puts the full excursion
+    # inside every window (including the tail test windows the purged split uses).
+    parser.add_argument(
+        "--sweep-period", type=float, default=None,
+        help="Triangle re-sweep period (native steps) for the smooth-ramp tasks "
+             "(recommended ~window+horizon). Piecewise change-point tasks ignore it. "
+             "Default None keeps the legacy slow series-long ramp.",
+    )
     parser.add_argument("--change-point", type=int, default=None, help="Defaults to 3/4 of the series.")
     parser.add_argument("--num-entities", type=int, default=64)
     parser.add_argument(
@@ -95,6 +106,12 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--num-recovery-windows", type=int, default=4)
     parser.add_argument("--recovery-top-modes", type=int, default=4)
+    parser.add_argument(
+        "--recovery-share-threshold", type=float, default=0.5,
+        help="Minimum output-energy share the selected modes must explain; below it "
+             "the top-N is escalated (x2 up to 16) and the window is flagged "
+             "selection-invalid if still short (figure watermarked, not evidence).",
+    )
     parser.add_argument("--recompute-artifacts", action="store_true")
     parser.add_argument("--overwrite-data", action="store_true")
     parser.add_argument("--verbose", action="store_true")
@@ -133,13 +150,24 @@ def _gap_tag(args: argparse.Namespace) -> str:
     return f"gaps-gamma-m{float(args.gap_mean):g}-k{float(args.gap_shape):g}"
 
 
+def _task_sweep_period(task: str, args: argparse.Namespace) -> Optional[float]:
+    """--sweep-period applies only to the smooth-ramp tasks; the piecewise
+    change-point tasks keep their design (the generator would reject it)."""
+    period = getattr(args, "sweep_period", None)
+    if period is None or task not in _SMOOTH_RAMP_TASKS:
+        return None
+    return float(period)
+
+
 def _cache_dir(task: str, args: argparse.Namespace) -> Path:
-    return (
-        Path(args.data_root)
-        / task
-        / f"len-{int(args.series_length)}_cp-{_resolve_change_point(args)}_"
-          f"entities-{int(args.num_entities)}_{_gap_tag(args)}"
-    ).resolve()
+    tag = (
+        f"len-{int(args.series_length)}_cp-{_resolve_change_point(args)}_"
+        f"entities-{int(args.num_entities)}_{_gap_tag(args)}"
+    )
+    period = _task_sweep_period(task, args)
+    if period is not None:
+        tag += f"_sweep-{period:g}"
+    return (Path(args.data_root) / task / tag).resolve()
 
 
 def _prepare_cache(task: str, args: argparse.Namespace) -> Mapping[str, object]:
@@ -156,6 +184,7 @@ def _prepare_cache(task: str, args: argparse.Namespace) -> Mapping[str, object]:
         gap_distribution=str(args.gap_distribution),
         gap_mean=float(args.gap_mean),
         gap_shape=float(args.gap_shape),
+        sweep_period=_task_sweep_period(task, args),
         overwrite=bool(args.overwrite_data),
     )
     return prepare_synthetic_regime_cache(cfg)
@@ -264,6 +293,48 @@ def _build_loaders(cfg: SimpleNamespace):
     )
 
 
+def _select_top_modes(
+    share: np.ndarray, top_n: int, threshold: float, cap: int = 16
+) -> Tuple[np.ndarray, float, bool, int]:
+    """Top-contribution mode selection with escalation (fix-plan P3/P9).
+
+    Picks the ``top_n`` modes with the largest output-energy share; if together
+    they explain less than ``threshold`` of the output, doubles ``top_n`` (up to
+    ``cap``) before giving up. Returns (indices, selected_share, valid, n_used).
+    """
+    k_total = int(share.shape[-1])
+    order = np.argsort(share)[::-1]
+    n = max(1, min(int(top_n), k_total))
+    while True:
+        sel_share = float(share[order[:n]].sum())
+        if sel_share >= float(threshold) or n >= min(int(cap), k_total):
+            break
+        n = min(n * 2, int(cap), k_total)
+    return order[:n].copy(), sel_share, sel_share >= float(threshold), n
+
+
+def _stratified_pick(
+    candidates: Sequence[Tuple[int, int, int, int]], n: int
+) -> List[Tuple[int, int, int, int]]:
+    """Spread ``n`` recovery windows evenly across the test span by window start
+    (fix-plan P6). Candidates are (batch_idx, row, asset_id, window_start)."""
+    cands = sorted(candidates, key=lambda c: (c[3], c[2], c[0], c[1]))
+    if len(cands) <= int(n):
+        return list(cands)
+    idx = np.unique(np.round(np.linspace(0, len(cands) - 1, int(n))).astype(int))
+    return [cands[i] for i in idx]
+
+
+def _generate_kwargs(cfg: SimpleNamespace) -> Dict[str, object]:
+    """The evaluation sampling settings, restricted to ``generate()``'s surface."""
+    sampling = tv._sampling_kwargs(cfg, prefix="TEST")
+    keys = (
+        "steps", "guidance_strength", "guidance_power", "eta",
+        "dynamic_thresh_p", "dynamic_thresh_max", "rho",
+    )
+    return {k: sampling[k] for k in keys}
+
+
 @torch.no_grad()
 def _recover_pole_trajectories(
     cfg: SimpleNamespace,
@@ -272,115 +343,332 @@ def _recover_pole_trajectories(
     args: argparse.Namespace,
     *,
     device: torch.device,
-) -> Tuple[Dict[str, object], Dict[str, np.ndarray]]:
-    """Extract chirp pole trajectories for a few test windows and score them
-    against the generator's ground truth (best-matching mode among the top
-    time-varying modes). Returns (metrics, figure payload)."""
+) -> Tuple[Dict[str, object], List[Dict[str, object]]]:
+    """Residue-weighted pole recovery from the ACTUAL generation, for either arm.
+
+    A ``modal_capture`` hook on ``generate()`` records residues theta and pole
+    trajectories at the final denoising step of the evaluated forecast; modes are
+    ranked by their output contribution E_k = mean_t e^{-2 rho_bar_k(t)} ||theta_k||^2
+    (never by coefficient variation — that criterion anti-selected unconstrained
+    junk modes), and the primary recovered curve is the E_k-weighted effective
+    trajectory over ALL modes, the identifiable object when many modes share one
+    signal. Windows are stratified across the test span.
+
+    Returns (metrics, figure windows). The lti arm goes through the identical
+    path with constant poles, giving the structural-failure overlay a number.
+    """
     train_dl, _, test_dl, _ = loaders
-    diff_model, _, summarizer, _, _ = _load_stack(cfg, Path(checkpoint), device, train_dl)
+    diff_model, _, summarizer, mu_mean, _ = _load_stack(cfg, Path(checkpoint), device, train_dl)
     truth = load_ground_truth_poles(cfg.DATA_DIR)
     window = int(cfg.WINDOW)
+    horizon = int(cfg.PRED)
+    latent_dim = int(mu_mean.shape[-1])
+    sampling = _generate_kwargs(cfg)
+    threshold = float(getattr(args, "recovery_share_threshold", 0.5))
 
-    rows: List[Dict[str, object]] = []
-    fig_payload: Dict[str, np.ndarray] = {}
-    collected = 0
-    for xb, yb, meta in test_dl:
-        (V, T), _, mask_bn = tv._sanitize_batch(xb, yb, meta, device)
-        if not mask_bn.any():
-            continue
-        cond_summary, cond_summary_raw = tv._build_cond_summary_pair(
-            summarizer, diff_model, V, T, mask_bn, device,
-            dt=meta.get("delta_t"), x_obs_mask=meta.get("x_obs_mask"),
-        )
-        asset_ids = meta["cache_asset_ids"].cpu().numpy()  # [B,N]
-        starts = meta["cache_window_starts"].cpu().numpy()  # [B,N]
-        delta_t_y = meta["delta_t_y"].cpu().numpy()  # [B,N,H]
+    # Pass 1 (meta only): enumerate candidate windows, then stratify by start.
+    candidates: List[Tuple[int, int, int, int]] = []
+    for b_idx, (xb, yb, meta) in enumerate(test_dl):
+        _, _, mask_bn = tv._sanitize_batch(xb, yb, meta, device)
         mask_np = mask_bn.detach().cpu().numpy().astype(bool)
-
-        for row in range(cond_summary.shape[0]):
+        asset_ids = meta["cache_asset_ids"].cpu().numpy()
+        starts = meta["cache_window_starts"].cpu().numpy()
+        for row in range(mask_np.shape[0]):
             valid = np.nonzero(mask_np[row])[0]
             if valid.size == 0:
                 continue
             n0 = int(valid[0])
-            aid = int(asset_ids[row, n0])
-            start = int(starts[row, n0])
-            t_grid = torch.from_numpy(delta_t_y[row, n0].astype(np.float32))
+            candidates.append((b_idx, row, int(asset_ids[row, n0]), int(starts[row, n0])))
+    if not candidates:
+        raise RuntimeError("No valid test windows found for pole recovery.")
+    chosen: Dict[int, List[Tuple[int, int, int, int]]] = {}
+    for cand in _stratified_pick(candidates, int(args.num_recovery_windows)):
+        chosen.setdefault(cand[0], []).append(cand)
 
-            traj = extract_chirp_pole_trajectories(
-                diff_model,
-                t_idx=1,
+    win_metrics: List[Dict[str, object]] = []
+    fig_windows: List[Dict[str, object]] = []
+    for b_idx, (xb, yb, meta) in enumerate(test_dl):
+        if b_idx not in chosen:
+            continue
+        (V, T), _, mask_bn = tv._sanitize_batch(xb, yb, meta, device)
+        cond_summary, cond_summary_raw = tv._build_cond_summary_pair(
+            summarizer, diff_model, V, T, mask_bn, device,
+            dt=meta.get("delta_t"), x_obs_mask=meta.get("x_obs_mask"),
+        )
+        dt_b = tv._flatten_dt(meta, mask_bn, device, key="delta_t_y")
+        if dt_b is None:
+            raise RuntimeError("Synthetic cache batches must carry delta_t_y for recovery.")
+        dt_model = tv._match_dt_to_horizon(dt_b, horizon)
+
+        for _, row, aid, start in chosen[b_idx]:
+            capture: Dict[str, torch.Tensor] = {}
+            gen = torch.Generator(device=device)
+            gen.manual_seed(int(cfg.SEED) * 100003 + start * 31 + aid)
+            diff_model.generate(
+                shape=(1, horizon, latent_dim),
                 cond_summary=cond_summary[row : row + 1],
                 cond_summary_raw=cond_summary_raw[row : row + 1],
-                t_grid=t_grid,
-                top_modes=int(args.recovery_top_modes),
+                dt=dt_model[row : row + 1],
+                cfg_rescale=True,
+                generator=gen,
+                modal_capture=capture,
+                **sampling,
             )
+            con = modal_contributions(capture)
+            share = con["energy_share"][0].numpy()
+            sel, sel_share, sel_valid, n_used = _select_top_modes(
+                share, int(args.recovery_top_modes), threshold
+            )
+
             # Forecast steps start+window .. start+window+H-1 in absolute series time.
             lo = start + window
-            hi = lo + t_grid.shape[0]
+            hi = lo + horizon
             rho_true = truth[aid]["rho"][lo:hi]
             omega_true = truth[aid]["omega"][lo:hi]
-            rho_hat = traj["rho"][0].numpy()  # [H, top]
-            omega_hat = traj["omega"][0].numpy()
+            times = truth[aid].get("times")
+            t_norm_span = None
+            if times is not None and float(times[-1]) > 0:
+                t_norm_span = (float(times[lo] / times[-1]), float(times[hi - 1] / times[-1]))
 
-            omega_rmse = np.sqrt(((omega_hat - omega_true[:, None]) ** 2).mean(axis=0))
-            rho_rmse = np.sqrt(((rho_hat - rho_true[:, None]) ** 2).mean(axis=0))
-            best_omega = int(omega_rmse.argmin())
-            rows.append(
+            rho_hat = con["rho"][0].numpy()  # [H,K] instantaneous
+            omega_hat = con["omega"][0].numpy()
+            rho_eff = con["rho_eff"][0].numpy()  # [H]
+            omega_eff = con["omega_eff"][0].numpy()
+
+            def _rmse(a: np.ndarray, b: np.ndarray) -> float:
+                return float(np.sqrt(((a - b) ** 2).mean()))
+
+            omega_sel_rmse = [_rmse(omega_hat[:, k], omega_true) for k in sel]
+            rho_sel_rmse = [_rmse(rho_hat[:, k], rho_true) for k in sel]
+
+            win_metrics.append(
                 {
                     "asset_id": aid,
                     "window_start": start,
-                    "omega_rmse_best": float(omega_rmse.min()),
-                    "rho_rmse_best": float(rho_rmse.min()),
+                    "t_norm_span": t_norm_span,
+                    "capture_t_idx": int(capture["t_idx"]),
+                    "omega_eff_rmse": _rmse(omega_eff, omega_true),
+                    "rho_eff_rmse": _rmse(rho_eff, rho_true),
+                    "omega_best_rmse": float(min(omega_sel_rmse)),
+                    "rho_best_rmse": float(min(rho_sel_rmse)),
                     "omega_true_mean": float(omega_true.mean()),
                     "rho_true_mean": float(rho_true.mean()),
-                    "best_mode_index": int(traj["mode_indices"][0, best_omega]),
+                    "selected_share": sel_share,
+                    "selection_valid": bool(sel_valid),
+                    "selected_top_n": int(n_used),
+                    "num_modes_above_1pct": int((share > 0.01).sum()),
+                    "selected_modes": [
+                        {
+                            "mode": int(k),
+                            "energy_share": float(share[k]),
+                            "residue_norm2": float(con["residue_norm2"][0, k]),
+                            "envelope_mass": float(con["envelope_mass"][0, k]),
+                            "rho_mean": float(rho_hat[:, k].mean()),
+                            "omega_mean": float(omega_hat[:, k].mean()),
+                        }
+                        for k in sel
+                    ],
                 }
             )
-            if not fig_payload:
-                fig_payload = {
-                    "t_grid": t_grid.numpy(),
-                    "rho_hat": rho_hat,
-                    "omega_hat": omega_hat,
+            fig_windows.append(
+                {
+                    "arm": str(cfg.DENOISER_MODAL_TYPE),
+                    "asset_id": aid,
+                    "window_start": start,
+                    "t_norm_span": t_norm_span,
+                    "t_grid": con["t_rel"][0].numpy(),
+                    "mode_ids": sel,
+                    "mode_shares": share[sel],
+                    "rho_modes": rho_hat[:, sel],
+                    "omega_modes": omega_hat[:, sel],
+                    "rho_eff": rho_eff,
+                    "omega_eff": omega_eff,
                     "rho_true": rho_true,
                     "omega_true": omega_true,
-                    "best_omega_mode": np.int64(best_omega),
-                    "best_rho_mode": np.int64(rho_rmse.argmin()),
+                    "selected_share": sel_share,
+                    "selection_valid": bool(sel_valid),
                 }
-            collected += 1
-            if collected >= int(args.num_recovery_windows):
-                break
-        if collected >= int(args.num_recovery_windows):
-            break
+            )
 
-    if not rows:
-        raise RuntimeError("No valid test windows found for pole recovery.")
-    metrics = {
-        "num_windows": len(rows),
-        "omega_rmse_best_mean": float(np.mean([r["omega_rmse_best"] for r in rows])),
-        "rho_rmse_best_mean": float(np.mean([r["rho_rmse_best"] for r in rows])),
-        "windows": rows,
+    chirp_field = getattr(diff_model.model, "chirp_field", None)
+    metrics: Dict[str, object] = {
+        "arm": str(cfg.DENOISER_MODAL_TYPE),
+        "num_windows": len(win_metrics),
+        "share_threshold": threshold,
+        "capture": "final DDIM step of the evaluated forecast, conditional branch",
+        "laplace_k": int(diff_model.model.k),
+        "chirp_num_basis": None if chirp_field is None else int(chirp_field.num_basis),
+        "selection_valid": bool(all(w["selection_valid"] for w in win_metrics)),
+        "min_selected_share": float(min(w["selected_share"] for w in win_metrics)),
+        "metric_definitions": {
+            "energy": "E_k = mean_t exp(-2 rho_bar_k(t)) * (||c_k||^2 + ||b_k||^2) from the "
+                      "final-step modal capture of the evaluated generation",
+            "omega_eff_rmse": "RMSE vs truth of the E_k-weighted effective omega trajectory "
+                              "over ALL modes (the primary recovered curve)",
+            "rho_eff_rmse": "same as omega_eff_rmse for rho",
+            "omega_best_rmse": "min RMSE vs truth among the selected top-contribution modes",
+            "rho_best_rmse": "same as omega_best_rmse for rho",
+            "selected_share": "sum of E_k shares of the selected modes; below share_threshold "
+                              "the window is selection-invalid (figure watermarked, not evidence)",
+        },
+        "windows": win_metrics,
     }
-    return metrics, fig_payload
+    for name in ("omega_eff_rmse", "rho_eff_rmse", "omega_best_rmse", "rho_best_rmse"):
+        stat = _stats(w[name] for w in win_metrics)
+        metrics[f"{name}_mean"] = stat["mean"]
+        metrics[f"{name}_std"] = stat["std"]
+    return metrics, fig_windows
 
 
-def _plot_recovery(payload: Dict[str, np.ndarray], save_path: Path, *, title: str) -> None:
-    t = payload["t_grid"]
-    fig, (ax_omega, ax_rho) = plt.subplots(1, 2, figsize=(11, 4.2))
-    for k in range(payload["omega_hat"].shape[1]):
-        alpha = 0.95 if k == int(payload["best_omega_mode"]) else 0.25
-        ax_omega.plot(t, payload["omega_hat"][:, k], color="tab:blue", alpha=alpha)
-    ax_omega.plot(t, payload["omega_true"], color="black", linestyle="--", linewidth=2, label="ground truth")
-    ax_omega.set_xlabel("relative time t̃ (steps)")
-    ax_omega.set_ylabel("ω(t̃) [rad/step]")
+def _assert_native_step_grid(t: np.ndarray) -> None:
+    """The axis labels claim [rad/step] / [1/step]; catch unit drift before plotting."""
+    d = np.diff(t)
+    if t.shape[0] >= 2 and (not (d > 0).all() or not (0.05 <= float(np.median(d)) <= 20.0)):
+        raise AssertionError(
+            f"query grid does not look like native steps (median gap {float(np.median(d)):g}); "
+            "[rad/step] axis labels would be wrong"
+        )
+
+
+_MODE_LINESTYLES = ("-", "--", "-.", ":")
+
+
+def _plot_recovery(
+    chirp_windows: List[Dict[str, object]],
+    lti_windows: List[Dict[str, object]],
+    save_path: Path,
+    *,
+    title: str,
+) -> None:
+    """Small-multiples pole-recovery figure: one row per stratified window,
+    omega left, rho right. Every chirp line is legend-decodable (mode id +
+    output-energy share); the SAME top-contribution mode is highlighted in both
+    panels; the lti arm's constant recovered poles overlay as gray dashed; axes
+    stay on the truth/contributing-mode scale with an omega_max=pi reference."""
+    if not chirp_windows:
+        return
+    lti_by_key = {(w["asset_id"], w["window_start"]): w for w in lti_windows}
+    n_rows = len(chirp_windows)
+    fig, axes = plt.subplots(n_rows, 2, figsize=(11.5, 3.5 * n_rows + 0.4), squeeze=False)
+    cmap = plt.get_cmap("tab10")
+
+    for i, w in enumerate(chirp_windows):
+        ax_omega, ax_rho = axes[i]
+        t = np.asarray(w["t_grid"], dtype=np.float64)
+        _assert_native_step_grid(t)
+        lti = lti_by_key.get((w["asset_id"], w["window_start"]))
+
+        for j in range(len(w["mode_ids"])):
+            color = cmap(j % 10)
+            ls = _MODE_LINESTYLES[j % len(_MODE_LINESTYLES)]
+            lw, alpha = (2.4, 1.0) if j == 0 else (1.2, 0.85)
+            label = f"chirp mode {int(w['mode_ids'][j])} ({100.0 * float(w['mode_shares'][j]):.0f}% E)"
+            ax_omega.plot(t, w["omega_modes"][:, j], color=color, ls=ls, lw=lw, alpha=alpha, label=label)
+            ax_rho.plot(t, w["rho_modes"][:, j], color=color, ls=ls, lw=lw, alpha=alpha)
+        ax_omega.plot(t, w["omega_eff"], color="tab:purple", lw=2.6, label="chirp ω_eff (E-weighted)")
+        ax_rho.plot(t, w["rho_eff"], color="tab:purple", lw=2.6)
+        if lti is not None:
+            ax_omega.plot(
+                lti["t_grid"], lti["omega_eff"], color="0.45", ls=(0, (5, 2)), lw=2.0,
+                label="LTI ω_eff (const)",
+            )
+            ax_rho.plot(lti["t_grid"], lti["rho_eff"], color="0.45", ls=(0, (5, 2)), lw=2.0)
+        ax_omega.plot(t, w["omega_true"], color="black", ls="--", lw=2.0, label="ground truth")
+        ax_rho.plot(t, w["rho_true"], color="black", ls="--", lw=2.0)
+
+        # Truth/selected-mode y-limits (junk modes can no longer dictate the axis);
+        # the omega_max reference joins the axis only when the data comes near it.
+        omega_data = [w["omega_modes"].ravel(), w["omega_eff"], np.asarray(w["omega_true"]).ravel()]
+        rho_data = [w["rho_modes"].ravel(), w["rho_eff"], np.asarray(w["rho_true"]).ravel()]
+        if lti is not None:
+            omega_data.append(np.asarray(lti["omega_eff"]).ravel())
+            rho_data.append(np.asarray(lti["rho_eff"]).ravel())
+        omega_all = np.concatenate(omega_data)
+        rho_all = np.concatenate(rho_data)
+        omega_hi = float(omega_all.max())
+        ax_omega.axhline(math.pi, color="0.6", ls=":", lw=0.9)
+        if omega_hi >= 0.6 * math.pi:
+            omega_hi = max(omega_hi, 1.05 * math.pi)
+            ax_omega.text(t[-1], math.pi, " ω_max=π", va="bottom", ha="right", fontsize=7, color="0.4")
+        else:
+            ax_omega.text(
+                0.99, 0.98, "ω_max=π (off-axis)", transform=ax_omega.transAxes,
+                va="top", ha="right", fontsize=7, color="0.4",
+            )
+        pad_o = 0.08 * max(omega_hi - float(omega_all.min()), 1e-6)
+        ax_omega.set_ylim(float(omega_all.min()) - pad_o, omega_hi + pad_o)
+        pad_r = 0.08 * max(float(rho_all.max()) - float(rho_all.min()), 1e-6)
+        ax_rho.set_ylim(float(rho_all.min()) - pad_r, float(rho_all.max()) + pad_r)
+
+        span = w.get("t_norm_span")
+        span_txt = "" if span is None else f" · t_norm {span[0]:.2f}–{span[1]:.2f}"
+        ax_omega.set_title(
+            f"entity {w['asset_id']} · start {w['window_start']}{span_txt} · "
+            f"top-{len(w['mode_ids'])} share {100.0 * float(w['selected_share']):.0f}%",
+            fontsize=8,
+        )
+        ax_omega.set_ylabel("ω(t̃) [rad/step]")
+        ax_rho.set_ylabel("ρ(t̃) [1/step]")
+        if i == n_rows - 1:
+            ax_omega.set_xlabel("relative time t̃ (native steps)")
+            ax_rho.set_xlabel("relative time t̃ (native steps)")
+        ax_omega.legend(loc="best", fontsize=6.5)
+
+    if any(not w["selection_valid"] for w in chirp_windows):
+        fig.text(
+            0.5, 0.5, "SELECTION INVALID", color="red", alpha=0.25, fontsize=46,
+            ha="center", va="center", rotation=30,
+        )
+    fig.suptitle(f"{title}\n(ρ panel shares the ω panel's line encoding; poles captured at the "
+                 f"final denoising step of the evaluated forecast)", fontsize=10)
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(save_path)
+    plt.close(fig)
+
+
+def _plot_cross_window(
+    chirp_windows: List[Dict[str, object]],
+    lti_windows: List[Dict[str, object]],
+    data_dir: str,
+    save_path: Path,
+    *,
+    title: str,
+    window: int,
+) -> None:
+    """Stitched recovery (fix-plan P5's cross-window view): each window's effective
+    trajectory placed at its absolute series position, over the generator's full
+    truth curve — the history-conditioned poles should step along the slow sweep."""
+    if not chirp_windows:
+        return
+    truth = load_ground_truth_poles(data_dir)
+    aid = int(chirp_windows[0]["asset_id"])  # shared_poles: one truth per cache
+    lti_by_key = {(w["asset_id"], w["window_start"]): w for w in lti_windows}
+
+    fig, (ax_omega, ax_rho) = plt.subplots(2, 1, figsize=(10.5, 6.4), sharex=True)
+    spans = []
+    for i, w in enumerate(chirp_windows):
+        horizon = len(np.asarray(w["omega_eff"]))
+        x = int(w["window_start"]) + int(window) + np.arange(horizon)
+        spans.append((x[0], x[-1]))
+        label_c = "chirp ω_eff per window" if i == 0 else None
+        label_l = "LTI ω_eff per window" if i == 0 else None
+        ax_omega.plot(x, w["omega_eff"], color="tab:purple", lw=2.0, label=label_c)
+        ax_rho.plot(x, w["rho_eff"], color="tab:purple", lw=2.0)
+        lti = lti_by_key.get((w["asset_id"], w["window_start"]))
+        if lti is not None:
+            ax_omega.plot(x, lti["omega_eff"], color="0.45", ls=(0, (5, 2)), lw=1.8, label=label_l)
+            ax_rho.plot(x, lti["rho_eff"], color="0.45", ls=(0, (5, 2)), lw=1.8)
+    lo = max(0, min(s[0] for s in spans) - int(window))
+    hi = min(len(truth[aid]["omega"]), max(s[1] for s in spans) + 2)
+    x_truth = np.arange(lo, hi)
+    ax_omega.plot(x_truth, truth[aid]["omega"][lo:hi], color="black", ls="--", lw=1.6, label="ground truth")
+    ax_rho.plot(x_truth, truth[aid]["rho"][lo:hi], color="black", ls="--", lw=1.6)
+    ax_omega.set_ylabel("ω [rad/step]")
+    ax_rho.set_ylabel("ρ [1/step]")
+    ax_rho.set_xlabel("absolute series position (samples)")
     ax_omega.legend(loc="best", fontsize=8)
-    for k in range(payload["rho_hat"].shape[1]):
-        alpha = 0.95 if k == int(payload["best_rho_mode"]) else 0.25
-        ax_rho.plot(t, payload["rho_hat"][:, k], color="tab:red", alpha=alpha)
-    ax_rho.plot(t, payload["rho_true"], color="black", linestyle="--", linewidth=2, label="ground truth")
-    ax_rho.set_xlabel("relative time t̃ (steps)")
-    ax_rho.set_ylabel("ρ(t̃) [1/step]")
-    ax_rho.legend(loc="best", fontsize=8)
-    fig.suptitle(title)
+    fig.suptitle(title, fontsize=10)
     fig.tight_layout()
     save_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(save_path)
@@ -430,7 +718,7 @@ def _summary_rows(rows: Sequence[Mapping[str, object]]) -> List[Dict[str, object
         entry: Dict[str, object] = {
             "task": task, "arm": arm, "gap_regime": gap_regime, "runs": len(group),
         }
-        for metric in ("crps", "mae", "mse", "omega_rmse_best_mean", "rho_rmse_best_mean"):
+        for metric in ("crps", "mae", "mse", "omega_eff_rmse_mean", "rho_eff_rmse_mean"):
             stat = _stats(r.get(metric) for r in group)
             entry[f"{metric}_mean"] = stat["mean"]
             entry[f"{metric}_std"] = stat["std"]
@@ -447,6 +735,7 @@ def main() -> None:
     for task in args.tasks:
         _prepare_cache(task, args)
         for seed in args.seeds:
+            recoveries: Dict[str, Tuple[Dict[str, object], List[Dict[str, object]]]] = {}
             for arm in args.arms:
                 cfg = _configure(task, str(arm), int(seed), args)
                 device = set_torch(seed=int(seed), deterministic=False)
@@ -466,21 +755,44 @@ def main() -> None:
                     "mse": _metric(forecast, "mse"),
                 }
 
-                if arm == "chirp":
-                    recovery, fig_payload = _recover_pole_trajectories(
-                        cfg, checkpoint, loaders, args, device=device
-                    )
-                    row["omega_rmse_best_mean"] = recovery["omega_rmse_best_mean"]
-                    row["rho_rmse_best_mean"] = recovery["rho_rmse_best_mean"]
-                    recovery_path = result_root / "recovery" / f"{task}_seed-{seed}.json"
-                    recovery_path.parent.mkdir(parents=True, exist_ok=True)
-                    recovery_path.write_text(json.dumps(make_jsonable(recovery), indent=2, sort_keys=True))
-                    _plot_recovery(
-                        fig_payload,
-                        result_root / "figures" / f"{task}_seed-{seed}_pole_recovery.pdf",
-                        title=f"Recovered vs ground-truth poles ({task}, seed={seed})",
-                    )
+                # Recovery runs for BOTH arms: the lti arm's constant recovered
+                # poles are the structural-failure contrast (fix-plan P2).
+                recovery, fig_windows = _recover_pole_trajectories(
+                    cfg, checkpoint, loaders, args, device=device
+                )
+                row["omega_eff_rmse_mean"] = recovery["omega_eff_rmse_mean"]
+                row["rho_eff_rmse_mean"] = recovery["rho_eff_rmse_mean"]
+                row["omega_best_rmse_mean"] = recovery["omega_best_rmse_mean"]
+                row["rho_best_rmse_mean"] = recovery["rho_best_rmse_mean"]
+                row["recovery_selection_valid"] = recovery["selection_valid"]
+                recoveries[str(arm)] = (recovery, fig_windows)
                 rows.append(row)
+
+            if recoveries:
+                recovery_path = result_root / "recovery" / f"{task}_seed-{seed}.json"
+                recovery_path.parent.mkdir(parents=True, exist_ok=True)
+                recovery_path.write_text(
+                    json.dumps(
+                        make_jsonable({arm: rec for arm, (rec, _) in recoveries.items()}),
+                        indent=2,
+                        sort_keys=True,
+                    )
+                )
+            if "chirp" in recoveries:
+                _plot_recovery(
+                    recoveries["chirp"][1],
+                    recoveries.get("lti", (None, []))[1],
+                    result_root / "figures" / f"{task}_seed-{seed}_pole_recovery.pdf",
+                    title=f"Recovered vs ground-truth poles ({task}, seed={seed})",
+                )
+                _plot_cross_window(
+                    recoveries["chirp"][1],
+                    recoveries.get("lti", (None, []))[1],
+                    str(_cache_dir(task, args)),
+                    result_root / "figures" / f"{task}_seed-{seed}_pole_recovery_series.pdf",
+                    title=f"Cross-window recovered poles along the series ({task}, seed={seed})",
+                    window=int(args.window),
+                )
 
     _write_rows(rows, result_root / "chirp_benchmark_raw.csv", result_root / "chirp_benchmark_raw.json")
     _write_rows(

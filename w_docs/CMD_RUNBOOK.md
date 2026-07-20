@@ -241,17 +241,55 @@ llapdiff-synthetic-chirp \
   --tasks synthetic_linear_chirp synthetic_quadratic_chirp \
           synthetic_ramp_damping_up synthetic_ramp_damping_down synthetic_growth_decay \
   --arms lti chirp --seeds 0 1 2 \
+  --sweep-period 144 \
   --output-root ldt/results/chirp_benchmark
 ```
 
 Per (task, arm, seed) it generates a shared-pole cache (`shared_poles=True`, one
 ground-truth pole function per joint row), trains both arms on **shared** frozen
 VAE/summarizer, writes forecast CRPS/MAE/MSE (`chirp_benchmark_raw/summary.csv`),
-and for the chirp arm scores + plots recovered-vs-truth pole trajectories
-(`recovery/*.json`, `figures/*_pole_recovery.pdf`). Add `synthetic_freq_shift`
+and — for **both arms** — scores + plots recovered-vs-truth pole trajectories
+(`recovery/*.json`, `figures/*_pole_recovery.pdf` + the cross-window
+`*_pole_recovery_series.pdf`). Add `synthetic_freq_shift`
 to `--tasks` for the piecewise regime-switch case; `--smoke` for a 1-epoch check.
 Geometry note: the purged split needs `val_ratio·(L−K−H+1) > H` — the default
 `--series-length 768` satisfies it (288 does NOT; the tool validates and explains).
+
+> 🔴 **Pole-recovery rewrite (2026-07-20; see `h2_pole_recovery_problems_fixes.md`).**
+> The original recovery figure ranked modes by **coefficient variation energy** and
+> plotted junk: with K=256 modes and a ~1-D target, zero-residue modes get no
+> gradient, their pole coefficients drift, and the criterion selects exactly those
+> (the diagnosed figures showed ρ≈87–118/step, ω pinned at 0.9π — modes whose
+> output-energy share is exactly 0.0). The tool now captures residues + poles from
+> the **final denoising step of the evaluated generation** (`modal_capture`), ranks
+> by output contribution `E_k = mean_t e^{−2ρ̄ₖ}‖θₖ‖²`, reports the E-weighted
+> **effective trajectory over all modes** as the primary curve
+> (`omega_eff_rmse`/`rho_eff_rmse` in CSV + JSON, both arms), stratifies recovery
+> windows across the test span, and enforces a **selection-validity gate**
+> (`--recovery-share-threshold`, default 0.5): below it the figure is watermarked
+> "SELECTION INVALID" and must not be used as evidence (prereg third category —
+> tool fix + rerun, not a scientific conclusion). Old `omega_rmse_best_*` metrics
+> and pre-2026-07-20 recovery figures/JSONs are meaningless — regenerate.
+> Diagnostic on the trained linear-chirp seed-0 checkpoint: top-4 contribution
+> modes carry 98–99.5% of output energy at sane poles (ω_eff RMSE ≈ 0.05–0.09
+> rad/step vs truth) — the model was fine, the figure lied. Genuine model
+> findings now visible: ρ_eff overestimated (~0.1–0.2 vs truth 0.003) and ω_eff
+> under-tracks late windows. NOTE: those checkpoints were trained with the leaked
+> base-config `CHIRP_NUM_BASIS=256` (a knob-class-2 edit; 256 basis functions
+> across a 48-step window is ~10× past Nyquist) — recovery JSON now records
+> `chirp_num_basis`; consider 8–16 at H=48 for the paper runs.
+
+**Within-window sweep (`--sweep-period`, fix-plan P5).** The legacy profiles ramp
+over the whole series, so one 48-step horizon sees only ~6% of the sweep —
+within a window both arms face near-constant poles and "LTI fails structurally"
+**cannot materialize** (confirmed: on legacy caches the LTI arm's constant ω_eff
+matches truth as well as chirp's). `--sweep-period 144` (≈ window+horizon) turns
+the ramp variable into a triangle wave of that period in absolute time, putting
+the full pole excursion inside **every** window, including the tail test windows
+the purged split uses. Applies to the four smooth-ramp tasks; piecewise
+change-point tasks ignore it. The period is tagged in the cache dir
+(`..._sweep-144`); omit the flag for the legacy slow ramp (bit-identical caches),
+which remains the right regime for the cross-window stitched figure.
 
 **Irregular sampling (the plan's H2 premise, added 2026-07-05).** Signals are
 sampled at **Gamma renewal gaps by default**: `--gap-distribution gamma`

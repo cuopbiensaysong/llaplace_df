@@ -102,6 +102,16 @@ routing infrastructure.
    with predictive intervals (Fig 3), reliability *diagrams* (Fig 4 — numbers exist, plots
    don't), or the stability-envelope figure (Fig 5 — the test exists, the plot doesn't).
 
+**Addendum 2026-07-20 — H2(ii) recovery figure (Fig 2) rebuilt** after the first generated
+figures failed review (`h2_pole_recovery_problems_fixes.md`, P1–P10 all implemented; status
+block at its top). Selection is now output-contribution-ranked from a `modal_capture` of the
+final denoising step (old `omega_rmse_best_*` metrics are meaningless), ω_eff/ρ_eff over all
+modes is the primary recovered curve, both arms are scored (LTI overlay), windows are
+stratified, a `--recovery-share-threshold` validity gate watermarks invalid selections, and
+`--sweep-period` provides the within-window excursion the "LTI fails structurally" deliverable
+requires (prereg clause amended in `cmd_plan_v2.md` §H2 before the freeze). Paper-grade H2
+needs retraining on reswept caches with a horizon-sized `CHIRP_NUM_BASIS`.
+
 **Plan-internal tension to decide (not a bug):** the method doc assumes x0-parameterization
 throughout (§4.1, §4.6) while the G3 factorial defaults to v-prediction for LLapDiff parity;
 the plan itself lists predict-type as a Tier-1 knob. The paper's CMD arm should eventually be

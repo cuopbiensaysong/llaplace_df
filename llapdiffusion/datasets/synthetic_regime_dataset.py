@@ -86,6 +86,14 @@ class SyntheticRegimeCacheConfig:
     gap_distribution: str = "regular"
     gap_mean: float = 1.0
     gap_shape: float = 4.0
+    # Period (native steps) of a triangle re-sweep for the smooth-ramp tasks
+    # (linear/quadratic chirp, damping ramps). None (default) keeps the historical
+    # series-long monotone ramp — bit-identical caches. When set, the ramp variable
+    # sweeps 0 -> 1 -> 0 every sweep_period, so EVERY window (including the purged
+    # test windows at the series tail) sees the full pole excursion — the
+    # within-window identifiability regime where an LTI model is structurally
+    # wrong. Recommended: ~(window + horizon). Piecewise change-point tasks reject it.
+    sweep_period: Optional[float] = None
 
 
 def _validate_task(task: str) -> str:
@@ -118,12 +126,21 @@ def _sample_gaps(cfg: SyntheticRegimeCacheConfig, rng: np.random.Generator) -> n
     return np.maximum(gaps, 1e-3 * mean)  # keep timestamps strictly increasing
 
 
+_SMOOTH_RAMP_TASKS = (
+    "synthetic_linear_chirp",
+    "synthetic_quadratic_chirp",
+    "synthetic_ramp_damping_up",
+    "synthetic_ramp_damping_down",
+)
+
+
 def _pole_profiles(
     cfg: SyntheticRegimeCacheConfig,
     *,
     base_frequency: float,
     base_decay: float,
     t_norm: np.ndarray,
+    times_h: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Per-sample ground-truth pole profiles (frequency [cycles/step], decay [1/step]).
 
@@ -132,10 +149,17 @@ def _pole_profiles(
     the task only decides how the instantaneous poles vary over the series.
     Smooth ramps are functions of ``t_norm`` (elapsed TIME normalized to [0, 1] —
     identical to the index ramp under regular sampling); the piecewise shift tasks
-    keep their sample-index change point.
+    keep their sample-index change point. With ``cfg.sweep_period`` set, the ramp
+    variable becomes a triangle wave of that period in absolute time (``times_h``),
+    so the excursion recurs within every window instead of once per series.
     """
     T = int(cfg.series_length)
     ramp = np.asarray(t_norm, dtype=np.float64)  # u = t / t_end
+    if cfg.sweep_period is not None:
+        if times_h is None:
+            raise ValueError("sweep_period requires the absolute sample times times_h.")
+        u = np.asarray(times_h, dtype=np.float64) / float(cfg.sweep_period)
+        ramp = 1.0 - np.abs(2.0 * (u - np.floor(u)) - 1.0)  # triangle 0 -> 1 -> 0
     frequency = np.full((T,), float(base_frequency), dtype=np.float64)
     decay = np.full((T,), float(base_decay), dtype=np.float64)
 
@@ -188,7 +212,8 @@ def _generate_signal(
     times_h = np.cumsum(gaps) - gaps[0]  # t_0 = 0
     t_norm = times_h / max(float(times_h[-1]), 1e-12)
     frequency, decay = _pole_profiles(
-        cfg, base_frequency=base_frequency, base_decay=base_decay, t_norm=t_norm
+        cfg, base_frequency=base_frequency, base_decay=base_decay, t_norm=t_norm,
+        times_h=times_h,
     )
 
     phase_path = phase0 + np.cumsum(2.0 * np.pi * frequency.astype(np.float64) * gaps)
@@ -212,6 +237,14 @@ def prepare_synthetic_regime_cache(cfg: SyntheticRegimeCacheConfig) -> Mapping[s
         )
     if not (0 < cfg.change_point < cfg.series_length):
         raise ValueError("change_point must lie strictly inside the generated series.")
+    if cfg.sweep_period is not None:
+        if cfg.task not in _SMOOTH_RAMP_TASKS:
+            raise ValueError(
+                f"sweep_period only applies to the smooth-ramp tasks {_SMOOTH_RAMP_TASKS}; "
+                f"task '{cfg.task}' keeps its sample-index change point."
+            )
+        if float(cfg.sweep_period) <= 0:
+            raise ValueError("sweep_period must be positive (native steps).")
 
     data_dir = Path(cfg.data_dir).expanduser().resolve()
     paths = CachePaths.from_dir(data_dir)
@@ -335,6 +368,7 @@ def prepare_synthetic_regime_cache(cfg: SyntheticRegimeCacheConfig) -> Mapping[s
             "gap_distribution": str(cfg.gap_distribution),
             "gap_mean": float(cfg.gap_mean),
             "gap_shape": float(cfg.gap_shape),
+            "sweep_period": None if cfg.sweep_period is None else float(cfg.sweep_period),
             # Realized moments of the drawn grid (the Theorem-D quantities).
             "gap_mean_realized": float(gaps.mean()),
             "gap_var_realized": float(gaps.var()),

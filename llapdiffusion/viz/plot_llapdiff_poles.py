@@ -450,6 +450,65 @@ def extract_chirp_pole_trajectories(
     }
 
 
+def modal_contributions(capture: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    """Per-mode output-contribution diagnostics from a ``modal_capture`` dict.
+
+    ``capture`` is the dict filled by ``LLapDiff.generate(..., modal_capture=...)`` —
+    the residues and poles of the conditional forward at the final denoising step.
+    Each mode's contribution to the synthesized modal sum is
+
+        E_k = mean_t e^{-2 rho_bar_k(t)} * (||c_k||^2 + ||b_k||^2)
+
+    (per-mode squared envelope × residue energy, the Theorem-B decomposition).
+    Both cores are supported: the lti capture expands its constant poles over the
+    query grid. On head-on models this covers the modal sum only, not the
+    LayerNorm residual.
+
+    Returns CPU tensors: ``energy``/``energy_share``/``residue_norm2``/
+    ``envelope_mass`` [B,K]; instantaneous ``rho``/``omega`` [B,T,K]; the
+    energy-weighted effective trajectories ``rho_eff``/``omega_eff`` [B,T]
+    (weighted over ALL modes — the identifiable recovered pole function when many
+    modes share one signal); ``t_rel`` [B,T].
+    """
+    theta = capture["theta"].detach().float().cpu()  # [B,2K,D]
+    k = theta.shape[1] // 2
+    residue_norm2 = theta[:, :k, :].pow(2).sum(-1) + theta[:, k:, :].pow(2).sum(-1)  # [B,K]
+    t_rel = capture["t_rel"].detach().float().cpu()
+    if t_rel.dim() == 3:
+        t_rel = t_rel.squeeze(-1)  # [B,T]
+
+    if capture.get("modal_type") == "chirp":
+        rho_bar = capture["rho_bar"].detach().float().cpu()  # [B,T,K]
+        rho = capture["rho_inst"].detach().float().cpu()
+        omega = capture["omega_inst"].detach().float().cpu()
+    else:
+        rho_c = capture["rho_const"].detach().float().cpu()  # [B,K]
+        omega_c = capture["omega_const"].detach().float().cpu()
+        if rho_c.dim() == 1:  # unconditioned poles come back unbatched
+            rho_c = rho_c.unsqueeze(0).expand(theta.shape[0], -1)
+            omega_c = omega_c.unsqueeze(0).expand(theta.shape[0], -1)
+        rho_bar = rho_c.unsqueeze(1) * t_rel.unsqueeze(-1)  # [B,T,K]
+        rho = rho_c.unsqueeze(1).expand(-1, t_rel.shape[1], -1)
+        omega = omega_c.unsqueeze(1).expand(-1, t_rel.shape[1], -1)
+
+    envelope_mass = torch.exp(-2.0 * rho_bar).mean(dim=1)  # [B,K]
+    energy = residue_norm2 * envelope_mass  # [B,K]
+    share = energy / energy.sum(dim=-1, keepdim=True).clamp_min(1e-30)
+    w = energy.unsqueeze(1)  # [B,1,K]
+    denom = w.sum(dim=-1).clamp_min(1e-30)  # [B,1]
+    return {
+        "energy": energy,
+        "energy_share": share,
+        "residue_norm2": residue_norm2,
+        "envelope_mass": envelope_mass,
+        "rho": rho,
+        "omega": omega,
+        "rho_eff": (rho * w).sum(dim=-1) / denom,
+        "omega_eff": (omega * w).sum(dim=-1) / denom,
+        "t_rel": t_rel,
+    }
+
+
 def _plot_pole_trajectories(traj: Dict[str, torch.Tensor], save_path: Path, *, title: str) -> None:
     """Two-panel rho(t)/omega(t) figure: solid = top mode, faint = next modes."""
     t = traj["t_grid"].numpy()

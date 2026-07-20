@@ -487,6 +487,24 @@ path, and the residues `theta [B,2K,D]` (the constant cₖ/bₖ) are reused unch
   rebuild as LTI** (and pre-flag checkpoints with the modal-type-dependent head)
   and eval/plotting need no extra flag — everything is read from metadata.
   Independent of `PREDICT_TYPE`.
+- **Modal-internals capture (`modal_capture`, 2026-07-20)** — `LapFormer.forward`,
+  `LLapDiff.forward`, and `generate()` accept an optional mutable dict (the
+  `clip_stats` pattern). `generate(..., modal_capture={})` fills it at the
+  **final DDIM step's conditional pass** with the residues `theta` and pole
+  trajectories that synthesized the returned forecast (`rho_bar/omega_bar/
+  rho_inst/omega_inst` for chirp; `rho_const/omega_const` for lti; plus `t_rel`
+  and the step's `t_idx`). `viz/plot_llapdiff_poles.py::modal_contributions`
+  turns a capture into per-mode output energies
+  `E_k = mean_t e^{−2ρ̄ₖ}(‖cₖ‖²+‖bₖ‖²)`, shares, residue norms, envelope masses,
+  and the E-weighted effective trajectories `rho_eff/omega_eff` — the basis of
+  the H2 pole-recovery figure. ⚠️ Never rank recovery modes by coefficient
+  variation energy: zero-residue modes get no output gradient, their pole
+  coefficients drift (via the shared trunk), and that criterion selects exactly
+  those junk modes (`h2_pole_recovery_problems_fixes.md` P3 — the original
+  figure plotted ρ≈100/step modes whose output share was exactly 0.0).
+  `extract_chirp_pole_trajectories` (the static τ-probe) survives only as a
+  cheap debug view; on head-on models the capture covers the modal sum, not the
+  LayerNorm residual.
 - **Tests** — `tests/test_chirp_modal.py`: LTI-equivalence at init, integral
   correctness (ρ̄(0)=0, d/dt ρ̄ = instantaneous ρ, with a fixed `time_scale` so
   the finite-difference is pointwise), non-degeneracy at a native horizon (the
@@ -497,7 +515,9 @@ path, and the residues `theta [B,2K,D]` (the constant cₖ/bₖ) are reused unch
   `test_no_head_path_clamps_skip_scale`), the 2×2 build matrix
   (`test_output_head_matrix_builds_all_four_cells`), seed determinism,
   time-scale resolution, routing composition, end-to-end `LapFormer` shapes,
-  and checkpoint back-compat.
+  and checkpoint back-compat. `tests/test_pole_recovery.py`: capture plumbing
+  (both cores, final-step semantics, no-op when absent) and
+  `modal_contributions` (analytic E_k, lti expansion, junk-mode ranking guard).
 
 > **Output routing.** A chirp run is nested under a `modal-chirp/` segment by
 > `_apply_modal_type_output_routing` (`pipeline.py`), composing with any
@@ -555,7 +575,7 @@ checkpoint metadata. If the checkpoint records it, you don't pass `--predict-typ
 | Add/modify the chirp time-varying-pole core (§7.5)                            | `models/laptrans.py` (`ChirpModalField`, `chirp_basis_matrix`), `models/lapformer.py` (chirp branch); toggle/tunables in `configs/config.py` (`DENOISER_MODAL_TYPE`, `CHIRP_*`) + `pipeline.py` (`--modal-type`) |
 | Add a synthetic ground-truth pole task / change the chirp benchmark            | `datasets/synthetic_regime_dataset.py` (`_pole_profiles`, `CHIRP_TASKS`, `load_ground_truth_poles`); runner in `tools/run_synthetic_chirp_benchmark.py` (`llapdiff-synthetic-chirp`) |
 | Change the benchmark's renewal-gap sampling (Var(Δ) regimes)                    | `datasets/synthetic_regime_dataset.py` (`_sample_gaps`; gap-aware discretization in `_generate_signal` — regular ≡ unit gaps, bit-compatible and RNG-neutral; grid shared per cache for the joint-panel collate); tool flags `--gap-distribution/--gap-mean/--gap-shape` |
-| Plot chirp pole trajectories / recovery figures                                | `viz/plot_llapdiff_poles.py` (`extract_chirp_pole_trajectories`, `_plot_pole_trajectories`); Prop.-A.1 figure in `tools/plot_companion_vs_normal_form.py` |
+| Plot chirp pole trajectories / recovery figures                                | recovery: `tools/run_synthetic_chirp_benchmark.py` (`_recover_pole_trajectories`, `_plot_recovery`, `_plot_cross_window`) on top of `viz/plot_llapdiff_poles.py::modal_contributions` + the `modal_capture` hook; debug τ-probe: `extract_chirp_pole_trajectories`; Prop.-A.1 figure in `tools/plot_companion_vs_normal_form.py` |
 | Change the analytic UQ head / variance quadrature / NLL loss (§7.5)            | `models/laptrans.py` (`uq_params`, `modal_variance`), `models/lapformer.py` (`return_variance`), `models/llapdiff_utils.py` (`diffusion_loss` loss_mode); metrics `models/uq_metrics.py`; eval `tools/run_analytic_uq_eval.py`; sweep `tools/run_u1_sweep.py` |
 | Change the VAE architecture / KL schedule / recon loss                        | `latent_space/latent_vae.py`, `trainers/train_val_latent.py`                                                |
 | Change the summarizer architecture / its loss weights                         | `models/summarizer.py`, `trainers/train_val_summarizer.py`                                                  |

@@ -129,6 +129,7 @@ class LLapDiff(nn.Module):
         sc_feat: Optional[torch.Tensor] = None,
         dt: Optional[torch.Tensor] = None,
         return_variance: bool = False,
+        modal_capture: Optional[Dict[str, torch.Tensor]] = None,
     ) -> torch.Tensor:
         t_emb = self._time_embed(t).to(x_t.dtype)
         out_tokens = self.model(
@@ -139,6 +140,7 @@ class LLapDiff(nn.Module):
             sc_feat=sc_feat,
             dt=dt,
             return_variance=return_variance,
+            modal_capture=modal_capture,
         )
         return out_tokens
 
@@ -166,6 +168,7 @@ class LLapDiff(nn.Module):
         dynamic_thresh_p: float = 0.0,
         dynamic_thresh_max: float = 1.0,
         clip_stats: Optional[Dict[str, float]] = None,
+        modal_capture: Optional[Dict[str, torch.Tensor]] = None,
     ) -> torch.Tensor:
         """
         Sample trajectories with DDIM and optional CFG.
@@ -184,6 +187,11 @@ class LLapDiff(nn.Module):
             rho: Karras sigma schedule exponent.
             generator: Optional RNG for reproducible initial/DDIM noise.
             dynamic_thresh_p / dynamic_thresh_max: Parameters for dynamic thresholding of ``x0``.
+            modal_capture: Optional dict filled in-place with the modal internals
+                (residues theta and pole trajectories) of the CONDITIONAL forward at
+                the final denoising step — the poles/residues that synthesized the
+                returned forecast. Also records ``t_idx``, the diffusion timestep of
+                that step.
 
         Returns:
             The final ``x0`` prediction corresponding to the denoised samples.
@@ -335,6 +343,9 @@ class LLapDiff(nn.Module):
             # Avoid an unnecessary unconditional pass when CFG is inactive.
             cond_present = (cond_summary is not None) or (cond_summary_raw is not None)
             cfg_active = cond_present and torch.any(torch.abs(g_scalar - 1.0) > 1e-12).item()
+            is_final_step = int(t_prev_i) < 0
+            if modal_capture is not None and is_final_step:
+                modal_capture["t_idx"] = int(t_i)
             pred_c = self.forward(
                 x_t,
                 t_b,
@@ -342,6 +353,7 @@ class LLapDiff(nn.Module):
                 cond_summary_raw=cond_summary_raw,
                 sc_feat=sc_feat_next if self_cond else None,
                 dt=dt,
+                modal_capture=modal_capture if is_final_step else None,
             )
             if cfg_active:
                 pred_u = self.forward(

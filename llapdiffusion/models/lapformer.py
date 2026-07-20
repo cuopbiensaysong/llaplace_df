@@ -1,5 +1,5 @@
 import math
-from typing import Optional
+from typing import Dict, Optional
 
 import torch
 import torch.nn as nn
@@ -551,6 +551,7 @@ class LapFormer(nn.Module):
         dt: Optional[torch.Tensor] = None,
         t: Optional[torch.Tensor] = None,
         return_variance: bool = False,
+        modal_capture: Optional[Dict[str, torch.Tensor]] = None,
     ) -> torch.Tensor:
         if return_variance and not self.chirp_uq_head:
             raise RuntimeError(
@@ -647,8 +648,28 @@ class LapFormer(nn.Module):
                 s_modal = self.chirp_field.modal_variance(rho_bar, t_rel, q, p0)  # [B,T,K]
                 energy = theta[:, : self.k, :].pow(2) + theta[:, self.k :, :].pow(2)  # [B,K,D]
                 variance = torch.einsum("btk,bkd->btd", s_modal, energy)
+            if modal_capture is not None:
+                rho_inst, omega_inst = self.chirp_field.instantaneous(cond_vec, t_rel)
+                modal_capture.update(
+                    modal_type="chirp",
+                    theta=theta.detach(),
+                    t_rel=t_rel.detach(),
+                    rho_bar=rho_bar.detach(),
+                    omega_bar=omega_bar.detach(),
+                    rho_inst=rho_inst.detach(),
+                    omega_inst=omega_inst.detach(),
+                )
         else:
             y_time = self.synthesis(theta, rho=rho, omega=omega, dt=dt, t=t, target_T=T)
+            if modal_capture is not None:
+                t_rel = self.analysis.relative_time(B, T, x_tokens.dtype, x_tokens.device, dt=dt, t=t)
+                modal_capture.update(
+                    modal_type="lti",
+                    theta=theta.detach(),
+                    t_rel=t_rel.detach(),
+                    rho_const=rho.detach(),
+                    omega_const=omega.detach(),
+                )
         if not self._use_output_head:
             # Certified path: scaled modal sum only, no uncertified residual. The clamp
             # keeps the Theorem-B bound constant at |s| <= 1.

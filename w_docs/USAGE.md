@@ -710,17 +710,21 @@ requires — train them once, then every arm reuses the same frozen upstream.
 `llapdiff-synthetic-chirp` trains lti-vs-chirp arms on synthetic signals whose
 instantaneous pole functions are **known by construction** (linear/quadratic
 frequency chirps, damping ramps, growth-then-decay, plus the piecewise
-`synthetic_freq_shift` as a regime switch) and, for the chirp arm, overlays the
+`synthetic_freq_shift` as a regime switch) and, for **both arms**, overlays the
 recovered ρₖ(t̃), ωₖ(t̃) trajectories against the generator's ground truth:
 
 ```bash
 llapdiff-synthetic-chirp --arms lti chirp --seeds 0 1 2 \
+  --sweep-period 144 \
   --output-root ldt/results/chirp_benchmark
 ```
 
 Outputs: `chirp_benchmark_raw/summary.{csv,json}` (forecast CRPS/MAE/MSE per
-task × arm × seed × gap regime, plus best-mode pole-recovery RMSE for chirp),
-`recovery/*.json`, and `figures/*_pole_recovery.pdf`. Both arms share the same
+task × arm × seed × gap regime, plus pole-recovery RMSE for **both** arms),
+`recovery/*.json`, `figures/*_pole_recovery.pdf` (small multiples over
+stratified test windows, chirp modes + LTI overlay + truth), and
+`figures/*_pole_recovery_series.pdf` (per-window effective trajectories
+stitched along absolute series time). Both arms share the same
 frozen VAE/summarizer per (task, seed). Ground truth is persisted in the cache
 (`pole_truth/*.npz` with `rho`, `omega`, and the sample `times`;
 `load_ground_truth_poles`). Keep the default `--series-length 768` or larger —
@@ -728,6 +732,34 @@ the purged split needs the val band to exceed one horizon (the tool validates
 this). `--smoke` gives a 1-epoch end-to-end check. For real-data chirp
 checkpoints, `llapdiff-plot-poles` now also saves a `*_pole_trajectories.pdf`
 (instantaneous ρ/ω curves over the horizon) next to the usual pole scatter.
+
+**Pole recovery (rewritten 2026-07-20).** Recovered poles come from a
+`modal_capture` hook on the **final denoising step of the evaluated
+generation** — the poles/residues that actually synthesized the forecast, not a
+static probe. Modes are ranked by output contribution
+`E_k = mean_t e^{−2ρ̄ₖ(t̃)}·(‖cₖ‖² + ‖bₖ‖²)` (never by coefficient variation,
+which selects zero-residue junk modes), and the primary recovered curve is the
+E-weighted **effective trajectory over all modes** (`omega_eff_rmse` /
+`rho_eff_rmse`; per-mode diagnostics — E-share, residue norm, envelope mass —
+land in `recovery/*.json` together with `chirp_num_basis` and the metric
+definitions). Selection validity is gated by `--recovery-share-threshold`
+(default 0.5): the top-N selection escalates (×2 up to 16) until the selected
+modes explain that share of the output; failing windows watermark the figure
+"SELECTION INVALID" — such a figure is a tool/report problem, not evidence
+about the model (see the prereg amendment in `cmd_plan_v2.md` §H2).
+`--num-recovery-windows` (default 4) windows are stratified across the test
+span; each row is annotated with entity, window start, and t_norm span.
+
+**Within-window sweep (`--sweep-period`).** The legacy task profiles ramp over
+the whole series, so a single window sees only ~6% of the pole excursion — too
+little for the "LTI fails structurally" contrast. `--sweep-period P` turns the
+ramp variable of the four smooth-ramp tasks into a triangle wave of period `P`
+native steps (recommended `P ≈ window + horizon`, e.g. 144 for 96/48), so every
+window — including the tail test windows — sees the full excursion. The period
+is tagged in the cache directory (`..._sweep-144`); piecewise change-point
+tasks ignore the flag; omitting it keeps the legacy series-long ramp
+(bit-identical caches), which is the regime for the cross-window stitched
+figure.
 
 **Sampling grid.** By default the benchmark signals are **irregularly sampled
 with Gamma renewal gaps** (`--gap-distribution gamma`, `--gap-mean 1.0`,

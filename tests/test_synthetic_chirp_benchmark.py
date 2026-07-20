@@ -269,3 +269,199 @@ def test_benchmark_configure_sets_arm_fields(tmp_path):
     ]
     summary = _summary_rows(rows)
     assert summary[0]["runs"] == 2 and summary[0]["crps_mean"] == 2.0
+
+
+def test_select_top_modes_escalates_until_share_threshold():
+    """P3/P9: selection is by output-energy share, escalating top-N (x2, cap 16)
+    until the selected modes explain the threshold share of the output."""
+    from llapdiffusion.tools.run_synthetic_chirp_benchmark import _select_top_modes
+
+    # One dominant mode: base N suffices and stays minimal.
+    share = np.array([0.9, 0.05, 0.03, 0.02] + [0.0] * 12)
+    sel, s, valid, n = _select_top_modes(share, top_n=2, threshold=0.5)
+    assert list(sel) == [0, 1] and valid and n == 2 and s == pytest.approx(0.95)
+
+    # Spread energy: 2 -> 4 -> 8 modes needed to pass 50%.
+    share = np.full(16, 1.0 / 16.0)
+    sel, s, valid, n = _select_top_modes(share, top_n=2, threshold=0.5)
+    assert n == 8 and valid and s == pytest.approx(0.5)
+
+    # Unreachable threshold: caps at 16 and flags invalid.
+    share = np.full(64, 1.0 / 64.0)
+    sel, s, valid, n = _select_top_modes(share, top_n=4, threshold=0.5)
+    assert n == 16 and not valid and s == pytest.approx(0.25)
+
+
+def test_select_top_modes_ranks_by_contribution_not_variation():
+    """The junk-drawer regression: a zero-share mode must never be selected ahead
+    of the modes that actually synthesize the forecast."""
+    from llapdiffusion.tools.run_synthetic_chirp_benchmark import _select_top_modes
+
+    share = np.array([0.0, 0.6, 0.0, 0.4])
+    sel, s, valid, n = _select_top_modes(share, top_n=2, threshold=0.5)
+    assert set(sel.tolist()) == {1, 3} and valid
+
+
+def test_stratified_pick_spreads_across_window_starts():
+    from llapdiffusion.tools.run_synthetic_chirp_benchmark import _stratified_pick
+
+    cands = [(i // 4, i % 4, 0, 500 + i) for i in range(40)]  # starts 500..539
+    picked = _stratified_pick(cands, 4)
+    starts = [c[3] for c in picked]
+    assert len(picked) == 4
+    assert starts[0] == 500 and starts[-1] == 539  # covers both ends of the span
+    assert min(np.diff(starts)) >= 10  # roughly even spacing, not the first batch
+    # Fewer candidates than requested: keep them all.
+    assert len(_stratified_pick(cands[:2], 4)) == 2
+
+
+def test_native_step_grid_assertion():
+    from llapdiffusion.tools.run_synthetic_chirp_benchmark import _assert_native_step_grid
+
+    _assert_native_step_grid(np.cumsum(np.full(48, 1.0)))  # regular native steps
+    _assert_native_step_grid(np.cumsum(np.random.default_rng(0).gamma(4.0, 0.25, 48)))
+    with pytest.raises(AssertionError, match="native steps"):
+        _assert_native_step_grid(np.cumsum(np.full(48, 3600.0)))  # seconds, not steps
+    with pytest.raises(AssertionError, match="native steps"):
+        _assert_native_step_grid(np.zeros(48))  # non-increasing
+
+
+def _fig_window(aid=0, start=500, valid=True, n_modes=3, H=12, arm="chirp", seed=0):
+    rng = np.random.default_rng(seed)
+    t = np.cumsum(np.full(H, 1.0))
+    shares = rng.dirichlet(np.ones(n_modes)) * (0.9 if valid else 0.2)
+    return {
+        "arm": arm, "asset_id": aid, "window_start": start,
+        "t_norm_span": (0.7, 0.75),
+        "t_grid": t,
+        "mode_ids": np.arange(n_modes),
+        "mode_shares": shares,
+        "rho_modes": rng.uniform(0.01, 0.3, (H, n_modes)),
+        "omega_modes": rng.uniform(0.2, 0.6, (H, n_modes)),
+        "rho_eff": rng.uniform(0.01, 0.3, H),
+        "omega_eff": rng.uniform(0.2, 0.6, H),
+        "rho_true": np.full(H, 0.02),
+        "omega_true": np.linspace(0.4, 0.5, H),
+        "selected_share": float(shares.sum()),
+        "selection_valid": bool(valid),
+    }
+
+
+def test_plot_recovery_small_multiples_with_lti_overlay(tmp_path):
+    from llapdiffusion.tools.run_synthetic_chirp_benchmark import _plot_recovery
+
+    chirp = [_fig_window(start=s, seed=s) for s in (500, 550, 600)]
+    lti = [dict(_fig_window(start=s, n_modes=2, arm="lti", seed=s + 100),
+                omega_eff=np.full(12, 0.45), rho_eff=np.full(12, 0.1)) for s in (500, 550, 600)]
+    out = tmp_path / "recovery.pdf"
+    _plot_recovery(chirp, lti, out, title="test")
+    assert out.exists() and out.stat().st_size > 0
+    # Missing lti payload must not break the chirp-only figure.
+    out2 = tmp_path / "recovery_no_lti.pdf"
+    _plot_recovery(chirp, [], out2, title="test")
+    assert out2.exists()
+    # Invalid selection still renders (watermarked), never crashes.
+    out3 = tmp_path / "recovery_invalid.pdf"
+    _plot_recovery([_fig_window(valid=False)], [], out3, title="test")
+    assert out3.exists()
+
+
+def test_sweep_period_triangle_puts_full_excursion_in_every_window():
+    """P5: with sweep_period ~ (window+horizon), the pole excursion recurs inside
+    every window — including the tail test windows — instead of once per series."""
+    from llapdiffusion.datasets.synthetic_regime_dataset import (
+        SyntheticRegimeCacheConfig,
+        _pole_profiles,
+    )
+
+    L, period, H = 768, 144.0, 48
+    cfg = SyntheticRegimeCacheConfig(
+        task="synthetic_linear_chirp", series_length=L, change_point=576,
+        sweep_period=period,
+    )
+    times = np.arange(L, dtype=np.float64)
+    base_f = 1.0 / 32.0
+    freq, _ = _pole_profiles(
+        cfg, base_frequency=base_f, base_decay=0.005,
+        t_norm=times / times[-1], times_h=times,
+    )
+    # Bounded by the multiplier range and periodic in absolute time.
+    assert freq.min() == pytest.approx(base_f) and freq.max() == pytest.approx(2.0 * base_f)
+    np.testing.assert_allclose(freq[: L - int(period)], freq[int(period):], rtol=1e-6)
+    # Every horizon-length slice in the tail test region sees real variation,
+    # and a typical one sees >= 30% (the doc's acceptance).
+    ratios = [
+        (freq[s : s + H].max() - freq[s : s + H].min()) / freq[s : s + H].min()
+        for s in range(600, L - H)
+    ]
+    assert min(ratios) >= 0.15 and float(np.mean(ratios)) >= 0.30
+
+    # Default None keeps the legacy series-long monotone ramp.
+    cfg_legacy = SyntheticRegimeCacheConfig(
+        task="synthetic_linear_chirp", series_length=L, change_point=576,
+    )
+    freq_legacy, _ = _pole_profiles(
+        cfg_legacy, base_frequency=base_f, base_decay=0.005,
+        t_norm=times / times[-1], times_h=times,
+    )
+    np.testing.assert_allclose(
+        freq_legacy, base_f * (1.0 + (2.0 - 1.0) * times / times[-1]), rtol=1e-6
+    )
+
+
+def test_sweep_period_rejected_for_piecewise_tasks(tmp_path):
+    from llapdiffusion.datasets.synthetic_regime_dataset import (
+        SyntheticRegimeCacheConfig,
+        prepare_synthetic_regime_cache,
+    )
+
+    for task in ("synthetic_freq_shift", "synthetic_growth_decay"):
+        cfg = SyntheticRegimeCacheConfig(
+            task=task, window=32, horizon=16, series_length=160, change_point=120,
+            num_entities=2, data_dir=str(tmp_path / task), sweep_period=64.0,
+        )
+        with pytest.raises(ValueError, match="sweep_period"):
+            prepare_synthetic_regime_cache(cfg)
+
+
+def test_benchmark_sweep_tag_and_task_gating(tmp_path):
+    from types import SimpleNamespace
+
+    from llapdiffusion.tools.run_synthetic_chirp_benchmark import (
+        _cache_dir,
+        _task_sweep_period,
+    )
+
+    args = SimpleNamespace(
+        data_root=str(tmp_path), series_length=768, change_point=None,
+        num_entities=8, gap_distribution="gamma", gap_mean=1.0, gap_shape=4.0,
+        sweep_period=144.0,
+    )
+    assert _task_sweep_period("synthetic_linear_chirp", args) == 144.0
+    assert _task_sweep_period("synthetic_freq_shift", args) is None  # piecewise
+    assert "_sweep-144" in _cache_dir("synthetic_linear_chirp", args).name
+    assert "_sweep" not in _cache_dir("synthetic_freq_shift", args).name
+    args.sweep_period = None
+    assert "_sweep" not in _cache_dir("synthetic_linear_chirp", args).name
+
+
+def test_plot_cross_window_stitched_figure(tmp_path):
+    from llapdiffusion.datasets.synthetic_regime_dataset import (
+        SyntheticRegimeCacheConfig,
+        prepare_synthetic_regime_cache,
+    )
+    from llapdiffusion.tools.run_synthetic_chirp_benchmark import _plot_cross_window
+
+    cache = tmp_path / "cache"
+    prepare_synthetic_regime_cache(
+        SyntheticRegimeCacheConfig(
+            task="synthetic_linear_chirp", window=32, horizon=16, series_length=160,
+            change_point=120, num_entities=2, data_dir=str(cache), shared_poles=True,
+        )
+    )
+    chirp = [_fig_window(start=s, H=16, seed=s) for s in (60, 90)]
+    lti = [dict(_fig_window(start=s, H=16, arm="lti", seed=s + 7),
+                omega_eff=np.full(16, 0.4), rho_eff=np.full(16, 0.05)) for s in (60, 90)]
+    out = tmp_path / "stitched.pdf"
+    _plot_cross_window(chirp, lti, str(cache), out, title="test", window=32)
+    assert out.exists() and out.stat().st_size > 0

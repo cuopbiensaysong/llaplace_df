@@ -133,6 +133,20 @@ Deliverables: (i) LTI fails structurally while CMD tracks (forecast plots + CRPS
 pole-trajectory figure; (iii) companion-form vs normal-form numerical-integration error (the
 Prop.-A.1 figure).
 
+*Amendment (2026-07-20, before PREREG freeze — see `h2_pole_recovery_problems_fixes.md`):*
+recovery in (ii) is judged **only after the selection-validity gate passes**: recovered modes
+are ranked by output contribution E_k = mean_t e^{−2ρ̄ₖ(t)}‖θₖ‖² captured from the final
+denoising step of the evaluated forecast (never by coefficient variation, which anti-selects
+zero-residue junk modes), the primary recovered curve is the E_k-weighted effective trajectory
+over all modes, and the selected modes must explain ≥ 50% of output energy. A below-threshold
+figure is stamped "selection invalid" and triggers a tool fix + rerun — a **third outcome**
+distinct from "recovery works" and "identifiability fails" that counts against neither the
+model nor the method. The first H2 figures (2026-07) failed exactly this gate; the model's
+contributing modes were recovering fine. Additionally, "LTI fails structurally while CMD
+tracks" in (i) requires the within-window pole excursion to exist: chirp tasks use the
+triangle re-sweep (`--sweep-period ≈ window+horizon`); the legacy series-long ramp
+(within-window Δω/ω ≈ 6%) is kept only for the cross-window stitched-recovery view.
+
 **H3. Extrapolation / boundary-crossing stress** (mirror LLapDiff's Fig.-5 protocol) with
 chirp-vs-LTI arms.
 
@@ -233,7 +247,7 @@ report the chosen settings for every arm in the appendix.
 |---|---|---|
 | Chirp–LTI gap vanishes under seeds at h=12 | medium | expected (wrong regime); headline is h=168 — do not over-invest in PhysioNet |
 | Calibration gap is protocol, not model | medium | §1 parity checklist + U1 before any model change |
-| Poles unidentifiable → trajectory figure unconvincing | medium | H2(ii) synthetic recovery + cond/uncond + cross-regime consistency |
+| Poles unidentifiable → trajectory figure unconvincing | medium | H2(ii) synthetic recovery + cond/uncond + cross-regime consistency; selection-validity gate (contribution-ranked modes, share ≥ 50%) separates tool failure from identifiability failure |
 | Chirp slower than LLapDiff | low | T4 early; basis evaluation is parallel — verify |
 | "This is a time-varying diagonal SSM" review | high | related-work paragraph per method-file notes (S4D/S5/Mamba-style, CfC/LTC, LinOSS, Neural Flows, BOP-DMD, chirplets/nonstationary Prony); positioning: continuous-time closed form at arbitrary irregular queries, inside a diffusion denoiser, output-level certificate, analytic UQ |
 | "Why diffusion at all" review | high | U3 pre-registered three-way ablation |
