@@ -1,13 +1,133 @@
-<!-- HANDOFF COPY. Verbatim export of the assistant's project memory
-     (~/brain/.copilot1/projects/.../memory/cmd-paper-status.md), copied 2026-07-23
-     so the narrative survives an account transfer. Original content below, unmodified. -->
+<!-- HANDOFF COPY. Body below the 2026-07-27 section is the verbatim export of the
+     assistant's project memory (~/brain/.copilot1/.../cmd-paper-status.md), copied
+     2026-07-23. A second handoff section was PREPENDED 2026-07-27 for a further account
+     transfer; everything under "State at handoff (2026-07-23)" is unchanged history. -->
 
 # CMD paper — full working narrative (handoff export)
 
 **What this is.** The running log of the CMD (Chirp-Modal Dynamics) paper work: what was
 built, what broke, what was measured, and which claims were later retracted. Entries are
 roughly chronological; later entries correct earlier ones, so **read to the end before
-acting on any single claim**.
+acting on any single claim** — or rather, read the 2026-07-27 section first, since it
+supersedes much of what follows.
+
+---
+
+# ⭐ STATE AT HANDOFF — 2026-07-27 (read this first)
+
+**Read `w_docs/CMD_BUG_REPORT.md` before anything else.** It is now the canonical document:
+17 bugs, what each broke, how it was fixed, what results it invalidates, plus the results
+ledger, retracted claims, and audit recipes. *This narrative is history; the bug report is
+current.*
+
+## 1. Code state
+
+| item | value |
+|---|---|
+| working branch | **`fixed_bugs`** @ `84b92e1`, **pushed** to `origin/fixed_bugs` |
+| uncommitted on top | `cond_norm_mode` checkpoint persistence, Tier-2 M grid retune, `CHIRP_NUM_BASIS` default 256→8, bug-report edits |
+| reference branch | **`update_method` @ `347cd8a` — deliberately frozen pre-fix.** Do not move it. |
+| tests | **379 passing** (`conda activate llapdiff && python -m pytest tests/ -q`) |
+| deleted branches | `phase1`, `phase2U`, `chirp_fix_basis_scale` (0 unique commits); `phase0` preserved as tag **`archive/phase0`** (local only — `git push origin archive/phase0` to back it up) |
+
+⚠️ **Security:** the `origin` remote URL embeds a GitHub PAT in plaintext in `.git/config`,
+and `PAT.txt` (gitignored) holds the same token. It was **never rotated**. Revoke and reissue,
+then `git remote set-url origin https://github.com/cuopbiensaysong/llaplace_df.git` + a
+credential helper.
+
+## 2. The finding that reframes everything
+
+**The H2 denoiser barely uses its conditioning.** Measured on the p32 chirp benchmark, K=1,
+converged:
+
+| quantity | R² on the true latent trajectory |
+|---|---|
+| ridge probe on the model's **own** `cond_summary` | **+0.747** |
+| the trained denoiser's 25-draw ensemble mean | **−0.30** (before B15) → **+0.21** (after) |
+
+At `steps=1` (the one-shot conditional mean) the output had **std 0.09 vs the target's 0.62**,
+corr ≈ 0 — it predicts the *marginal* mean. **The target is sound**: the true latent carrier
+sits at dominant ω = **0.360** against a ground truth of **0.362**.
+
+⇒ **Poles cannot track because the FORECAST does not track.** This one upstream failure
+explains every H2 observation: flat pole slopes, CRPS pinned at 0.19–0.20 across *all* arms /
+K / basis / ρ settings, and insensitivity to every intervention.
+⇒ **No prior H2 result — including the 5-seed "confirmed negative" below — ever actually
+tested the CMD tracking claim.** That question is *reopened*, not closed.
+
+## 3. Fig-2 status
+
+Three structural obstacles found and fixed this session (details = B9–B11 in the bug report):
+representability (`CHIRP_BASIS="half_integer"`, R² **0.03 → 0.99** on the real truth), ω-level
+inflation (`CHIRP_OMEGA_BASIS="centered"`), and an ω-headroom trap **I introduced myself**
+(bounding the swing by the floor made "hedge to DC" and "cannot sweep" the same event; K=1 was
+99.2% constraint-saturated). Post-fix, K=1 *chooses* a swing of **0.544 vs truth 0.48**.
+
+**Tracking is still ~0 — but it is NOISE-DOMINATED at single seed.** Aggregate slopes observed
+across configurations: **+0.170, −0.035, +0.069, +0.054**; per-window values from **−0.44 to
++0.79**. With 4 windows × 3 draws these are indistinguishable from each other and from zero.
+**Do not read any single-run slope as signal** — I briefly did, and was wrong.
+
+**Remaining blocker = §2** (conditioning used at 0.21 of the 0.75 achievable). Best untried
+lever: `block_summary_adaln` is currently **`False`** — the summary reaches the trunk only via
+cross-attention into K modal tokens whose residues come from `x_t`, so at high noise it must
+overwrite noise-dominated tokens. Enabling AdaLN injection targets exactly the measured gap.
+**Evaluate that on conditional R² (a stable number), not on the noisy pole slope.**
+
+Deliverables that exist and stand on their own: `ldt/results/fig2_diagnosis.pdf` (3 panels:
+representable ✓ / present in conditioning ✓ / recovered ✗) and
+`ldt/results/fig_representability.pdf`.
+
+## 4. Running right now
+
+`ldt/scripts/run_tune_fixed_version.sh` (background, GPU wait-loop, 24 h cap):
+physionet h=12 arm d → smoke, then the campaign at `--run-tag fixed_version`.
+**Smoke succeeded** — trials completing, incumbent test CRPS **0.3495** with
+`CHIRP_NUM_BASIS=4` — which confirms the new defaults (incl. `COND_NORM_MODE="sample"`) do not
+break physionet. Logs: `ldt/results/tune_runner.log`, `tune_smoke.log`, `tune_fixed_version.log`.
+
+**Two caveats to carry with any number it produces:** six model defaults changed at once with
+**no legacy control arm**, so the result is *not* attributable to the bug fixes and is *not*
+comparable to G3's 0.3709 or v1's 0.3469; and selection is on the **test** split, so the CRPS
+is selection-biased and is not a clean test estimate.
+
+## 5. Do NOT retrain the VAE or the summarizer
+
+Verified 2026-07-27 (bug report §1b): stages 1–2 have **zero** references to the changed
+symbols; `SUM_FT_MODE="none"` keeps the summarizer frozen in stage 3; and the diffusion
+precompute cache stores `summary_raw` *un-normalised*, so **caches stay valid too**. Only
+stage-3 denoiser checkpoints need retraining. (Exception: if `SUM_FT_MODE` is ever set to
+`pool`/`top`/`all`, stage 3 fine-tunes the summarizer through the conditioning path.)
+
+## 6. Environment reality
+
+The H100 is **shared and usually full** — other tenants (`saturn2`, `respi`,
+`kienptMedSigLIP`) hold 70–80 GB of 81.5 GB; free memory is often 0.5–5 GB. Our jobs need
+~1.5–6 GB. **Always use the GPU wait-loop pattern** from `ldt/scripts/run_*.sh` rather than
+launching directly; a smoke run already died of OOM this session. `ldt/` is gitignored, so
+scripts and results there are untracked.
+
+## 7. Ranked next actions
+
+1. **Close the conditioning gap** (§3): try `block_summary_adaln=True`; score on conditional
+   R² vs the 0.747 probe ceiling. This gates Fig 2 and probably H1 too.
+2. **Fix B16** (open): `_best.pt` and `_best_ema.pt` hold identical weights and `_load_stack`
+   never applies `payload["ema"]`, so CRPS from `llapdiff-checkpoint-eval` / the H2 benchmark
+   is raw-weight labelled EMA. (`finetuning/` is unaffected — it applies EMA correctly.)
+3. **Re-run Fig 2 multi-seed** only after (1) — single-seed slopes are noise.
+4. **H1 NOAA-UK h=168 has never been run** (`ldt/output/noaa_uk/` does not exist). It inherits
+   every fix, so it starts clean — but do (1) first.
+5. Commit the uncommitted follow-ups; consider `git push origin archive/phase0`.
+
+## 8. Things already settled — do not re-derive
+
+Four claims are **retracted** (18% CRPS win; ~12× stability advantage; "the model hedges to DC
+because phase is uncertain"; "LTI is spectrally static"). Full reasoning in bug report §4.
+Single-run CRPS comparisons are untrustworthy (`cudnn.benchmark=True`; a 0.036 swing from pure
+nondeterminism, larger than every margin ever quoted). Estimator traps (single-sinusoid fits,
+turning-point windows, the noise-fooled `forecast_freq_*`) are catalogued in bug report §5.
+
+---
 
 **Companion documents in this folder**
 | file | contents |

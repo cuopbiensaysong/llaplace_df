@@ -468,7 +468,11 @@ def _build_cond_summary(
     if adapter is not None:
         stats = _history_stat_tokens(V, T, mask_bn, device, dt=dt, x_obs_mask=x_obs_mask)
         cond_summary_raw = adapter(cond_summary_raw, stats)
-    cond_summary = normalize_cond_per_batch(cond_summary_raw) if norm else cond_summary_raw
+    cond_summary = (
+        normalize_cond_per_batch(cond_summary_raw, mode=_resolve_cond_norm_mode(diff_model))
+        if norm
+        else cond_summary_raw
+    )
     return cond_summary
 
 
@@ -509,9 +513,10 @@ def _build_cond_summary_pair(
     # COND_NORM_MODE="sample" makes the conditioning a function of the window alone;
     # the legacy "batch" mode couples it to batch composition, which differs between
     # shuffled training batches and sequential eval batches (see normalize_cond_per_batch).
-    cond_norm_mode = str(getattr(config, "COND_NORM_MODE", "batch"))
     cond_summary = (
-        normalize_cond_per_batch(cond_summary_raw, mode=cond_norm_mode) if norm else cond_summary_raw
+        normalize_cond_per_batch(cond_summary_raw, mode=_resolve_cond_norm_mode(diff_model))
+        if norm
+        else cond_summary_raw
     )
     return cond_summary, cond_summary_raw
 
@@ -1527,11 +1532,41 @@ def _cond_adapter_config(config_obj: object) -> Dict[str, object]:
     }
 
 
+def _resolve_cond_norm_mode(diff_model: Optional[nn.Module] = None) -> str:
+    """Conditioning-normalization mode, preferring the one the model was TRAINED with.
+
+    ``build_llapdiff_model`` stamps ``cond_norm_mode`` onto the model (from the checkpoint
+    when rebuilding one, else from the live config), so a pre-fix checkpoint keeps the
+    legacy per-batch normalization it was trained under instead of silently picking up the
+    current default. Without this, loading an old checkpoint re-creates the very train/eval
+    conditioning mismatch the "sample" mode was introduced to remove, in reverse.
+    """
+    mode = getattr(diff_model, "cond_norm_mode", None) if diff_model is not None else None
+    if mode is None:
+        mode = getattr(config, "COND_NORM_MODE", "batch")
+    return str(mode)
+
+
 def _llapdiff_model_config(config_obj: object) -> Dict[str, object]:
     return {
         "llapdiff": _llapdiff_model_kwargs(config_obj),
         "cond_adapter": _cond_adapter_config(config_obj),
+        # A pipeline setting, not a LLapDiff constructor kwarg: it governs how the
+        # summarizer's output is normalized before the denoiser consumes it, so it is
+        # persisted alongside cond_adapter rather than inside "llapdiff".
+        "cond_norm_mode": str(getattr(config_obj, "COND_NORM_MODE", "sample")),
     }
+
+
+def _cond_norm_mode_from_checkpoint(payload: object) -> str:
+    """Checkpoints predating COND_NORM_MODE were trained under per-batch normalization."""
+    if isinstance(payload, dict):
+        model_config = payload.get("model_config")
+        if isinstance(model_config, dict):
+            mode = model_config.get("cond_norm_mode")
+            if mode is not None:
+                return str(mode)
+    return "batch"
 
 
 def _llapdiff_config_from_checkpoint(payload: object) -> Dict[str, object]:
@@ -1584,6 +1619,14 @@ def build_llapdiff_model(
         else _llapdiff_model_kwargs_from_checkpoint(config_obj, checkpoint_payload)
     )
     model = LLapDiff(**model_kwargs).to(device)
+    # Stamp the conditioning-normalization mode the model is to be used with: from the
+    # checkpoint when rebuilding one (so it keeps what it was trained under), else from
+    # the live config. Read back by _resolve_cond_norm_mode.
+    model.cond_norm_mode = (
+        str(getattr(config_obj, "COND_NORM_MODE", "sample"))
+        if checkpoint_payload is None
+        else _cond_norm_mode_from_checkpoint(checkpoint_payload)
+    )
     adapter_cfg = _cond_adapter_config(config_obj)
     if adapter_cfg["mode"] == "stats":
         model.cond_adapter = ContextStatsAdapter(

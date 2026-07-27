@@ -10,8 +10,9 @@ Those three originals are kept verbatim in **`archive/`** (see `archive/README.m
 raw record; the phase-by-phase implementation history survives only there. This document is
 the one to read and maintain.
 
-**Last updated:** 2026-07-27 · **Branch:** `update_method` · **Tests:** 378 passing
-**Status of the code:** all fixes below are **landed but uncommitted** except where marked OPEN.
+**Last updated:** 2026-07-27 · **Branch:** `fixed_bugs` (commit `84b92e1`) · **Tests:** 378 passing
+**Status of the code:** all fixes below are **landed and committed** except where marked OPEN.
+`update_method` is deliberately left at `347cd8a` (pre-fix) as the reference point.
 
 ---
 
@@ -34,7 +35,7 @@ the one to read and maintain.
 | **B13** | `seed_poles` / `_growth_terms` hardcoded φ(0)=2 | `laptrans.py` | 🟠 major | fixed 2026-07-24 |
 | **B14** | Recovery metric made the LTI tracking slope identically 0 (a tautology) | `plot_llapdiff_poles.py` | 🟠 major | fixed 2026-07-24 |
 | **B15** | Conditioning normalised per **batch** → 41% train/eval mismatch | `llapdiff_utils.py` | 🔴 critical | fixed 2026-07-25 |
-| **B16** | `_best.pt` and `_best_ema.pt` hold identical weights; EMA never applied at eval | `train_val_llapdiff.py`, `llapdiff_checkpoint_eval.py` | 🔴 critical | **OPEN** |
+| **B16** | `_best.pt` and `_best_ema.pt` hold identical weights; `_load_stack` never applies EMA (`finetuning/` is unaffected) | `train_val_llapdiff.py`, `llapdiff_checkpoint_eval.py` | 🔴 critical | **OPEN** |
 | **B17** | `llapdiff-synthetic-regime` crashes at its own default geometry | `run_synthetic_regime_shift.py` | 🟡 minor | **OPEN** (workaround documented) |
 
 ---
@@ -277,6 +278,52 @@ denoiser dir `_cn-<mode>`.
 
 The fix does what it claims. It is **not sufficient** on its own — see §3.
 
+**Follow-up (2026-07-27): the mode is now persisted per checkpoint.** As first landed, the
+mode was read live from `config`, unlike every other fix — so loading a *pre-fix* checkpoint
+evaluated it under `"sample"` while it had been trained under `"batch"`, re-creating the very
+mismatch this fix removes, in reverse. It affected the G2/G3 checkpoints, all H2 checkpoints,
+`finetuning/results/v1`, and the released checkpoints in `ldt/checkpoints/`.
+
+Closed by persisting `cond_norm_mode` in the checkpoint's `model_config` **alongside**
+`cond_adapter` (it is a pipeline setting, not a `LLapDiff` constructor kwarg — it governs how
+the summarizer's output is normalised before the denoiser consumes it, so it cannot be passed
+to `LLapDiff(**kwargs)`). `build_llapdiff_model` stamps the resolved mode onto the model — from
+the checkpoint when rebuilding one, else from the live config — and
+`_resolve_cond_norm_mode(diff_model)` prefers that over the global config at every call site.
+`_cond_norm_mode_from_checkpoint` returns `"batch"` when the key is absent, so pre-fix
+checkpoints keep what they were trained under. Verified on five real pre-fix checkpoints
+(G3 chirp cells, `v1` tuning trials, a released x0 checkpoint): all resolve to `"batch"`.
+The two remaining `normalize_cond_per_batch` call sites now honour the resolved mode too
+(`_build_cond_summary`, used only by the `evaluate_irregular_time_checks` diagnostic, and
+`build_context(norm=True)`, which gained an explicit `norm_mode` defaulting to legacy
+`"batch"`; every in-tree caller passes `norm=False`).
+Pinned by `test_cond_norm_mode_is_persisted_and_defaults_to_legacy`.
+
+---
+
+## 1b. Which stages need retraining (checked 2026-07-27)
+
+**Stage 1 (latent VAE) and stage 2 (history summarizer) do NOT need retraining for any of
+these fixes.** Only stage-3 denoiser checkpoints do.
+
+| evidence | result |
+|---|---|
+| `normalize_cond_per_batch` / `build_context` / `cond_summary` in `trainers/train_val_latent.py` | **no matches** — the VAE never sees conditioning |
+| same in `trainers/train_val_summarizer.py` | **no matches** — its objective is history reconstruction (`SUM_LOSS_W_X/V/T`), independent of downstream normalisation |
+| where the fixes live | `models/laptrans.py` (pole cores, stage 3), `models/llapdiff_utils.py` (normalisation applied *after* the summarizer), `viz/plot_llapdiff_poles.py` (analysis only) |
+| `SUM_FT_MODE` default | `"none"` ⇒ the summarizer is **frozen** in stage 3; denoiser gradients never reach it |
+| diffusion precompute cache (`diffusion_cache.py`) | stores `summary_raw` with `norm=False` — normalisation happens at load time ⇒ **existing caches stay valid** |
+
+B15 changes *how the summarizer's output is consumed*, not the summarizer's weights.
+
+⚠️ **The one exception:** with `SUM_FT_MODE` set to `pool`/`top`/`all`, stage 3 fine-tunes the
+summarizer *through* the conditioning path — a summarizer fine-tuned under the old
+normalisation would then be mismatched and would need redoing. Not active at the default.
+
+*(Separately, B5 — the `--phase-spread` fix — **did** require regenerating the H2 synthetic
+caches and their stage-1/2 artifacts, but that is a data-side fix specific to the H2 benchmark
+and was completed in 2026-07; it does not apply to physionet or the other real datasets.)*
+
 ---
 
 ## 2. Bugs fixed earlier in the project (pre-session; from the archived docs)
@@ -389,12 +436,23 @@ sum of per-tensor `max|raw − ema|` over all parameters = **exactly 0.0**, both
 validation metric selected the epoch**, not in which weights are stored. The actual EMA
 weights live under a separate `ema` key that `_load_stack` never applies.
 
-**Impact:** despite `USE_EMA_EVAL = True`, **every reported CRPS in this project is a
-raw-weight number labelled EMA** — including the G2/G3 factorial and the 5-seed campaign.
+**Impact — scoped (corrected 2026-07-27).** This bites only the consumers that go through
+`_load_stack`, which reads `payload["model"]` and never applies `payload["ema"]`:
+`llapdiff-checkpoint-eval`, the H2 chirp benchmark, and the T1/T4/UQ tools. For those,
+**the reported CRPS is a raw-weight number labelled EMA** despite `USE_EMA_EVAL = True` —
+including the G2/G3 factorial and the 5-seed Fig-2 campaign.
+
+**The `finetuning/` harness is NOT affected**, and an earlier blanket claim here that *every*
+CRPS in the project was raw-weight was too broad. That harness applies the EMA shadow
+correctly: `eval_sampling.py` copies `payload["ema"]` into the model before scoring (and marks
+a cell `skipped_no_ema` when the shadow is missing), and `final_eval.py` materialises a
+sibling `*_emaweights.pt` checkpoint whose `model` holds the EMA tensors, raising if the
+checkpoint carries no EMA state. So `finetuning` results tagged `weights=ema` really are EMA.
 
 **Suggested fix:** either write the EMA weights into `model` when saving `_best_ema.pt`, or
-have the eval path apply `payload["ema"]` when `USE_EMA_EVAL` is set. Add a test asserting the
-two files differ when EMA is enabled.
+have `_load_stack` apply `payload["ema"]` when `USE_EMA_EVAL` is set — the second matches what
+`finetuning/eval_sampling.py` already does and would make the whole codebase consistent. Add a
+test asserting the two files differ when EMA is enabled.
 
 ### B17 — `llapdiff-synthetic-regime` crashes at its own default geometry 🟡 **OPEN**
 
@@ -455,9 +513,9 @@ CMD tracking claim.
 | Any H2 result on a **2π phase-spread** cache | **void** (B5: 0.62 round-trip ceiling) |
 | Any H2 result **before 2026-07-22** | **void** (B6/B7: oscillatory modes dead) |
 | The **5-seed "confirmed negative"** (slope −0.0032 ± 0.0113) | **retracted** (B9: target unrepresentable; B12: ρ₀ 2×) |
-| All reported **CRPS** numbers | labelled EMA, actually raw weights (B16) |
+| **CRPS** from `_load_stack` tools (checkpoint-eval, H2 benchmark, T1/T4/UQ) | labelled EMA, actually raw weights (B16); `finetuning/` results are genuinely EMA |
 | **NOAA-UK h=168 headline** | never run — `ldt/output/noaa_uk/` does not exist |
-| **G2/G3 PhysioNet h=12 factorial** | *probably safe* from B6 (ρ·H ∈ [0.12, 2.4]); still affected by B16 |
+| **G2/G3 PhysioNet h=12 factorial** | *probably safe* from B6 (ρ·H ∈ [0.12, 2.4]); still affected by B16 (it used `llapdiff-checkpoint-eval`) |
 
 **Retracted claims (kept so they are not re-derived):**
 1. *"chirp beats LTI by 18% CRPS"* — **retracted**. Single-run CRPS is untrustworthy: the

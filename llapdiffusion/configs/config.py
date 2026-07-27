@@ -128,7 +128,14 @@ RHO_CONDITIONING_MODE = "raw"
 # Denoiser dynamical core: "lti" (constant poles + residual MLP, original LLapDiff) or
 # "chirp" (time-varying poles, stable-by-construction, residual MLP off by default).
 DENOISER_MODAL_TYPE = "lti"
-CHIRP_NUM_BASIS = 256
+# Pole-basis size M. Under CHIRP_BASIS="half_integer" the top basis frequency is M/4
+# cycles across the window L (= CHIRP_TIME_SCALE, resolving to PRED), so the Nyquist
+# ceiling of a unit-gap grid is M <= 2*L: 24 at h=12, 96 at h=48, 336 at h=168. The old
+# default of 256 was ~10x past Nyquist at h=12 and ~2.7x at h=48 -- it only added jitter
+# to rho(t)/omega(t) and quadratically many coefficient-head parameters (2*K*M outputs).
+# 8 is a safe, horizon-agnostic starting point; sweep it per horizon (the model warns
+# when the top frequency exceeds L/2).
+CHIRP_NUM_BASIS = 8
 CHIRP_RHO_MIN = 1e-4
 CHIRP_USE_MLP_RESIDUAL = False
 # Window length that normalizes the chirp basis frequencies to the time axis. None

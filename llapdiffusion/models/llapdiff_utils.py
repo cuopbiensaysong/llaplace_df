@@ -800,6 +800,7 @@ def build_context(
     dt: Optional[torch.Tensor] = None,
     x_obs_mask: Optional[torch.Tensor] = None,
     norm: bool = True,
+    norm_mode: str = "batch",
     requires_grad: bool = False,
 ):
     """
@@ -860,7 +861,11 @@ def build_context(
         cond_summary, _ = context_module(**kwargs)
 
     if norm:
-        cond_summary = normalize_cond_per_batch(cond_summary)
+        # Every in-tree caller passes norm=False and normalizes downstream via
+        # _build_cond_summary_pair, which resolves the mode from the model/checkpoint.
+        # norm_mode defaults to the legacy "batch" so this path cannot silently change
+        # behaviour for an out-of-tree caller.
+        cond_summary = normalize_cond_per_batch(cond_summary, mode=norm_mode)
     if not requires_grad:
         return cond_summary.detach()
     return cond_summary

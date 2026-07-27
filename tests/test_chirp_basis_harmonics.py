@@ -340,3 +340,38 @@ def test_pre_fix_checkpoints_keep_the_legacy_basis():
     cfg = _llapdiff_config_from_checkpoint(payload)
     assert cfg["chirp_basis"] == "integer"
     assert ChirpModalField(k=2, cond_dim=8, num_basis=4, time_scale=48.0).basis == "integer"
+
+
+def test_cond_norm_mode_is_persisted_and_defaults_to_legacy():
+    """The conditioning-normalization mode must travel WITH the checkpoint.
+
+    It is not a LLapDiff constructor kwarg (it governs how the summarizer's output is
+    normalized before the denoiser sees it), so it is persisted alongside `cond_adapter`
+    and stamped onto the model. A checkpoint predating it was trained under per-batch
+    normalization; rebuilding it under the current "sample" default would re-create the
+    train/eval conditioning mismatch that mode was introduced to remove, in reverse.
+    """
+    from types import SimpleNamespace
+
+    from llapdiffusion.configs import config as base_config
+    from llapdiffusion.trainers.train_val_llapdiff import (
+        _cond_norm_mode_from_checkpoint,
+        _llapdiff_model_config,
+        _resolve_cond_norm_mode,
+    )
+
+    # a checkpoint written now records the mode
+    assert _llapdiff_model_config(base_config)["cond_norm_mode"] == base_config.COND_NORM_MODE
+
+    # a pre-fix checkpoint carries no cond_norm_mode -> legacy "batch"
+    assert _cond_norm_mode_from_checkpoint({"model_config": {"llapdiff": {}}}) == "batch"
+    assert _cond_norm_mode_from_checkpoint({}) == "batch"
+    # ...and a current one round-trips
+    assert _cond_norm_mode_from_checkpoint(
+        {"model_config": {"cond_norm_mode": "sample"}}) == "sample"
+
+    # the mode stamped on the model wins over the live config, in both directions
+    assert _resolve_cond_norm_mode(SimpleNamespace(cond_norm_mode="batch")) == "batch"
+    assert _resolve_cond_norm_mode(SimpleNamespace(cond_norm_mode="sample")) == "sample"
+    # ...and with no model (or an unstamped one) it falls back to the config
+    assert _resolve_cond_norm_mode(None) == str(base_config.COND_NORM_MODE)

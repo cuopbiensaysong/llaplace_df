@@ -1,11 +1,16 @@
 # Archive — superseded working documents
 
-These are the **original working documents**, kept verbatim as the raw record. They have been
+These are the **original working documents**, kept as the raw record. They have been
 consolidated into **`../CMD_BUG_REPORT.md`**, which is the document to read and maintain.
 
-Nothing here should be updated. Consult it only when you need the primary source: the exact
-wording of a finding, the chronological order in which things were discovered, or a detail the
-consolidated report condensed.
+Consult these only when you need the primary source: the exact wording of a finding, the
+chronological order in which things were discovered, or a detail the consolidated report
+condensed.
+
+> **One exception:** `CMD_SESSION_NARRATIVE.md` carries a **cross-account handoff section**
+> prepended 2026-07-27 (everything below it is unchanged history). It exists because this
+> project has moved between accounts twice; if it moves again, update that top section rather
+> than the body. **A cold session should still start with `../CMD_BUG_REPORT.md`.**
 
 | file | what it holds | where it went |
 |---|---|---|

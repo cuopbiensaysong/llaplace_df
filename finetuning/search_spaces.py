@@ -53,10 +53,17 @@ TIER1_STAGES = [
 
 # ---- Tier 2: chirp-specific (arms c and d only) ------------------------------
 TIER2_STAGES = [
-    # Fourier basis size for the pole field. Config default is currently 256;
-    # the runbook suggests small M at short horizons (8 cycles across 12 steps
-    # is near-Nyquist).
-    ("chirp_num_basis", "config", "CHIRP_NUM_BASIS", [8, 32, 64, 256]),
+    # Fourier basis size M for the pole field.
+    # ⚠️ Under CHIRP_BASIS="half_integer" (the default) M does NOT equal the top
+    # frequency: the basis uses M/2 distinct frequencies, each present with both
+    # signs, so the top frequency is M/4 cycles across the window L. The Nyquist
+    # limit of a unit-gap grid is L/2 cycles, hence the resolvable ceiling is
+    #     M <= 2 * L        (L = CHIRP_TIME_SCALE, which resolves to PRED)
+    # At PRED=12 that is M <= 24; the grid below tops out there (top frequencies
+    # 1, 2, 4 and 6 cycles across the window). Anything larger cannot be resolved
+    # by the data, only adds jitter to rho(t)/omega(t), and trips the model's
+    # Nyquist RuntimeWarning. Raise this grid for longer horizons.
+    ("chirp_num_basis", "config", "CHIRP_NUM_BASIS", [4, 8, 16, 24]),
     # Minimum decay floor rho_min (the Theorem-B bound constant).
     ("chirp_rho_min", "config", "CHIRP_RHO_MIN", [1e-5, 1e-4, 1e-3]),
     # Theorem-B' growth budget c_g; 0.0 recovers Theorem B exactly (T2 sweep).
