@@ -465,3 +465,267 @@ def test_plot_cross_window_stitched_figure(tmp_path):
     out = tmp_path / "stitched.pdf"
     _plot_cross_window(chirp, lti, str(cache), out, title="test", window=32)
     assert out.exists() and out.stat().st_size > 0
+
+
+def test_eval_checkpoint_selector_ignores_stale_files(tmp_path):
+    """Regression: the v3 campaign evaluated a 6-day-old `_best_raw.pt` left in the
+    shared output dir. `_best_raw.pt` is written only when EMA_COMPARE_EVERY > 0, so
+    with comparisons off it is never refreshed and must not be selected."""
+    from llapdiffusion.trainers.train_val_llapdiff import _select_eval_checkpoint_path
+
+    raw = tmp_path / "best_raw.pt"
+    best = tmp_path / "best.pt"
+    ema = tmp_path / "best_ema.pt"
+    last = tmp_path / "last.pt"
+    for p in (raw, best, ema, last):
+        p.write_bytes(b"x")
+    fresh = {best, ema, last}  # this run wrote everything except the stale raw
+
+    kw = dict(best_ckpt_path=best, best_ckpt_path_raw=raw,
+              best_ckpt_path_ema=ema, last_ckpt_path=last)
+    # Without the filter the raw file wins -- the bug.
+    assert _select_eval_checkpoint_path(
+        test_metric_source="raw", val_metric_source="ema", **kw) == raw
+    # With it, selection falls through to a checkpoint this run actually produced.
+    assert _select_eval_checkpoint_path(
+        test_metric_source="raw", val_metric_source="ema",
+        written=lambda p: p in fresh, **kw) == best
+    # The ema path (what the benchmark uses) is unaffected.
+    assert _select_eval_checkpoint_path(
+        test_metric_source="ema", val_metric_source="ema",
+        written=lambda p: p in fresh, **kw) == ema
+    # Nothing written this run -> no checkpoint, rather than a stale one.
+    assert _select_eval_checkpoint_path(
+        test_metric_source="ema", val_metric_source="ema",
+        written=lambda p: False, **kw) is None
+
+
+def test_artifact_cache_guard_rejects_foreign_artifacts(tmp_path):
+    """Stage-1/2 artifacts are reused by file existence and the artifact dir is keyed
+    by (task, seed) only, so a sweep-period change silently reused a VAE/summarizer
+    fitted to the previous cache."""
+    from types import SimpleNamespace
+
+    from llapdiffusion.tools.run_synthetic_chirp_benchmark import _artifact_cache_guard
+
+    cfg = SimpleNamespace(VAE_DIR=str(tmp_path / "seed-0" / "vae"),
+                          DATA_DIR="/caches/legacy", WINDOW=96, PRED=48)
+    args = SimpleNamespace(recompute_artifacts=False)
+    _artifact_cache_guard(cfg, args)          # first run stamps the cache
+    _artifact_cache_guard(cfg, args)          # same cache reuses silently
+
+    cfg.DATA_DIR = "/caches/sweep-144"        # different cache, same artifact dir
+    with pytest.raises(RuntimeError, match="different cache"):
+        _artifact_cache_guard(cfg, args)
+    args.recompute_artifacts = True           # retraining everything is allowed
+    _artifact_cache_guard(cfg, args)
+    args.recompute_artifacts = False
+    _artifact_cache_guard(cfg, args)          # and the stamp now tracks the new cache
+
+
+def test_summary_rows_do_not_merge_sweep_and_legacy():
+    """Legacy and reswept runs share a gap_regime tag; grouping must keep them apart."""
+    from llapdiffusion.tools.run_synthetic_chirp_benchmark import _summary_rows
+
+    rows = [
+        {"task": "t", "arm": "chirp", "gap_regime": "g", "sweep_period": None, "crps": 1.0},
+        {"task": "t", "arm": "chirp", "gap_regime": "g", "sweep_period": 144.0, "crps": 3.0},
+    ]
+    summary = _summary_rows(rows)
+    assert len(summary) == 2
+    assert {s["sweep_period"] for s in summary} == {None, 144.0}
+    assert {s["crps_mean"] for s in summary} == {1.0, 3.0}
+
+
+def test_trend_slope_separates_tracking_from_flat():
+    """The structural discriminator: a flat prediction whose LEVEL is right still
+    scores slope 0, which RMSE alone cannot distinguish from tracking."""
+    from llapdiffusion.tools.run_synthetic_chirp_benchmark import trend_slope
+
+    truth = np.linspace(0.30, 0.55, 48)
+    assert trend_slope(truth, truth) == pytest.approx(1.0)
+    assert trend_slope(np.full(48, truth.mean()), truth) == pytest.approx(0.0)
+    assert trend_slope(0.5 * truth + 0.1, truth) == pytest.approx(0.5)
+    assert trend_slope(-truth, truth) == pytest.approx(-1.0)
+    # Constant truth (the ramp-damping tasks) leaves the slope undefined, not zero.
+    assert np.isnan(trend_slope(truth, np.full(48, 0.26)))
+
+
+def test_short_time_frequency_tracks_a_chirp_on_an_irregular_grid():
+    """Option-3 observable: recover a known sweep from the signal itself."""
+    from llapdiffusion.tools.run_synthetic_chirp_benchmark import short_time_frequency
+
+    rng = np.random.default_rng(0)
+    gaps = rng.gamma(4.0, 0.25, 96)
+    t = np.cumsum(gaps) - gaps[0]
+    w0, w1 = 0.30, 0.60
+    inst = w0 + (w1 - w0) * t / t[-1]
+    phase = np.cumsum(inst * np.diff(t, prepend=t[0]))
+    z = np.stack([np.sin(phase), np.cos(phase + 0.4), 0.5 * np.sin(phase + 1.1)], axis=1)
+
+    centers, freq = short_time_frequency(t, z, win=24.0, stride=6.0)
+    assert centers.size >= 4 and freq.size == centers.size
+    expected = np.interp(centers, t, inst)
+    assert np.abs(freq - expected).max() < 0.08          # tracks the sweep
+    assert freq[-1] > freq[0] + 0.1                       # and it is rising
+
+    # A pure constant-frequency tone gives a flat estimate.
+    z_const = np.sin(0.4 * t)[:, None]
+    _, freq_const = short_time_frequency(t, z_const, win=24.0, stride=6.0)
+    assert np.abs(freq_const - 0.4).max() < 0.05
+    assert freq_const.std() < 0.02
+
+
+def test_generate_kwargs_guidance_override():
+    from types import SimpleNamespace
+
+    from llapdiffusion.tools.run_synthetic_chirp_benchmark import _generate_kwargs
+
+    cfg = SimpleNamespace(GEN_STEPS=64, GUIDANCE_STRENGTH=(1.0, 2.0), GUIDANCE_POWER=0.3,
+                          GEN_ETA=0.0, KARRAS_RHO=7.5, TEST_STEPS=64)
+    assert _generate_kwargs(cfg)["guidance_strength"] == (1.0, 2.0)
+    assert _generate_kwargs(cfg, guidance=1.0)["guidance_strength"] == 1.0
+
+
+def test_model_tag_isolates_scan_cells(tmp_path):
+    """A K/M scan must not have its cells overwrite each other's checkpoints, while
+    stage 1/2 stay shared per (task, seed) -- they do not depend on the budget."""
+    from types import SimpleNamespace
+
+    from llapdiffusion.tools.run_synthetic_chirp_benchmark import _configure, _model_tag
+
+    base = dict(window=32, horizon=16, series_length=160, change_point=None, num_entities=3,
+                data_root=str(tmp_path / "d"), artifact_root=str(tmp_path / "a"),
+                gap_distribution="gamma", gap_mean=1.0, gap_shape=4.0, sweep_period=None,
+                smoke=True, verbose=False, debug=False)
+    default = SimpleNamespace(laplace_k=256, chirp_num_basis=None, **base)
+    scan = SimpleNamespace(laplace_k=8, chirp_num_basis=8, **base)
+
+    assert _model_tag(default) == ""            # default paths unchanged
+    assert _model_tag(scan) == "_k-8_m-8"
+
+    cfg_d = _configure("synthetic_linear_chirp", "chirp", 0, default)
+    cfg_s = _configure("synthetic_linear_chirp", "chirp", 0, scan)
+    assert cfg_d.OUT_DIR != cfg_s.OUT_DIR       # denoiser dirs isolated
+    assert cfg_d.VAE_CKPT == cfg_s.VAE_CKPT     # stage 1/2 shared
+    assert cfg_d.SUM_CKPT == cfg_s.SUM_CKPT
+    assert cfg_d.LAPLACE_K == 256 and cfg_s.LAPLACE_K == 8
+    assert cfg_s.CHIRP_NUM_BASIS == 8
+
+
+def test_nyquist_warning_for_super_nyquist_basis():
+    from llapdiffusion.models.laptrans import ChirpModalField
+
+    with pytest.warns(RuntimeWarning, match="Nyquist"):
+        ChirpModalField(k=4, cond_dim=16, num_basis=256, time_scale=48.0)
+    import warnings as _w
+    with _w.catch_warnings():
+        _w.simplefilter("error")  # M = 8 <= 48/2: must not warn
+        ChirpModalField(k=4, cond_dim=16, num_basis=8, time_scale=48.0)
+        ChirpModalField(k=4, cond_dim=16, num_basis=256, time_scale=None)  # adaptive L
+
+
+def test_ckpt_stamp_exposes_stale_artifacts(tmp_path):
+    """Provenance: both H2 corruptions were stale artifacts reused from a shared
+    directory, so every result row records the mtime of what it actually loaded."""
+    import os
+    import time as _time
+
+    from llapdiffusion.tools.run_synthetic_chirp_benchmark import _ckpt_stamp
+
+    assert _ckpt_stamp(None) is None
+    assert _ckpt_stamp(tmp_path / "missing.pt") is None
+
+    p = tmp_path / "ckpt.pt"
+    p.write_bytes(b"x")
+    fresh = _ckpt_stamp(p)
+    assert fresh is not None and fresh.endswith("+00:00")
+
+    old = tmp_path / "stale.pt"
+    old.write_bytes(b"x")
+    os.utime(old, (_time.time() - 6 * 86400,) * 2)
+    assert _ckpt_stamp(old) < fresh   # a 6-day-old file is visibly older in the CSV
+
+
+def test_phase_spread_flag_tags_cache_and_reaches_generator(tmp_path):
+    """The set-VAE mean-pools over entities, so independently-phased entities cancel
+    and the carrier never reaches the latent. --phase-spread controls that, and must
+    tag the cache so phase variants cannot share one directory."""
+    import math
+    from types import SimpleNamespace
+
+    from llapdiffusion.tools.run_synthetic_chirp_benchmark import _cache_dir, _phase_spread
+
+    base = dict(data_root=str(tmp_path), series_length=768, change_point=None,
+                num_entities=64, gap_distribution="gamma", gap_mean=1.0, gap_shape=4.0,
+                sweep_period=144.0)
+    default = SimpleNamespace(phase_spread=2.0 * math.pi, **base)
+    shared = SimpleNamespace(phase_spread=0.0, **base)
+
+    assert _phase_spread(default) == pytest.approx(2 * math.pi)
+    assert "_phase" not in _cache_dir("synthetic_linear_chirp", default).name  # unchanged
+    assert "_phase-0" in _cache_dir("synthetic_linear_chirp", shared).name
+    assert _cache_dir("synthetic_linear_chirp", default) != _cache_dir("synthetic_linear_chirp", shared)
+    # Absent attribute falls back to the historical behaviour.
+    assert _phase_spread(SimpleNamespace(**base)) == pytest.approx(2 * math.pi)
+
+
+def test_shared_phase_cache_survives_entity_mean_pooling(tmp_path):
+    """With a shared phase the panel MEAN retains the carrier; with random phases it
+    destructively cancels -- which is what the encoder's pooling sees."""
+    from llapdiffusion.datasets.synthetic_regime_dataset import (
+        SyntheticRegimeCacheConfig, prepare_synthetic_regime_cache,
+    )
+    import math
+
+    def panel_mean_amplitude(phase_max):
+        cfg = SyntheticRegimeCacheConfig(
+            task="synthetic_linear_chirp", window=32, horizon=16, series_length=160,
+            change_point=120, num_entities=32, data_dir=str(tmp_path / f"p{phase_max:g}"),
+            shared_poles=True, phase_min=0.0, phase_max=phase_max, noise_std=0.0,
+            overwrite=True,
+        )
+        prepare_synthetic_regime_cache(cfg)
+        from llapdiffusion.datasets.synthetic_regime_dataset import CachePaths
+        paths = CachePaths.from_dir(cfg.data_dir)
+        series = np.stack([np.load(paths.targets / f"{i}.npy").astype(np.float64)
+                           for i in range(cfg.num_entities)])
+        return float(series.mean(axis=0).std())
+
+    shared = panel_mean_amplitude(0.0)
+    random_phase = panel_mean_amplitude(2.0 * math.pi)
+    assert shared > 0.3           # the carrier survives pooling
+    assert random_phase < shared / 3.0   # random phases cancel it away
+
+
+def test_freq_multiplier_flag_tags_cache_and_steepens_sweep(tmp_path):
+    """--freq-multiplier is the lever that builds the LTI-failure regime: it must tag
+    the cache (so difficulty variants don't collide) and actually steepen omega(t)."""
+    import numpy as np
+    from types import SimpleNamespace
+    from llapdiffusion.tools.run_synthetic_chirp_benchmark import _cache_dir, _freq_multiplier
+    from llapdiffusion.datasets.synthetic_regime_dataset import (
+        SyntheticRegimeCacheConfig, _pole_profiles,
+    )
+
+    base = dict(data_root=str(tmp_path), series_length=768, change_point=None,
+                num_entities=64, gap_distribution="gamma", gap_mean=1.0, gap_shape=4.0,
+                sweep_period=144.0, phase_spread=0.393)
+    default = SimpleNamespace(freq_multiplier=2.0, **base)
+    steep = SimpleNamespace(freq_multiplier=4.0, **base)
+    assert _freq_multiplier(default) == pytest.approx(2.0)
+    assert "_fm" not in _cache_dir("synthetic_linear_chirp", default).name   # default unchanged
+    assert "_fm-4" in _cache_dir("synthetic_linear_chirp", steep).name
+    assert _cache_dir("synthetic_linear_chirp", default) != _cache_dir("synthetic_linear_chirp", steep)
+
+    # Within-horizon sweep scales with the multiplier.
+    def within_h_swing(mult):
+        cfg = SyntheticRegimeCacheConfig(task="synthetic_linear_chirp", series_length=768,
+                                         change_point=576, sweep_period=144.0, freq_multiplier=mult)
+        t = np.arange(768, dtype=float)
+        freq, _ = _pole_profiles(cfg, base_frequency=1.0 / 24, base_decay=0.005,
+                                 t_norm=t / t[-1], times_h=t)
+        om = 2 * np.pi * freq
+        return np.mean([om[s:s + 48].max() - om[s:s + 48].min() for s in range(600, 720)])
+
+    assert within_h_swing(4.0) > 2.5 * within_h_swing(2.0)   # ~3x steeper

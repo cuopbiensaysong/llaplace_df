@@ -499,10 +499,28 @@ def _broadcast_norm_stats(stats: torch.Tensor, ref: torch.Tensor) -> torch.Tenso
     )
 
 
-def normalize_cond_per_batch(cs: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-    """z-score over (B,S) for each feature dim; keeps gradients."""
-    m = cs.mean(dim=(0, 1), keepdim=True)
-    v = cs.var(dim=(0, 1), keepdim=True, unbiased=False)
+def normalize_cond_per_batch(
+    cs: torch.Tensor, eps: float = 1e-6, mode: str = "batch"
+) -> torch.Tensor:
+    """z-score the conditioning summary for each feature dim; keeps gradients.
+
+    ``mode="batch"`` (legacy) reduces over (B, S), so a window's conditioning depends on
+    which OTHER windows share its batch. Training batches are shuffled (batch statistics
+    ~ global statistics) while eval/test batches are sequential and strongly correlated,
+    so the SAME window is handed a different conditioning vector at eval than in training
+    -- measured on the H2 chirp benchmark: 41% relative error, cosine 0.92 between the two
+    normalisations. The denoiser then learns a mapping on one input distribution and is
+    scored on another, which makes conditioning actively HARMFUL (MSE_cond > MSE_uncond,
+    worsening as the model relies on conditioning more).
+
+    ``mode="sample"`` reduces over S only, so the result is a function of the window alone
+    and train/eval are identical by construction.
+    """
+    if mode not in ("batch", "sample"):
+        raise ValueError(f"Unknown cond norm mode '{mode}'. Use 'batch' or 'sample'.")
+    dims = (0, 1) if mode == "batch" else (1,)
+    m = cs.mean(dim=dims, keepdim=True)
+    v = cs.var(dim=dims, keepdim=True, unbiased=False)
     return (cs - m) / (v.sqrt() + eps)
 
 

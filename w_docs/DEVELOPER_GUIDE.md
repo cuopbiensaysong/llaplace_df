@@ -397,7 +397,14 @@ path, and the residues `theta [B,2K,D]` (the constant cₖ/bₖ) are reused unch
 - **`ChirpModalField`** (`models/laptrans.py`) — the one substantive new module.
   From the *same* pole-conditioning vector the LTI core uses, it predicts, per
   mode, nonnegative coefficients over a **fixed** Fourier basis
-  `φ_m(t̃)=1+cos(2π f_m t̃/L)` (≥0) with closed-form antiderivative `Φ_m` ("P-exact").
+  `φ_m(t̃)=1+s_m·cos(2π f_m t̃/L)` (≥0) with closed-form antiderivative `Φ_m` ("P-exact").
+  The harmonics are set by `CHIRP_BASIS`: `"half_integer"` (default) uses
+  `f = 0.5, 0.5, 1, 1, …` with alternating signs `s_m = ±1`, so a nonnegative combination
+  of a `(1+cos)`/`(1−cos)` pair spans a **signed** multiple of that cosine.
+  🔴 `"integer"` is the legacy set (`f = 1..M`, all `s_m = +1`): every basis function then
+  spans a whole number of cycles, so `φ_m(0)=φ_m(L)=2` is its maximum and the poles
+  **cannot drift** — `ω(0)=ω(L)=sup_t ω(t)` for every mode, making a monotone sweep
+  unrepresentable (`w_docs/CMD_BUG_REPORT.md`, B9). Pre-fix checkpoints keep it.
   This yields instantaneous `ρ_k(t̃)=ρ_floor_k+Σ_m a²·φ_m` and **exact integrated**
   `ρ̄_k(t̃)=ρ_floor_k·t̃+Σ_m a²·Φ_m` (ω analogous): `integrated(cond, t_rel)→(ρ̄,ω̄)`
   `[B,T,K]`, `seed_poles(cond)→(ρ₀,ω₀)` `[B,K]` (instantaneous at t̃=0, seeds
@@ -417,13 +424,24 @@ path, and the residues `theta [B,2K,D]` (the constant cₖ/bₖ) are reused unch
   → **the run's `config.PRED`** (a fixed per-run constant, so the pole function
   class is sample-independent); a number → itself; `"adaptive"` → the module's
   per-sample `L = max|t̃|.clamp_min(1e-6)` fallback. The resolved value is
-  persisted in the checkpoint. `seed_poles` is scale-invariant (`φ_m(0)=2`).
+  persisted in the checkpoint. `seed_poles` is scale-invariant (`φ_m(0)=1+s_m`, no `L`),
+  and reads the same centred/nonneg ρ convention as `instantaneous`/`integrated`.
 - **ω cap (Nyquist).** `_coeffs` smoothly rescales the ω coefficients so
   `sup_t̃ ω = floor + 2Σ_m a² ≤ ω_max = π` pointwise (per native step): the raw
   squares are multiplied by `headroom/(2Σa² + headroom)` with
   `headroom = π − floor`. The coefficients stay a plain linear combination of
   the basis (closed-form antiderivative preserved), the scale is 1 at zero
-  coefficients (LTI-at-init unchanged), and ρ needs no cap (only positivity).
+  coefficients (LTI-at-init unchanged). The signs leave this bound untouched, since
+  `sup_t̃ φ_m = 1+|s_m| = 2` either way.
+- **ρ cap (envelope survival).** ρ is capped too — ω is limited by *Nyquist* (what the
+  sampling rate resolves), ρ by what the **horizon** can carry: a mode with `ρ·H ≫ 1` is
+  extinct before the window ends. `CHIRP_RHO_MAX_SCALE` sets `ρ_max = scale/H` and the
+  floor is a bounded sigmoid rather than an unbounded softplus; `CHIRP_RHO_BASIS`
+  ("centered", default) uses `φ−1 = s·cos`, zero-mean over the window, so ρ variation adds
+  **no net decay** (`ρ̄(L) = ρ_floor·L`) and is bounded by `(floor − ρ_min)` so
+  `ρ ∈ [ρ_min, 2·floor]`. ("nonneg" is the legacy 1+cos convention.) Theorem B needs only
+  `ρ ≥ ρ_min > 0`, which the floor still guarantees. See
+  `w_docs/CMD_BUG_REPORT.md` (B6, B7).
 - **Synthesis** — `LaplaceTransformEncoder.chirp_basis_matrix(ρ̄,ω̄)` builds
   `e^{-ρ̄}[cos ω̄, sin ω̄]`; `LaplacePseudoInverse.forward` takes optional
   `rho_bar/omega_bar` and uses it in place of the constant-pole `basis_matrix`.

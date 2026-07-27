@@ -48,6 +48,11 @@ class LLapDiff(nn.Module):
         chirp_uq_head: bool = False,
         chirp_growth_budget: float = 0.0,
         chirp_parameterization: str = "p_exact",
+        pole_init_horizon: Optional[float] = None,
+        chirp_rho_basis: str = "nonneg",
+        chirp_omega_basis: str = "nonneg",
+        chirp_basis: str = "integer",
+        chirp_rho_max_scale: float = 4.0,
     ) -> None:
         super().__init__()
         if predict_type not in {"eps", "v", "x0"}:
@@ -94,6 +99,11 @@ class LLapDiff(nn.Module):
             chirp_uq_head=chirp_uq_head,
             chirp_growth_budget=chirp_growth_budget,
             chirp_parameterization=chirp_parameterization,
+            pole_init_horizon=pole_init_horizon,
+            chirp_rho_basis=chirp_rho_basis,
+            chirp_omega_basis=chirp_omega_basis,
+            chirp_basis=chirp_basis,
+            chirp_rho_max_scale=chirp_rho_max_scale,
         )
         self.time_dim = hidden_dim
 

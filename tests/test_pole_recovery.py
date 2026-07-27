@@ -131,6 +131,43 @@ def test_modal_contributions_lti_expands_constant_poles():
     torch.testing.assert_close(out["energy"], env * res2)
 
 
+def test_omega_eff_dyn_uses_instantaneous_weights():
+    """omega_eff weights modes by their TIME-AVERAGED energy, so it is a fixed convex
+    combination of the per-mode omega_k(t): for the lti core, whose omega_k are constant,
+    it is constant and its trend slope is identically 0 by construction rather than by
+    measurement. omega_eff_dyn weights by the instantaneous E_k(t), so differential decay
+    across constant-frequency modes -- a real way to produce a swept spectrum -- is
+    visible in it.
+    """
+    B, T, K, D = 1, 6, 2, 2
+    theta = torch.zeros(B, 2 * K, D)
+    theta[0, 0] = torch.tensor([1.0, 0.0])  # mode 0
+    theta[0, 1] = torch.tensor([1.0, 0.0])  # mode 1, equal residue energy
+    t_rel = torch.arange(0.0, T).view(1, T, 1)
+    # Mode 0 decays fast at the LOW frequency, mode 1 survives at the HIGH one, so the
+    # instantaneous mean frequency rises even though neither pole moves.
+    rho_c = torch.tensor([[0.5, 0.0]])
+    omega_c = torch.tensor([[0.2, 1.0]])
+    out = modal_contributions({
+        "modal_type": "lti", "theta": theta, "t_rel": t_rel,
+        "rho_const": rho_c, "omega_const": omega_c,
+    })
+
+    # Static weighting: constant in t (the tautology).
+    assert float(out["omega_eff"].max() - out["omega_eff"].min()) < 1e-6
+    # Instantaneous weighting: rises from ~the mean toward the surviving mode.
+    dyn = out["omega_eff_dyn"][0]
+    assert float(dyn[-1] - dyn[0]) > 0.3
+    assert float(dyn[0]) < 0.65 and float(dyn[-1]) > 0.95
+
+    # And it reduces to the static one when every mode shares a decay rate.
+    flat = modal_contributions({
+        "modal_type": "lti", "theta": theta, "t_rel": t_rel,
+        "rho_const": torch.tensor([[0.3, 0.3]]), "omega_const": omega_c,
+    })
+    torch.testing.assert_close(flat["omega_eff_dyn"], flat["omega_eff"])
+
+
 def test_contribution_ranking_ignores_zero_residue_junk_modes():
     """The P3 regression: a mode with huge pole variation but zero residues must
     rank BELOW a small quiet mode that carries all the output."""

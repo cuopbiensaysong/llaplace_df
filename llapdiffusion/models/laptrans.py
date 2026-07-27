@@ -1,4 +1,5 @@
 import math
+import warnings
 from typing import Optional, Tuple
 
 import torch
@@ -26,12 +27,78 @@ __all__ = [
     "LaplacePseudoInverse",
     "ChirpModalField",
     "CHIRP_PARAMETERIZATIONS",
+    "CHIRP_BASES",
     "RHO_CONDITIONING_MODES",
     "MODAL_TYPES",
+    "chirp_basis_freqs_signs",
+    "normalize_chirp_basis",
     "normalize_chirp_parameterization",
     "normalize_rho_conditioning_mode",
     "normalize_modal_type",
 ]
+
+
+CHIRP_BASES = ("half_integer", "integer")
+
+
+def normalize_chirp_basis(value: object) -> str:
+    """Harmonic set for the pole basis phi_m(t) = 1 + s_m cos(2 pi f_m t / L).
+
+    ``integer`` is the legacy set f_m = 1..M with every sign +1. Every basis function
+    then completes a WHOLE number of cycles across the window, so phi_m(0) = phi_m(L) = 2
+    is its maximum -- and with nonnegative (squared) coefficients that forces
+    omega(0) = omega(L) = sup_t omega(t) for EVERY mode. The instantaneous frequency can
+    only dip and return: a monotone sweep, or a peak inside the window, is not in the
+    function class at all. Measured against the H2 chirp truth, whose net drift across a
+    window is ~70% of its within-window range, the whole legacy span reaches only
+    R^2 = 0.35.
+
+    ``half_integer`` uses f_m in {0.5, 0.5, 1.0, 1.0, ...} with alternating signs, i.e.
+    each frequency present with BOTH signs. A nonnegative combination of the pair
+    (1 + cos) and (1 - cos) spans a constant plus a SIGNED multiple of cos, so f = 0.5
+    gives monotone sweeps in either direction and f = 1 gives V and Lambda shapes, with
+    no signed-coefficient machinery and every positivity guarantee untouched. Each
+    element still integrates to exactly zero over [0, L] (2 f_m is an integer), which is
+    what the ``centered`` rho basis needs, and |phi| <= 2, |phi - 1| <= 1 still hold so
+    the omega and rho headroom rescales are unchanged.
+    """
+    mode = str(value).strip().lower()
+    if mode not in CHIRP_BASES:
+        raise ValueError(f"Unknown chirp_basis '{value}'. Use one of {CHIRP_BASES}.")
+    return mode
+
+
+def chirp_basis_freqs_signs(basis: str, num_basis: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    """(freqs, signs) buffers for a basis mode; see :func:`normalize_chirp_basis`."""
+    mode = normalize_chirp_basis(basis)
+    m = int(num_basis)
+    if mode == "integer":
+        return torch.linspace(1.0, float(m), m), torch.ones(m)
+    # Pairs (f, +1), (f, -1) for f = 0.5, 1.0, 1.5, ... so both signs of every harmonic
+    # are available; an odd M drops the trailing negative partner.
+    freqs = (torch.arange(m, dtype=torch.float32) // 2 + 1).float() * 0.5
+    signs = torch.where(torch.arange(m) % 2 == 0, 1.0, -1.0)
+    return freqs, signs
+
+
+CHIRP_RHO_BASES = ("centered", "nonneg")
+
+
+def normalize_chirp_rho_basis(value: object) -> str:
+    """Basis used for the rho variation.
+
+    ``nonneg`` is the legacy phi = 1 + cos expansion: phi >= 0 guarantees rho > floor,
+    but mean_t phi = 1, so ANY rho variation also raises the mean decay by ~sum a^2.
+    With a near-zero true decay that damps every oscillatory mode to extinction inside
+    the horizon. ``centered`` uses phi - 1 = cos instead: over the window the basis
+    frequencies are whole cycles, so its integral is exactly zero and the variation
+    contributes NO net decay (rho_bar(L) = rho_floor * L). Positivity is then enforced
+    by a headroom rescale instead of by the sign of the basis.
+    """
+    mode = str(value).strip().lower()
+    if mode not in CHIRP_RHO_BASES:
+        raise ValueError(f"Unknown chirp_rho_basis '{value}'. Use one of {CHIRP_RHO_BASES}.")
+    return mode
 
 
 def normalize_rho_conditioning_mode(mode: object) -> str:
@@ -73,6 +140,7 @@ class LaplaceTransformEncoder(nn.Module):
         omega_perturb_scale: float = 0.5,
         rho_conditioning_mode: str = "raw",
         attn_dropout: float = 0.0,
+        rho_init_horizon: Optional[float] = None,
     ) -> None:
         super().__init__()
         self.k = int(k)
@@ -80,6 +148,9 @@ class LaplaceTransformEncoder(nn.Module):
         self.hidden_dim = int(hidden_dim)
         self.alpha_min = float(alpha_min)
         self.omega_max = float(omega_max)
+        # Horizon used to anchor the rho init so modes survive the forecast window
+        # (see reset_parameters). None keeps the legacy horizon-independent range.
+        self.rho_init_horizon = None if rho_init_horizon is None else float(rho_init_horizon)
         self.cond_dim = cond_dim
         self.attn_cond_dim = attn_cond_dim
         self.rho_perturb_scale = float(rho_perturb_scale)
@@ -156,8 +227,17 @@ class LaplaceTransformEncoder(nn.Module):
 
     def reset_parameters(self) -> None:
         with torch.no_grad():
-            # rho init in (0.01, 0.2)
-            target_rho = torch.empty_like(self._rho_raw).uniform_(0.01, 0.2)
+            # rho init anchored to the horizon when known: the envelope keeps
+            # e^{-rho*H} across the forecast, so the legacy horizon-independent
+            # (0.01, 0.2) kills oscillatory modes on long horizons (rho*H up to 9.6 at
+            # H=48, 33.6 at H=168) and leaves only near-DC modes alive. Scaling by
+            # 1/horizon keeps rho*H in [0.1, 2]. Applied to the LTI core too so
+            # chirp-vs-LTI stays a fair comparison.
+            if self.rho_init_horizon is not None and self.rho_init_horizon > 0:
+                lo, hi = 0.1 / self.rho_init_horizon, 2.0 / self.rho_init_horizon
+            else:
+                lo, hi = 0.01, 0.2
+            target_rho = torch.empty_like(self._rho_raw).uniform_(lo, hi)
             y = (target_rho - self.alpha_min).clamp_min(1e-8)
             self._rho_raw.copy_(torch.log(torch.expm1(y)))
 
@@ -385,14 +465,52 @@ class ChirpModalField(nn.Module):
         uq_head: bool = False,
         growth_budget: float = 0.0,
         parameterization: str = "p_exact",
+        rho_init_horizon: Optional[float] = None,
+        rho_max_scale: float = 4.0,
+        rho_basis: str = "nonneg",
+        omega_basis: str = "nonneg",
+        basis: str = "integer",
     ) -> None:
         super().__init__()
         self.k = int(k)
         self.cond_dim = int(cond_dim)
+        # Harmonic set for the pole basis. Defaults to the legacy integer-cycle set so a
+        # pre-fix checkpoint rebuilt without the kwarg keeps its own function class.
+        self.basis = normalize_chirp_basis(basis)
+        # Explicit horizon for the rho init; falls back to time_scale (see
+        # reset_parameters). Kept separate so the LTI arm can be given the same
+        # anchor even though it has no basis time scale.
+        self.rho_init_horizon = None if rho_init_horizon is None else float(rho_init_horizon)
+        # Upper cap on the instantaneous rho, analogous to the Nyquist cap on omega:
+        # rho_max = rho_max_scale / horizon keeps rho*H <= rho_max_scale so a mode's
+        # envelope survives the forecast window (see _coeffs). None disables the cap
+        # (legacy behaviour, and the only option when no horizon is known).
+        self.rho_max_scale = float(rho_max_scale)
+        self.rho_basis = normalize_chirp_rho_basis(rho_basis)
+        # Same centred/nonneg choice for the omega variation (same validator, same enum).
+        # "nonneg" is the legacy phi = 1 + s*cos expansion, whose mean-1 basis couples
+        # omega variation to omega MEAN: every unit of a^2 needed for shape also raises
+        # the mean frequency, and a redundant common mode within a +/- pair inflates it
+        # for free (measured on a trained half-integer model: 63% of the omega coefficient
+        # mass was redundant common mode, pushing mean omega to 1.23 vs a truth mean of
+        # 0.40). "centered" uses phi - 1 = s*cos, zero-mean over the window, so variation
+        # shapes omega(t) around the floor without shifting the mean -- the exact analogue
+        # of the rho fix. Defaults to "nonneg" so pre-fix checkpoints are unchanged.
+        self.omega_basis = normalize_chirp_rho_basis(omega_basis)
+        _rho_h = rho_init_horizon if rho_init_horizon is not None else time_scale
+        self.rho_max = (
+            float(self.rho_max_scale) / float(_rho_h)
+            if (_rho_h is not None and float(_rho_h) > 0 and self.rho_max_scale > 0)
+            else None
+        )
         self.num_basis = int(num_basis)
         self.rho_min = float(rho_min)
         self.omega_max = float(omega_max)
         self.parameterization = normalize_chirp_parameterization(parameterization)
+        # p_grid reads _rho_base through its OWN softplus (see _pgrid_inst) instead of
+        # _floor_poles, so re-parameterising the floor there would desynchronise the init
+        # from the readout. Bound the floor only for the variants that use _floor_poles.
+        self._rho_floor_bounded = self.rho_max is not None and self.parameterization != "p_grid"
         # Window length L that normalizes the basis frequencies to the time axis. A fixed
         # value gives reproducible, checkpoint-comparable chirps; None falls back to a
         # per-sample data-adaptive L = max|t_rel| (robust to units and irregular sampling).
@@ -403,9 +521,35 @@ class ChirpModalField(nn.Module):
         self._rho_base = nn.Parameter(torch.empty(self.k))
         self._omega_base = nn.Parameter(torch.empty(self.k))
 
-        # Fixed nonnegative basis frequencies (cycles across the window L; see _basis).
-        freqs = torch.linspace(1.0, float(self.num_basis), self.num_basis)
+        # Fixed nonnegative basis: phi_m = 1 + s_m cos(2 pi f_m t / L), frequencies in
+        # cycles across the window L (see _basis) and signs pairing each harmonic with
+        # its negative so the span covers monotone sweeps as well as dips
+        # (see normalize_chirp_basis).
+        freqs, signs = chirp_basis_freqs_signs(self.basis, self.num_basis)
         self.register_buffer("basis_freqs", freqs, persistent=True)
+        # NOT persistent: the signs are a pure function of (basis, num_basis), both of
+        # which the checkpoint's model_config already carries. Persisting them would add
+        # a state_dict key that pre-fix checkpoints lack, and two load paths are strict
+        # (viz/plot_llapdiff_poles.py, train_val_llapdiff._load_diff_model) -- every old
+        # chirp checkpoint would fail to load.
+        self.register_buffer("basis_signs", signs, persistent=False)
+
+        # The top basis frequency is max(f_m) cycles across L, i.e. max(f_m)/L cycles per
+        # step. Anything past L/2 cycles across the window is above the Nyquist limit of a
+        # unit-gap grid: it cannot be resolved by the data and only adds jitter to
+        # rho(t)/omega(t) (and quadratically many parameters to the coefficient head,
+        # 2*K*M outputs). Stated on max(f_m) so it holds for either basis mode.
+        max_freq = float(freqs.max())
+        if self.time_scale is not None and max_freq > self.time_scale / 2.0:
+            warnings.warn(
+                f"chirp basis top frequency {max_freq:g} cycles/window exceeds the Nyquist "
+                f"bound time_scale/2={self.time_scale / 2.0:.1f} for "
+                f"time_scale={self.time_scale}: "
+                f"{int((freqs > self.time_scale / 2.0).sum())} of {self.num_basis} basis "
+                "functions oscillate faster than the sampling grid can resolve.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
 
         print(f"self.num_basis: {self.num_basis}")
         print(f"self.rho_min: {self.rho_min}")
@@ -495,10 +639,32 @@ class ChirpModalField(nn.Module):
 
     def reset_parameters(self) -> None:
         with torch.no_grad():
-            # rho_floor in (0.01, 0.2) via rho_floor = rho_min + softplus(_rho_base)
-            target_rho = torch.empty_like(self._rho_base).uniform_(0.01, 0.2)
-            y = (target_rho - self.rho_min).clamp_min(1e-8)
-            self._rho_base.copy_(torch.log(torch.expm1(y)))
+            # rho_floor via rho_floor = rho_min + softplus(_rho_base).
+            #
+            # The decay scale that matters is rho*H (the envelope keeps e^{-rho*H} across
+            # the horizon), so a horizon-independent init silently kills modes on long
+            # horizons: the legacy (0.01, 0.2) spans rho*H in [0.5, 9.6] at H=48 and
+            # [1.7, 33.6] at H=168, i.e. nearly every oscillatory mode decays to nothing
+            # before the horizon ends and only near-DC modes survive. Anchoring the draw
+            # to 1/time_scale keeps rho*H in [0.1, 2] (envelope 0.9 -> 0.25) so modes stay
+            # alive long enough to carry an oscillation. time_scale=None (per-sample
+            # adaptive L) has no fixed horizon, so it keeps the legacy range.
+            horizon = self.rho_init_horizon
+            if horizon is None:
+                horizon = self.time_scale
+            if horizon is not None and horizon > 0:
+                lo, hi = 0.1 / horizon, 2.0 / horizon
+            else:
+                lo, hi = 0.01, 0.2
+            target_rho = torch.empty_like(self._rho_base).uniform_(lo, hi)
+            if self._rho_floor_bounded:
+                # Bounded floor: invert rho_min + (rho_max - rho_min) * sigmoid(base).
+                span = max(self.rho_max - self.rho_min, 1e-12)
+                p = ((target_rho - self.rho_min) / span).clamp(1e-4, 1 - 1e-4)
+                self._rho_base.copy_(torch.log(p) - torch.log1p(-p))
+            else:
+                y = (target_rho - self.rho_min).clamp_min(1e-8)
+                self._rho_base.copy_(torch.log(torch.expm1(y)))
 
             # omega_floor in [0.01, 0.95] * omega_max via omega_max * sigmoid(_omega_base)
             low_log = math.log(0.01 * self.omega_max)
@@ -512,7 +678,14 @@ class ChirpModalField(nn.Module):
     def _floor_poles(
         self, dtype: torch.dtype, device: torch.device
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        rho_floor = self.rho_min + F.softplus(self._rho_base.to(device=device, dtype=dtype))
+        base = self._rho_base.to(device=device, dtype=dtype)
+        if self._rho_floor_bounded:
+            # Bounded like omega_floor: rho_floor in (rho_min, rho_max). softplus is
+            # unbounded above, which lets the floor alone extinguish a mode at long
+            # horizons; sigmoid closes that path and makes the two poles symmetric.
+            rho_floor = self.rho_min + (self.rho_max - self.rho_min) * torch.sigmoid(base)
+        else:
+            rho_floor = self.rho_min + F.softplus(base)
         omega_floor = self.omega_max * torch.sigmoid(
             self._omega_base.to(device=device, dtype=dtype)
         )
@@ -526,15 +699,55 @@ class ChirpModalField(nn.Module):
         and the rescale bounds that sum by (omega_max - floor). The coefficients stay a
         plain linear combination of the basis, so the closed-form antiderivative is
         preserved; at zero coefficients the scale is 1 (LTI equivalence unchanged).
-        The decay coefficients need no cap (only positivity).
+
+        The decay coefficients get the SAME treatment against ``rho_max``. They are
+        squared, so the variation term can only push rho UP from its floor; with no cap
+        training inflates rho until the mode's own envelope e^{-rho_bar} extinguishes it
+        inside the horizon (measured: floor bounded to <= 0.042 by the horizon-anchored
+        init, yet learned rho reached 0.987 -- envelope mass 0.00 -- so the modes at the
+        signal frequency contributed nothing and only near-DC modes survived). omega is
+        capped by Nyquist; rho is capped by envelope survival over the horizon. Bounding
+        rho from ABOVE does not affect the Theorem-B contraction, which needs only
+        rho >= rho_min > 0 (guaranteed by the floor).
         """
         c = self.to_coeffs(cond).view(-1, 2, self.k, self.num_basis)
         a_rho2 = c[:, 0].pow(2)
         a_omega2 = c[:, 1].pow(2)
-        _, omega_floor = self._floor_poles(cond.dtype, cond.device)
-        headroom = (self.omega_max - omega_floor).view(1, self.k, 1)  # [1,K,1], > 0
-        total = 2.0 * a_omega2.sum(dim=-1, keepdim=True)  # [B,K,1]
-        a_omega2 = a_omega2 * (headroom / (total + headroom))
+        rho_floor, omega_floor = self._floor_poles(cond.dtype, cond.device)
+        if self.omega_basis == "centered":
+            # omega(t) = floor + sum a^2 (phi_m - 1), and |phi_m - 1| <= 1, so
+            # omega in [floor - S, floor + S] with S = sum a^2. Only the NYQUIST limit is
+            # a real constraint here: the sign of omega is a pure gauge, because the
+            # synthesis is sum_k e^{-rho_bar}(c_k cos omega_bar + b_k sin omega_bar) and
+            # omega -> -omega is absorbed exactly by b_k -> -b_k (free residues). So bound
+            # S by the distance to omega_max only.
+            #
+            # Do NOT also bound S by the floor "to keep omega >= 0": that couples the
+            # swing budget to the MEAN frequency, so a model hedging toward DC (small
+            # floor) simultaneously loses its ability to sweep -- a self-reinforcing trap.
+            # Measured on a K=1 checkpoint trained under that bound: floor 0.027 with the
+            # constraint 99.2% saturated, i.e. the sweep was clamped to 0.027 rad/step
+            # against a truth swing of 0.48.
+            omega_head = (self.omega_max - omega_floor).clamp_min(1e-8).view(1, self.k, 1)
+            omega_total = a_omega2.sum(dim=-1, keepdim=True)
+            a_omega2 = a_omega2 * (omega_head / (omega_total + omega_head))
+        else:
+            # Legacy nonneg basis: phi_m <= 2 so sup_t omega = floor + 2*sum a^2.
+            headroom = (self.omega_max - omega_floor).view(1, self.k, 1)  # [1,K,1], > 0
+            total = 2.0 * a_omega2.sum(dim=-1, keepdim=True)  # [B,K,1]
+            a_omega2 = a_omega2 * (headroom / (total + headroom))
+        if self.rho_basis == "centered":
+            # rho(t) = floor + sum a^2 (phi_m - 1), and |phi_m - 1| <= 1, so
+            # rho >= floor - sum a^2. Bounding sum a^2 by (floor - rho_min) keeps
+            # rho >= rho_min (Theorem B) and simultaneously caps rho <= 2*floor.
+            rho_head = (rho_floor - self.rho_min).clamp_min(1e-8).view(1, self.k, 1)
+            rho_total = a_rho2.sum(dim=-1, keepdim=True)
+            a_rho2 = a_rho2 * (rho_head / (rho_total + rho_head))
+        elif self.rho_max is not None:
+            # Legacy nonneg basis: phi_m <= 2 so sup_t rho = floor + 2*sum a^2.
+            rho_head = (self.rho_max - rho_floor).clamp_min(1e-8).view(1, self.k, 1)
+            rho_total = 2.0 * a_rho2.sum(dim=-1, keepdim=True)
+            a_rho2 = a_rho2 * (rho_head / (rho_total + rho_head))
         return a_rho2, a_omega2
 
     def _time_scale(self, t_rel: torch.Tensor) -> torch.Tensor:
@@ -553,14 +766,20 @@ class ChirpModalField(nn.Module):
         """Return (phi, Phi), each [B,T,M], for the nonnegative Fourier basis.
 
         Frequencies are normalized by ``time_scale`` (L) so they resolve a few cycles
-        across the window rather than per unit relative-time.
+        across the window rather than per unit relative-time. The per-basis sign s_m
+        keeps phi_m = 1 + s_m cos in [0, 2] (so every bound in ``_coeffs`` is unchanged)
+        while letting a nonnegative coefficient reach either sign of the harmonic --
+        without it, phi_m(0) = 2 is the maximum for every m and the poles cannot drift
+        across the window (see :func:`normalize_chirp_basis`).
         """
         two_pi_f = (2.0 * math.pi) * self.basis_freqs.to(
             device=t_rel.device, dtype=t_rel.dtype
         ) / time_scale  # [M] / [B,1,1] -> [B,1,M]
+        signs = self.basis_signs.to(device=t_rel.device, dtype=t_rel.dtype)  # [M]
         wt = t_rel * two_pi_f  # [B,T,1]*[B,1,M] -> [B,T,M]  (= 2 pi f * t/L)
-        phi = 1.0 + torch.cos(wt)
-        Phi = t_rel + torch.sin(wt) / two_pi_f  # Phi_m(0)=0; sin term ~ (L/2pi f) sin(2pi f t/L)
+        phi = 1.0 + signs * torch.cos(wt)
+        # Phi_m(0)=0; sin term ~ (L/2pi f) sin(2pi f t/L)
+        Phi = t_rel + signs * torch.sin(wt) / two_pi_f
         return phi, Phi
 
     def _pmono_params(
@@ -652,14 +871,17 @@ class ChirpModalField(nn.Module):
         time_scale = self._time_scale(t_rel)
         phi, _ = self._basis(t_rel, time_scale)  # [B,T,M]
         g_t = torch.einsum("bkm,btm->btk", g_coeff, phi)  # [B,T,K]
-        g_0 = 2.0 * g_coeff.sum(dim=-1)  # phi_m(0) = 2
+        # phi_m(0) = 1 + s_m (2 for a positive harmonic, 0 for its negative partner)
+        phi_0 = 1.0 + self.basis_signs.to(device=t_rel.device, dtype=t_rel.dtype)  # [M]
+        g_0 = (g_coeff * phi_0).sum(dim=-1)
         sig_t = torch.sigmoid(g_t)
         gamma = self.growth_budget * (sig_t - torch.sigmoid(g_0).unsqueeze(1))
 
         two_pi_f = (2.0 * math.pi) * self.basis_freqs.to(
             device=t_rel.device, dtype=t_rel.dtype
         ) / time_scale  # [B,1,M]
-        phi_prime = -torch.sin(t_rel * two_pi_f) * two_pi_f  # [B,T,M]
+        # d/dt [1 + s_m cos(2 pi f_m t/L)] = -s_m sin(...) * 2 pi f_m / L
+        phi_prime = -(phi_0 - 1.0) * torch.sin(t_rel * two_pi_f) * two_pi_f  # [B,T,M]
         g_prime = torch.einsum("bkm,btm->btk", g_coeff, phi_prime)
         gamma_prime = self.growth_budget * sig_t * (1.0 - sig_t) * g_prime
         return gamma, gamma_prime
@@ -684,8 +906,12 @@ class ChirpModalField(nn.Module):
             rho_floor, omega_floor = self._floor_poles(t_rel.dtype, t_rel.device)
             a_rho2, a_omega2 = self._coeffs(cond)  # [B,K,M]
             phi, _ = self._basis(t_rel, self._time_scale(t_rel))  # [B,T,M]
-            rho = rho_floor.view(1, 1, self.k) + torch.einsum("bkm,btm->btk", a_rho2, phi)
-            omega = omega_floor.view(1, 1, self.k) + torch.einsum("bkm,btm->btk", a_omega2, phi)
+            # Centred rho basis: phi - 1 = cos, zero-mean over the window, so the
+            # variation shapes rho(t) without adding net decay.
+            phi_rho = phi - 1.0 if self.rho_basis == "centered" else phi
+            phi_omega = phi - 1.0 if self.omega_basis == "centered" else phi
+            rho = rho_floor.view(1, 1, self.k) + torch.einsum("bkm,btm->btk", a_rho2, phi_rho)
+            omega = omega_floor.view(1, 1, self.k) + torch.einsum("bkm,btm->btk", a_omega2, phi_omega)
         if self.growth_budget > 0:
             _, gamma_prime = self._growth_terms(cond, t_rel)
             rho = rho - gamma_prime
@@ -792,8 +1018,13 @@ class ChirpModalField(nn.Module):
             rho_floor, omega_floor = self._floor_poles(t_rel.dtype, t_rel.device)
             a_rho2, a_omega2 = self._coeffs(cond)  # [B,K,M]
             _, Phi = self._basis(t_rel, self._time_scale(t_rel))  # [B,T,M]
-            rho_var = torch.einsum("bkm,btm->btk", a_rho2, Phi)
-            omega_var = torch.einsum("bkm,btm->btk", a_omega2, Phi)
+            # Antiderivative of the centred basis: int (phi - 1) = Phi - t. Still closed
+            # form (Theorem A); at t = L the basis frequencies are whole cycles so this
+            # is exactly zero => rho_bar(L) = rho_floor * L, decay set purely by the floor.
+            Phi_rho = Phi - t_rel if self.rho_basis == "centered" else Phi
+            Phi_omega = Phi - t_rel if self.omega_basis == "centered" else Phi
+            rho_var = torch.einsum("bkm,btm->btk", a_rho2, Phi_rho)
+            omega_var = torch.einsum("bkm,btm->btk", a_omega2, Phi_omega)
             rho_bar = rho_floor.view(1, 1, self.k) * t_rel + rho_var
             omega_bar = omega_floor.view(1, 1, self.k) * t_rel + omega_var
         if self.growth_budget > 0:
@@ -818,9 +1049,16 @@ class ChirpModalField(nn.Module):
                 rho_floor.view(1, self.k) + rho_var.squeeze(1),
                 omega_floor.view(1, self.k) + omega_var.squeeze(1),
             )
-        a_rho2, a_omega2 = self._coeffs(cond)  # [B,K,M]  (phi_m(0) = 2)
-        rho0 = rho_floor.view(1, self.k) + 2.0 * a_rho2.sum(dim=-1)
-        omega0 = omega_floor.view(1, self.k) + 2.0 * a_omega2.sum(dim=-1)
+        a_rho2, a_omega2 = self._coeffs(cond)  # [B,K,M]
+        # phi_m(0) = 1 + s_m; scale-invariant either way, so no time_scale is needed here.
+        # rho reads the same centred basis (phi - 1) that instantaneous/integrated use --
+        # otherwise the seeded analysis poles disagree with the poles that synthesize the
+        # output, by a factor of 2 at t=0 under rho_basis="centered".
+        phi_0 = 1.0 + self.basis_signs.to(device=cond.device, dtype=cond.dtype)  # [M]
+        phi_0_rho = phi_0 - 1.0 if self.rho_basis == "centered" else phi_0
+        phi_0_omega = phi_0 - 1.0 if self.omega_basis == "centered" else phi_0
+        rho0 = rho_floor.view(1, self.k) + (a_rho2 * phi_0_rho).sum(dim=-1)
+        omega0 = omega_floor.view(1, self.k) + (a_omega2 * phi_0_omega).sum(dim=-1)
         return rho0, omega0
 
 

@@ -750,6 +750,20 @@ about the model (see the prereg amendment in `cmd_plan_v2.md` §H2).
 `--num-recovery-windows` (default 4) windows are stratified across the test
 span; each row is annotated with entity, window start, and t_norm span.
 
+**Modal budget and recovery honesty (added 2026-07-21).** `--laplace-k K` and
+`--chirp-num-basis M` pin the modal budget explicitly instead of inheriting it from
+`configs/config.py` (M=256 leaked into the H2 runs that way; keep `M ≤ horizon/2` or the
+model warns that the basis is past Nyquist). Non-default values tag the denoiser
+directory, so the cells of a K/M scan keep separate checkpoints while sharing stage 1/2.
+`--recovery-guidance 1.0` pins the CFG strength for the pole capture so the recovered
+poles belong to the returned forecast rather than the conditional half of a guided blend,
+and `--recovery-draws N` (default 3) averages the E_k weighting over N DDIM draws. Two
+tracking metrics land in the CSV/JSON: `omega_trend_slope` (OLS slope of the recovered
+ω_eff on truth — 1 tracks the within-window sweep, 0 is flat, NaN when truth is constant)
+and `forecast_freq_slope` (the same regression applied to the instantaneous frequency of
+the **forecast**, estimated by a short-time fit — identifiable regardless of how the modes
+divide the signal up). A ready-made scan is in `ldt/scripts/run_fig2_stage0_scan.sh`.
+
 **Within-window sweep (`--sweep-period`).** The legacy task profiles ramp over
 the whole series, so a single window sees only ~6% of the pole excursion — too
 little for the "LTI fails structurally" contrast. `--sweep-period P` turns the

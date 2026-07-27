@@ -87,6 +87,39 @@ def _parse_args() -> argparse.Namespace:
              "(recommended ~window+horizon). Piecewise change-point tasks ignore it. "
              "Default None keeps the legacy slow series-long ramp.",
     )
+    # Per-entity phase spread. The set-VAE mean-pools across entities before the latent
+    # (latent_vae.py), so a panel of independently-phased sinusoids cancels and the
+    # carrier never reaches the latent -- the measured round-trip ceiling of ~0.6 that
+    # capped every H2 result. Entities sharing a phase (differing in amplitude/baseline,
+    # which the static entity embeddings can carry) keep the shared pole function, which
+    # is the thing H2 sets out to test.
+    parser.add_argument(
+        "--phase-spread", type=float, default=2.0 * math.pi,
+        help="Width of the per-entity phase draw, U(0, spread). Default 2*pi is the "
+             "historical behaviour; 0 makes every entity share a phase.",
+    )
+    # Sweep amplitude. A constant-pole (LTI) forecast desyncs from a chirp by a phase
+    # error ~ Delta_omega * H / 12 over the horizon; at the default the within-window
+    # Delta_omega ~ 0.13 rad/step gives only ~0.5 rad of desync, so LTI never
+    # structurally fails and the benchmark cannot separate the arms. Raising the
+    # frequency multiplier steepens omega(t): mult=4 gives Delta_omega ~ 0.5 rad/step
+    # (~2 rad desync, a third of a cycle) -- the regime H2 needs. Applies to the
+    # frequency-ramp tasks (linear/quadratic chirp, freq shift).
+    parser.add_argument(
+        "--freq-multiplier", type=float, default=2.0,
+        help="Ratio omega_max/omega_min of the frequency sweep (default 2.0). Higher "
+             "makes the within-window chirp steeper so LTI structurally fails.",
+    )
+    # Base frequency (cycles/step). Pinning it removes the random draw AND lets the
+    # sweep be made steep at a LOW absolute omega: LTI failure needs Delta_omega, but
+    # phase predictability needs a low omega_max (fm-4 reached 1.04 rad/step ~ 6.7
+    # cycles over h=48, where the phase is unpredictable and BOTH arms hedge to DC).
+    parser.add_argument(
+        "--base-frequency", type=float, default=None,
+        help="Pin the base frequency in cycles/step (default None = random draw in "
+             "[1/48, 1/24]). Use with --freq-multiplier to steepen the sweep while "
+             "keeping omega_max low enough that the phase stays predictable.",
+    )
     parser.add_argument("--change-point", type=int, default=None, help="Defaults to 3/4 of the series.")
     parser.add_argument("--num-entities", type=int, default=64)
     parser.add_argument(
@@ -104,8 +137,70 @@ def _parse_args() -> argparse.Namespace:
         type=str,
         default=str(DEFAULT_WORK_ROOT / "ldt" / "results" / "chirp_benchmark"),
     )
+    # Modal budget. These were previously hardcoded / inherited from the base config,
+    # which is how CHIRP_NUM_BASIS=256 (10x super-Nyquist at H=48) silently leaked into
+    # the H2 runs. Both are recorded in every result row.
+    parser.add_argument("--laplace-k", type=int, default=256,
+                        help="Number of modes K. The synthetic latents are ~rank 2, so "
+                             "large K makes the per-mode decomposition non-identifiable.")
+    parser.add_argument("--chirp-num-basis", type=int, default=None,
+                        help="Pole-function basis size M (chirp arm). Default None keeps "
+                             "the base config; keep M <= horizon/2 to stay under Nyquist.")
+    # Denoiser training schedule. The default (80 epochs, early-stop on the v-MSE
+    # proxy) stopped the denoiser at ~epoch 19 with a weak forecast, confounding the
+    # recovery figure. A recovery-quality run should train longer and select on CRPS
+    # (auto when --epochs > 80). Non-default --epochs tags the denoiser dir so it does
+    # not clobber the short-schedule checkpoints.
+    parser.add_argument("--epochs", type=int, default=80,
+                        help="Denoiser training epochs. >80 also switches selection to CRPS.")
+    parser.add_argument("--early-stop", type=int, default=8,
+                        help="Denoiser early-stop patience (epochs).")
+    # The chirp pole-variation coefficients are eps-initialised (std 1e-4) and must grow
+    # ~1000x to express a real sweep; a higher LR grows them faster within the budget.
+    # The user reports higher LR improves the chirp arm on real data. Tagged _lr-NNN.
+    parser.add_argument("--base-lr", type=float, default=1.5e-4,
+                        help="Denoiser base learning rate (default 1.5e-4).")
+    # rho health: the centred basis decouples rho variation from mean decay; the cap
+    # bounds the rho floor at rho_max_scale/H so modes survive the horizon.
+    parser.add_argument("--chirp-rho-basis", choices=("centered", "nonneg"), default=None,
+                        help="Chirp rho basis. Default None keeps the base config "
+                             "(centered); 'nonneg' reproduces the legacy 1+cos basis.")
+    parser.add_argument("--chirp-rho-max-scale", type=float, default=None,
+                        help="rho_max = scale/horizon (default None keeps base config, 4.0).")
+    parser.add_argument("--chirp-omega-basis", choices=("centered", "nonneg"), default=None,
+                        help="Chirp omega basis. Default None keeps the base config "
+                             "(centered); 'nonneg' reproduces the legacy 1+cos basis, whose "
+                             "mean-1 shape taxes every unit of sweep with a mean-frequency "
+                             "shift.")
+    # Pole-basis harmonics. The legacy integer-cycle set pins omega(0) = omega(L) for
+    # every mode, so a monotone sweep -- what the chirp truth actually does across a
+    # window -- is not in the function class at all (R^2 0.35 vs 0.99).
+    # Conditioning normalisation. "batch" (legacy) z-scores over (batch, sequence), so a
+    # window's conditioning depends on its batch-mates; training batches are shuffled and
+    # eval batches sequential, so the same window is conditioned differently at eval than
+    # in training (measured: 41% relative error, cos 0.92) and conditioning became harmful.
+    parser.add_argument("--cond-norm-mode", choices=("sample", "batch"), default=None,
+                        help="History-summary conditioning normalisation. Default None "
+                             "keeps the base config (sample); 'batch' reproduces the "
+                             "legacy batch-composition-dependent normalisation.")
+    parser.add_argument("--chirp-basis", choices=("half_integer", "integer"), default=None,
+                        help="Chirp pole basis harmonics. Default None keeps the base "
+                             "config (half_integer); 'integer' reproduces the legacy "
+                             "drift-free basis.")
     parser.add_argument("--num-recovery-windows", type=int, default=4)
     parser.add_argument("--recovery-top-modes", type=int, default=4)
+    parser.add_argument(
+        "--recovery-draws", type=int, default=3,
+        help="DDIM noise draws per recovery window. The poles are deterministic given "
+             "the conditioning but the residues (hence the E_k weights) are not, so a "
+             "single draw gives a noisy trend slope.",
+    )
+    parser.add_argument(
+        "--recovery-guidance", type=float, default=None,
+        help="Override CFG strength for the recovery capture only (use 1.0 so the "
+             "captured poles ARE the forecast's, not the conditional half of a blend). "
+             "Default None keeps the TEST guidance schedule.",
+    )
     parser.add_argument(
         "--recovery-share-threshold", type=float, default=0.5,
         help="Minimum output-energy share the selected modes must explain; below it "
@@ -150,6 +245,14 @@ def _gap_tag(args: argparse.Namespace) -> str:
     return f"gaps-gamma-m{float(args.gap_mean):g}-k{float(args.gap_shape):g}"
 
 
+def _phase_spread(args: argparse.Namespace) -> float:
+    return float(getattr(args, "phase_spread", 2.0 * math.pi))
+
+
+def _freq_multiplier(args: argparse.Namespace) -> float:
+    return float(getattr(args, "freq_multiplier", 2.0))
+
+
 def _task_sweep_period(task: str, args: argparse.Namespace) -> Optional[float]:
     """--sweep-period applies only to the smooth-ramp tasks; the piecewise
     change-point tasks keep their design (the generator would reject it)."""
@@ -157,6 +260,122 @@ def _task_sweep_period(task: str, args: argparse.Namespace) -> Optional[float]:
     if period is None or task not in _SMOOTH_RAMP_TASKS:
         return None
     return float(period)
+
+
+def _checkpoint_best_epoch(path: object) -> Optional[int]:
+    """The epoch the evaluated checkpoint was saved at -- an undertraining tell. A
+    best_epoch far below --epochs means early stopping fired; a weak forecast then
+    reflects the schedule, not the model."""
+    try:
+        payload = torch.load(str(path), map_location="cpu", weights_only=False)
+    except (OSError, RuntimeError):
+        return None
+    epoch = payload.get("epoch") if isinstance(payload, dict) else None
+    return int(epoch) if isinstance(epoch, (int, float)) else None
+
+
+def _ckpt_stamp(path: object) -> Optional[str]:
+    """UTC mtime of a checkpoint, or None if absent.
+
+    Recorded per result row because BOTH H2 corruptions so far were stale artifacts
+    silently reused from a shared directory: a 6-day-old ``_best_raw.pt`` evaluated
+    instead of the run's own model, and a previous cache's VAE/summarizer conditioning
+    a denoiser trained on new data. Comparing these stamps against the run time turns
+    that audit into a column instead of a manual check.
+    """
+    if not path:
+        return None
+    try:
+        ts = Path(str(path)).stat().st_mtime
+    except OSError:
+        return None
+    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat(timespec="seconds")
+
+
+def _model_tag(args: argparse.Namespace) -> str:
+    """Denoiser-directory suffix for non-default modal budgets, so the cells of a
+    K/M scan keep separate checkpoints. Empty at the defaults (paths unchanged)."""
+    tag = ""
+    if int(getattr(args, "laplace_k", 256)) != 256:
+        tag += f"_k-{int(args.laplace_k)}"
+    if getattr(args, "chirp_num_basis", None) is not None:
+        tag += f"_m-{int(args.chirp_num_basis)}"
+    if int(getattr(args, "epochs", 80)) != 80:
+        tag += f"_ep-{int(args.epochs)}"
+    if abs(float(getattr(args, "base_lr", 1.5e-4)) - 1.5e-4) > 1e-12:
+        tag += f"_lr-{float(args.base_lr):g}"
+    if getattr(args, "chirp_rho_basis", None) is not None:
+        tag += f"_rb-{args.chirp_rho_basis}"
+    if getattr(args, "chirp_omega_basis", None) is not None:
+        tag += f"_ob-{args.chirp_omega_basis}"
+    if getattr(args, "chirp_rho_max_scale", None) is not None:
+        tag += f"_rmax-{float(args.chirp_rho_max_scale):g}"
+    if getattr(args, "chirp_basis", None) is not None:
+        tag += f"_cb-{args.chirp_basis}"
+    if getattr(args, "cond_norm_mode", None) is not None:
+        tag += f"_cn-{args.cond_norm_mode}"
+    return tag
+
+
+def trend_slope(y_hat: np.ndarray, y_true: np.ndarray) -> float:
+    """OLS slope of y_hat regressed on y_true: 1.0 = tracks the sweep, 0.0 = flat.
+
+    This is the structural discriminator for the signature figure. The window MEAN
+    can match while the trajectory is flat, so RMSE alone cannot separate a model
+    that tracks the chirp from one that predicts its average.
+    """
+    x = np.asarray(y_true, dtype=np.float64)
+    y = np.asarray(y_hat, dtype=np.float64)
+    xc = x - x.mean()
+    var = float((xc**2).sum())
+    if var <= 1e-30:
+        return float("nan")  # constant truth: slope is undefined, not zero
+    return float((xc * (y - y.mean())).sum() / var)
+
+
+def short_time_frequency(
+    t: np.ndarray,
+    z: np.ndarray,
+    *,
+    win: float = 16.0,
+    stride: float = 4.0,
+    num_freqs: int = 200,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Instantaneous frequency of a multichannel trajectory on an irregular grid.
+
+    Fits ``a cos(w s) + b sin(w s) + c`` jointly across channels inside a sliding
+    window and keeps the ``w`` minimizing total squared error. Unlike the recovered
+    poles this is a functional of the model's OUTPUT, so it is well defined however
+    the modes divide the signal up -- the identifiable alternative to per-mode
+    recovery. Returns (centers [T'], omega [T'] in rad/step).
+    """
+    t = np.asarray(t, dtype=np.float64).ravel()
+    z = np.asarray(z, dtype=np.float64)
+    if z.ndim == 1:
+        z = z[:, None]
+    grid = np.linspace(0.02, np.pi, int(num_freqs))
+    centers, out = [], []
+    start, stop = t[0] + win / 2.0, t[-1] - win / 2.0
+    for c in np.arange(start, stop + 1e-9, stride):
+        sel = np.abs(t - c) <= win / 2.0
+        if int(sel.sum()) < 8:
+            continue
+        ts, zs = t[sel] - c, z[sel]
+        zs = zs - zs.mean(axis=0, keepdims=True)
+        keep = zs.std(axis=0) > 1e-9
+        if not keep.any():
+            continue
+        zs = zs[:, keep]
+        best_w, best_sse = float("nan"), float("inf")
+        for w in grid:
+            X = np.stack([np.cos(w * ts), np.sin(w * ts), np.ones_like(ts)], axis=1)
+            beta, *_ = np.linalg.lstsq(X, zs, rcond=None)
+            sse = float(((zs - X @ beta) ** 2).sum())
+            if sse < best_sse:
+                best_sse, best_w = sse, float(w)
+        centers.append(float(c))
+        out.append(best_w)
+    return np.asarray(centers), np.asarray(out)
 
 
 def _cache_dir(task: str, args: argparse.Namespace) -> Path:
@@ -167,6 +386,15 @@ def _cache_dir(task: str, args: argparse.Namespace) -> Path:
     period = _task_sweep_period(task, args)
     if period is not None:
         tag += f"_sweep-{period:g}"
+    spread = _phase_spread(args)
+    if abs(spread - 2.0 * math.pi) > 1e-9:
+        tag += f"_phase-{spread:g}"
+    mult = _freq_multiplier(args)
+    if abs(mult - 2.0) > 1e-9:
+        tag += f"_fm-{mult:g}"
+    base_f = getattr(args, "base_frequency", None)
+    if base_f is not None:
+        tag += f"_bf-{float(base_f):g}"
     return (Path(args.data_root) / task / tag).resolve()
 
 
@@ -185,8 +413,15 @@ def _prepare_cache(task: str, args: argparse.Namespace) -> Mapping[str, object]:
         gap_mean=float(args.gap_mean),
         gap_shape=float(args.gap_shape),
         sweep_period=_task_sweep_period(task, args),
+        phase_min=0.0,
+        phase_max=_phase_spread(args),
+        freq_multiplier=_freq_multiplier(args),
         overwrite=bool(args.overwrite_data),
     )
+    base_f = getattr(args, "base_frequency", None)
+    if base_f is not None:
+        cfg.frequency_min = float(base_f)
+        cfg.frequency_max = float(base_f)
     return prepare_synthetic_regime_cache(cfg)
 
 
@@ -195,6 +430,10 @@ def _configure(task: str, arm: str, seed: int, args: argparse.Namespace) -> Simp
     (task, seed) so both arms condition on identical frozen upstream artifacts."""
     cfg = clone_config()
     base = (Path(args.artifact_root) / task / f"seed-{int(seed)}").resolve()
+    # Stage 1/2 are independent of the modal budget, so VAE/summarizer stay shared per
+    # (task, seed); only the denoiser directory is tagged, so a K/M scan cannot have its
+    # cells overwrite each other's checkpoints.
+    arm_dir = f"{arm}{_model_tag(args)}"
     cfg.DATASET_KEY = task
     cfg.MKT = task
     cfg.SEED = int(seed)
@@ -213,7 +452,7 @@ def _configure(task: str, arm: str, seed: int, args: argparse.Namespace) -> Simp
     cfg.PREDICT_TYPE = "v"
     cfg.LOSS_WEIGHT_SCHEME = "weighted_min_snr"
     cfg.MINSNR_GAMMA = 5.0
-    cfg.BASE_LR = 1.5e-4
+    cfg.BASE_LR = float(getattr(args, "base_lr", 1.5e-4))
     cfg.LR_SCHEDULE = "warmup_constant"
     cfg.PRIMARY_EVAL_METRIC = "val_diag_mse_raw"
     cfg.TARGET_MASK_AUX_P = 0.0
@@ -223,13 +462,20 @@ def _configure(task: str, arm: str, seed: int, args: argparse.Namespace) -> Simp
     cfg.MODEL_WIDTH = 256
     cfg.NUM_LAYERS = 5
     cfg.NUM_HEADS = 4
-    cfg.LAPLACE_K = 256
-    cfg.EPOCHS = 80
-    cfg.EARLY_STOP = 8
-    cfg.EARLY_STOP_MIN_EPOCHS = 20
+    cfg.LAPLACE_K = int(getattr(args, "laplace_k", 256))
+    cfg.EPOCHS = int(getattr(args, "epochs", 80))
+    cfg.EARLY_STOP = int(getattr(args, "early_stop", 8))
+    cfg.EARLY_STOP_MIN_EPOCHS = min(20, cfg.EPOCHS)
     cfg.EVAL_EVERY = 1
     cfg.VAL_DIAG_EVERY = 1
-    cfg.DOWNSTREAM_EVAL_EVERY = 10
+    # Selecting the denoiser on the cheap v-MSE proxy stopped it at ~epoch 19 with a
+    # weak forecast; select on CRPS (and score it often enough for early stopping to
+    # see it) whenever a longer schedule is requested for a recovery-quality run.
+    if int(getattr(args, "epochs", 80)) > 80:
+        cfg.PRIMARY_EVAL_METRIC = "crps"
+        cfg.DOWNSTREAM_EVAL_EVERY = 5
+    else:
+        cfg.DOWNSTREAM_EVAL_EVERY = 10
     cfg.IRREG_CHECK_EVERY = 0
     cfg.EMA_COMPARE_EVERY = 0
     cfg.NUM_EVAL_SAMPLES = 10
@@ -239,9 +485,22 @@ def _configure(task: str, arm: str, seed: int, args: argparse.Namespace) -> Simp
     cfg.GEN_ETA = 0.0
     cfg.DIFF_AMP = False
 
-    # Arm selection (chirp keeps CHIRP_* base defaults; time scale resolves to PRED).
+    # Arm selection (time scale resolves to PRED). CHIRP_* otherwise keep the base
+    # config; --chirp-num-basis pins M explicitly instead of inheriting it silently.
     cfg.DENOISER_MODAL_TYPE = str(arm)
     cfg.DENOISER_OUTPUT_HEAD = "auto"
+    if getattr(args, "chirp_num_basis", None) is not None:
+        cfg.CHIRP_NUM_BASIS = int(args.chirp_num_basis)
+    if getattr(args, "chirp_rho_basis", None) is not None:
+        cfg.CHIRP_RHO_BASIS = str(args.chirp_rho_basis)
+    if getattr(args, "chirp_omega_basis", None) is not None:
+        cfg.CHIRP_OMEGA_BASIS = str(args.chirp_omega_basis)
+    if getattr(args, "chirp_rho_max_scale", None) is not None:
+        cfg.CHIRP_RHO_MAX_SCALE = float(args.chirp_rho_max_scale)
+    if getattr(args, "chirp_basis", None) is not None:
+        cfg.CHIRP_BASIS = str(args.chirp_basis)
+    if getattr(args, "cond_norm_mode", None) is not None:
+        cfg.COND_NORM_MODE = str(args.cond_norm_mode)
 
     if args.smoke:
         cfg.EPOCHS = 1
@@ -261,9 +520,9 @@ def _configure(task: str, arm: str, seed: int, args: argparse.Namespace) -> Simp
 
     cfg.VAE_DIR = str(base / "vae")
     cfg.SUM_DIR = str(base / "summarizer")
-    cfg.CKPT_DIR = str(base / arm / "checkpoints")
-    cfg.OUT_DIR = str(base / arm / "output")
-    cfg.POLE_PLOT_DIR = str(base / arm / "output" / "pole_plots")
+    cfg.CKPT_DIR = str(base / arm_dir / "checkpoints")
+    cfg.OUT_DIR = str(base / arm_dir / "output")
+    cfg.POLE_PLOT_DIR = str(base / arm_dir / "output" / "pole_plots")
     cfg.VAE_CKPT = str(
         Path(cfg.VAE_DIR) / f"pred-{cfg.PRED}_ch-{cfg.VAE_LATENT_CHANNELS}_entity_elbo.pt"
     )
@@ -272,6 +531,36 @@ def _configure(task: str, arm: str, seed: int, args: argparse.Namespace) -> Simp
     cfg.TARGET_COLS = None
     apply_verbosity(cfg, verbose=bool(args.verbose), debug=bool(args.debug))
     return cfg
+
+
+def _artifact_cache_guard(cfg: SimpleNamespace, args: argparse.Namespace) -> None:
+    """Refuse to reuse stage-1/2 artifacts built from a DIFFERENT cache.
+
+    ``_train_or_reuse_stack`` reuses the VAE/summarizer whenever their files exist,
+    but the artifact directory is keyed by (task, seed) only -- it does not encode
+    the cache. Changing the sampling law or adding ``--sweep-period`` therefore
+    trained the denoiser on new data while silently conditioning it on a summarizer
+    and VAE fitted to the old data. Stamp the cache identity and fail loudly instead.
+    """
+    base = Path(cfg.VAE_DIR).parent
+    stamp = base / "artifact_cache.json"
+    payload = {
+        "data_dir": str(cfg.DATA_DIR),
+        "window": int(cfg.WINDOW),
+        "horizon": int(cfg.PRED),
+    }
+    if stamp.exists() and not args.recompute_artifacts:
+        previous = json.loads(stamp.read_text())
+        if previous != payload:
+            raise RuntimeError(
+                f"Artifacts in '{base}' were built from a different cache:\n"
+                f"  existing: {previous}\n  requested: {payload}\n"
+                "Reusing them would condition the denoiser on a VAE/summarizer fitted "
+                "to other data. Re-run with --recompute-artifacts, or point "
+                "--artifact-root at a fresh directory."
+            )
+    base.mkdir(parents=True, exist_ok=True)
+    stamp.write_text(json.dumps(payload, indent=2, sort_keys=True))
 
 
 def _build_loaders(cfg: SimpleNamespace):
@@ -325,14 +614,25 @@ def _stratified_pick(
     return [cands[i] for i in idx]
 
 
-def _generate_kwargs(cfg: SimpleNamespace) -> Dict[str, object]:
-    """The evaluation sampling settings, restricted to ``generate()``'s surface."""
+def _generate_kwargs(
+    cfg: SimpleNamespace, *, guidance: Optional[float] = None
+) -> Dict[str, object]:
+    """The evaluation sampling settings, restricted to ``generate()``'s surface.
+
+    ``guidance`` overrides the CFG strength. The TEST schedule is (1.0, 2.0) with
+    power 0.3, which reaches ~2.0 at the FINAL step -- exactly where the poles are
+    captured -- so the captured modal state belongs to the conditional half of a
+    guided blend rather than to the returned forecast. Pass 1.0 to make them the same.
+    """
     sampling = tv._sampling_kwargs(cfg, prefix="TEST")
     keys = (
         "steps", "guidance_strength", "guidance_power", "eta",
         "dynamic_thresh_p", "dynamic_thresh_max", "rho",
     )
-    return {k: sampling[k] for k in keys}
+    out = {k: sampling[k] for k in keys}
+    if guidance is not None:
+        out["guidance_strength"] = float(guidance)
+    return out
 
 
 @torch.no_grad()
@@ -363,8 +663,10 @@ def _recover_pole_trajectories(
     window = int(cfg.WINDOW)
     horizon = int(cfg.PRED)
     latent_dim = int(mu_mean.shape[-1])
-    sampling = _generate_kwargs(cfg)
+    guidance = getattr(args, "recovery_guidance", None)
+    sampling = _generate_kwargs(cfg, guidance=guidance)
     threshold = float(getattr(args, "recovery_share_threshold", 0.5))
+    draws = max(1, int(getattr(args, "recovery_draws", 1)))
 
     # Pass 1 (meta only): enumerate candidate windows, then stratify by start.
     candidates: List[Tuple[int, int, int, int]] = []
@@ -401,21 +703,51 @@ def _recover_pole_trajectories(
         dt_model = tv._match_dt_to_horizon(dt_b, horizon)
 
         for _, row, aid, start in chosen[b_idx]:
+            # The poles are deterministic given the conditioning, but the residues --
+            # hence the E_k weights and the effective trajectory -- depend on the DDIM
+            # noise, so average the weighting over several draws.
             capture: Dict[str, torch.Tensor] = {}
-            gen = torch.Generator(device=device)
-            gen.manual_seed(int(cfg.SEED) * 100003 + start * 31 + aid)
-            diff_model.generate(
-                shape=(1, horizon, latent_dim),
-                cond_summary=cond_summary[row : row + 1],
-                cond_summary_raw=cond_summary_raw[row : row + 1],
-                dt=dt_model[row : row + 1],
-                cfg_rescale=True,
-                generator=gen,
-                modal_capture=capture,
-                **sampling,
-            )
-            con = modal_contributions(capture)
-            share = con["energy_share"][0].numpy()
+            draw_share, draw_omega_eff, draw_rho_eff, draw_if = [], [], [], []
+            draw_omega_eff_dyn: List[np.ndarray] = []
+            if_centers = np.empty(0)
+            for d in range(draws):
+                capture = {}
+                gen = torch.Generator(device=device)
+                gen.manual_seed(int(cfg.SEED) * 100003 + start * 31 + aid + 7919 * d)
+                x0 = diff_model.generate(
+                    shape=(1, horizon, latent_dim),
+                    cond_summary=cond_summary[row : row + 1],
+                    cond_summary_raw=cond_summary_raw[row : row + 1],
+                    dt=dt_model[row : row + 1],
+                    cfg_rescale=True,
+                    generator=gen,
+                    modal_capture=capture,
+                    **sampling,
+                )
+                con = modal_contributions(capture)
+                draw_share.append(con["energy_share"][0].numpy())
+                draw_omega_eff.append(con["omega_eff"][0].numpy())
+                draw_rho_eff.append(con["rho_eff"][0].numpy())
+                draw_omega_eff_dyn.append(con["omega_eff_dyn"][0].numpy())
+                # Option-3 observable: instantaneous frequency of the FORECAST itself,
+                # which is well defined however the modes split the signal up.
+                t_axis = con["t_rel"][0].numpy()
+                # Analysis window ~H/3: long enough to fit a cycle, short enough to
+                # leave several centres to regress the sweep against.
+                centers, freq = short_time_frequency(
+                    t_axis,
+                    x0[0].detach().cpu().numpy(),
+                    win=max(8.0, horizon / 3.0),
+                    stride=max(2.0, horizon / 12.0),
+                )
+                if freq.size:
+                    if_centers = centers
+                    draw_if.append(freq)
+
+            share = np.mean(draw_share, axis=0)
+            omega_eff = np.mean(draw_omega_eff, axis=0)
+            rho_eff = np.mean(draw_rho_eff, axis=0)
+            omega_eff_dyn = np.mean(draw_omega_eff_dyn, axis=0)
             sel, sel_share, sel_valid, n_used = _select_top_modes(
                 share, int(args.recovery_top_modes), threshold
             )
@@ -430,16 +762,26 @@ def _recover_pole_trajectories(
             if times is not None and float(times[-1]) > 0:
                 t_norm_span = (float(times[lo] / times[-1]), float(times[hi - 1] / times[-1]))
 
-            rho_hat = con["rho"][0].numpy()  # [H,K] instantaneous
+            rho_hat = con["rho"][0].numpy()  # [H,K] instantaneous (deterministic)
             omega_hat = con["omega"][0].numpy()
-            rho_eff = con["rho_eff"][0].numpy()  # [H]
-            omega_eff = con["omega_eff"][0].numpy()
+            t_axis = con["t_rel"][0].numpy()
 
             def _rmse(a: np.ndarray, b: np.ndarray) -> float:
                 return float(np.sqrt(((a - b) ** 2).mean()))
 
             omega_sel_rmse = [_rmse(omega_hat[:, k], omega_true) for k in sel]
             rho_sel_rmse = [_rmse(rho_hat[:, k], rho_true) for k in sel]
+            slopes = [trend_slope(w, omega_true) for w in draw_omega_eff]
+            slopes_dyn = [trend_slope(w, omega_true) for w in draw_omega_eff_dyn]
+
+            # Forecast-frequency tracking against truth resampled at the IF centers.
+            if_freq = np.mean(draw_if, axis=0) if draw_if else np.empty(0)
+            if if_freq.size:
+                truth_at_centers = np.interp(if_centers, t_axis, omega_true)
+                if_slope = trend_slope(if_freq, truth_at_centers)
+                if_rmse = _rmse(if_freq, truth_at_centers)
+            else:
+                if_slope, if_rmse = float("nan"), float("nan")
 
             win_metrics.append(
                 {
@@ -451,7 +793,15 @@ def _recover_pole_trajectories(
                     "rho_eff_rmse": _rmse(rho_eff, rho_true),
                     "omega_best_rmse": float(min(omega_sel_rmse)),
                     "rho_best_rmse": float(min(rho_sel_rmse)),
+                    "omega_trend_slope": float(np.mean(slopes)),
+                    "omega_trend_slope_std": float(np.std(slopes)),
+                    "omega_eff_dyn_rmse": _rmse(omega_eff_dyn, omega_true),
+                    "omega_trend_slope_dyn": float(np.mean(slopes_dyn)),
+                    "omega_trend_slope_dyn_std": float(np.std(slopes_dyn)),
+                    "forecast_freq_slope": if_slope,
+                    "forecast_freq_rmse": if_rmse,
                     "omega_true_mean": float(omega_true.mean()),
+                    "omega_true_swing": float(omega_true.max() - omega_true.min()),
                     "rho_true_mean": float(rho_true.mean()),
                     "selected_share": sel_share,
                     "selection_valid": bool(sel_valid),
@@ -495,7 +845,16 @@ def _recover_pole_trajectories(
         "arm": str(cfg.DENOISER_MODAL_TYPE),
         "num_windows": len(win_metrics),
         "share_threshold": threshold,
-        "capture": "final DDIM step of the evaluated forecast, conditional branch",
+        "capture": (
+            "final DDIM step of the evaluated forecast"
+            + (
+                f", guidance pinned to w={float(guidance):g}"
+                if guidance is not None
+                else ", conditional branch of the guided blend"
+            )
+        ),
+        "recovery_guidance": None if guidance is None else float(guidance),
+        "recovery_draws": draws,
         "laplace_k": int(diff_model.model.k),
         "chirp_num_basis": None if chirp_field is None else int(chirp_field.num_basis),
         "selection_valid": bool(all(w["selection_valid"] for w in win_metrics)),
@@ -510,10 +869,28 @@ def _recover_pole_trajectories(
             "rho_best_rmse": "same as omega_best_rmse for rho",
             "selected_share": "sum of E_k shares of the selected modes; below share_threshold "
                               "the window is selection-invalid (figure watermarked, not evidence)",
+            "omega_trend_slope": "OLS slope of the recovered omega_eff regressed on truth, "
+                                 "averaged over recovery_draws; 1 = tracks the within-window "
+                                 "sweep, 0 = flat. NaN when the truth is constant.",
+            "omega_trend_slope_dyn": "same slope for omega_eff_dyn, whose mode weights are the "
+                                     "INSTANTANEOUS E_k(t) rather than their time average. The "
+                                     "static weighting makes omega_eff a fixed convex "
+                                     "combination of the per-mode omega_k(t), so for the lti "
+                                     "arm (constant omega_k) its slope is identically 0 by "
+                                     "construction -- a tautology, not evidence. The dyn "
+                                     "variant also sees energy redistributed ACROSS "
+                                     "constant-frequency modes, so both arms are measurable.",
+            "forecast_freq_slope": "same regression for the instantaneous frequency of the "
+                                   "FORECAST (short-time fit), which is identifiable "
+                                   "regardless of how the modes divide up the signal",
         },
         "windows": win_metrics,
     }
-    for name in ("omega_eff_rmse", "rho_eff_rmse", "omega_best_rmse", "rho_best_rmse"):
+    for name in (
+        "omega_eff_rmse", "rho_eff_rmse", "omega_best_rmse", "rho_best_rmse",
+        "omega_trend_slope", "omega_trend_slope_dyn", "omega_eff_dyn_rmse",
+        "forecast_freq_slope", "forecast_freq_rmse",
+    ):
         stat = _stats(w[name] for w in win_metrics)
         metrics[f"{name}_mean"] = stat["mean"]
         metrics[f"{name}_std"] = stat["std"]
@@ -707,18 +1084,25 @@ def _metric(payload: Mapping[str, object], name: str) -> Optional[float]:
 
 
 def _summary_rows(rows: Sequence[Mapping[str, object]]) -> List[Dict[str, object]]:
-    groups: Dict[Tuple[object, object, object], List[Mapping[str, object]]] = {}
+    groups: Dict[Tuple[object, ...], List[Mapping[str, object]]] = {}
     for row in rows:
-        key = (row.get("task"), row.get("arm"), row.get("gap_regime"))
+        key = (row.get("task"), row.get("arm"), row.get("gap_regime"),
+               row.get("sweep_period"), row.get("phase_spread"), row.get("freq_multiplier"))
         groups.setdefault(key, []).append(row)
     out = []
-    for (task, arm, gap_regime), group in sorted(
+    for (task, arm, gap_regime, sweep_period, phase_spread, freq_multiplier), group in sorted(
         groups.items(), key=lambda kv: tuple(str(v) for v in kv[0])
     ):
         entry: Dict[str, object] = {
-            "task": task, "arm": arm, "gap_regime": gap_regime, "runs": len(group),
+            "task": task, "arm": arm, "gap_regime": gap_regime,
+            "sweep_period": sweep_period, "phase_spread": phase_spread,
+            "freq_multiplier": freq_multiplier, "runs": len(group),
         }
-        for metric in ("crps", "mae", "mse", "omega_eff_rmse_mean", "rho_eff_rmse_mean"):
+        for metric in (
+            "crps", "mae", "mse", "omega_eff_rmse_mean", "rho_eff_rmse_mean",
+            "omega_trend_slope_mean", "omega_trend_slope_dyn_mean",
+            "forecast_freq_slope_mean", "forecast_freq_rmse_mean",
+        ):
             stat = _stats(r.get(metric) for r in group)
             entry[f"{metric}_mean"] = stat["mean"]
             entry[f"{metric}_std"] = stat["std"]
@@ -738,6 +1122,7 @@ def main() -> None:
             recoveries: Dict[str, Tuple[Dict[str, object], List[Dict[str, object]]]] = {}
             for arm in args.arms:
                 cfg = _configure(task, str(arm), int(seed), args)
+                _artifact_cache_guard(cfg, args)
                 device = set_torch(seed=int(seed), deterministic=False)
                 loaders = _build_loaders(cfg)
                 stage_payload = _train_or_reuse_stack(cfg, loaders, args)
@@ -749,7 +1134,32 @@ def main() -> None:
                     "arm": str(arm),
                     "seed": int(seed),
                     "gap_regime": _gap_tag(args),
+                    "sweep_period": _task_sweep_period(task, args),
+                    "phase_spread": _phase_spread(args),
+                    "freq_multiplier": _freq_multiplier(args),
+                    "laplace_k": int(cfg.LAPLACE_K),
+                    "epochs": int(cfg.EPOCHS),
+                    "base_lr": float(cfg.BASE_LR),
+                    "chirp_rho_basis": (
+                        str(getattr(cfg, "CHIRP_RHO_BASIS", "centered")) if arm == "chirp" else None
+                    ),
+                    "chirp_rho_max_scale": (
+                        float(getattr(cfg, "CHIRP_RHO_MAX_SCALE", 4.0)) if arm == "chirp" else None
+                    ),
+                    "chirp_omega_basis": (
+                        str(getattr(cfg, "CHIRP_OMEGA_BASIS", "centered")) if arm == "chirp" else None
+                    ),
+                    "chirp_basis": (
+                        str(getattr(cfg, "CHIRP_BASIS", "half_integer")) if arm == "chirp" else None
+                    ),
+                    "best_epoch": _checkpoint_best_epoch(checkpoint),
+                    "chirp_num_basis": (
+                        int(getattr(cfg, "CHIRP_NUM_BASIS", 0)) if arm == "chirp" else None
+                    ),
                     "checkpoint": checkpoint,
+                    "checkpoint_mtime_utc": _ckpt_stamp(checkpoint),
+                    "vae_ckpt_mtime_utc": _ckpt_stamp(cfg.VAE_CKPT),
+                    "sum_ckpt_mtime_utc": _ckpt_stamp(cfg.SUM_CKPT),
                     "crps": _metric(forecast, "crps"),
                     "mae": _metric(forecast, "mae"),
                     "mse": _metric(forecast, "mse"),
@@ -764,6 +1174,13 @@ def main() -> None:
                 row["rho_eff_rmse_mean"] = recovery["rho_eff_rmse_mean"]
                 row["omega_best_rmse_mean"] = recovery["omega_best_rmse_mean"]
                 row["rho_best_rmse_mean"] = recovery["rho_best_rmse_mean"]
+                row["omega_trend_slope_mean"] = recovery["omega_trend_slope_mean"]
+                row["omega_trend_slope_std"] = recovery["omega_trend_slope_std"]
+                row["omega_trend_slope_dyn_mean"] = recovery["omega_trend_slope_dyn_mean"]
+                row["omega_trend_slope_dyn_std"] = recovery["omega_trend_slope_dyn_std"]
+                row["omega_eff_dyn_rmse_mean"] = recovery["omega_eff_dyn_rmse_mean"]
+                row["forecast_freq_slope_mean"] = recovery["forecast_freq_slope_mean"]
+                row["forecast_freq_rmse_mean"] = recovery["forecast_freq_rmse_mean"]
                 row["recovery_selection_valid"] = recovery["selection_valid"]
                 recoveries[str(arm)] = (recovery, fig_windows)
                 rows.append(row)

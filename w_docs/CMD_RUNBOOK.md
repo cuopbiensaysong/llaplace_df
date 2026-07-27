@@ -279,6 +279,112 @@ Geometry note: the purged split needs `val_ratio·(L−K−H+1) > H` — the def
 > across a 48-step window is ~10× past Nyquist) — recovery JSON now records
 > `chirp_num_basis`; consider 8–16 at H=48 for the paper runs.
 
+> 🔴 **STALE-CHECKPOINT TRAP (2026-07-20) — check this before believing any H2 result.**
+> The v3 sweep campaign silently evaluated **07-14 checkpoints** on 11 of 30 runs (all
+> `linear_chirp`, 5/6 `quadratic_chirp`) while each run's freshly trained model went
+> unused. `_best_raw.pt` is written only when `EMA_COMPARE_EVERY > 0` — the benchmark
+> sets it to 0 — but the trainer reported the path via a bare `.exists()` and the tool
+> preferred `_raw` first, so a 6-day-old file won. **Audit one-liner:** compare the
+> `checkpoint` column's mtime in `chirp_benchmark_raw.csv` against the run time. Fixed
+> 2026-07-21 (the trainer now reports only checkpoints written by the current run; the
+> tool takes its `loaded_checkpoint`). ⚠️ `llapdiff-checkpoint-eval --checkpoint-kind
+> auto` still searches **raw first** — the same trap for manual evals.
+>
+> 🔴 **Artifacts are keyed by (task, seed), NOT by cache.** Adding `--sweep-period`
+> created new data but silently reused the previous cache's VAE + summarizer. An
+> `artifact_cache.json` fingerprint now fails loudly on mismatch; pass
+> `--recompute-artifacts` (or delete stage-1/2) when the data changes.
+
+> 🔴 **H2's TARGETS WERE UNRECONSTRUCTIBLE (root cause, 2026-07-21) — use `--phase-spread`.**
+> Every H2 result up to this point sat under a **0.62 round-trip ceiling**: encoding the
+> TRUE targets and decoding them straight back (no forecasting) reproduced them at only
+> corr 0.62, so no denoiser could do better. Cause: `latent_vae.py` **mean-pools across
+> the entity axis** before `mu_head`, while the generator draws `phase0 ~ U(0, 2π)`
+> independently per entity — 64 sinusoids at 64 phases cancel, and the carrier is gone
+> before it reaches the latent. It is upstream of the bottleneck, so **latent width does
+> not help** (measured: 24 → 64 channels changed corr 0.586 → 0.591), nor does input
+> dropout (0.20 → 0.0: 0.620 → 0.586), nor fewer entities (8 entities: 0.479, worse).
+>
+> | phase spread | round-trip corr | val_recon |
+> |---|---|---|
+> | 2π (historical) | 0.620 | 0.0611 |
+> | 0 (shared) | 0.863 | 0.0188 |
+> | **π/8 ≈ 0.393 (recommended)** | **0.857** | 0.0202 |
+>
+> `--phase-spread 0.393` keeps entity diversity and recovers ~3.2× lower reconstruction
+> error at identical architecture/capacity/schedule. It tags the cache (`_phase-0.393`)
+> and is recorded per result row. **All H2 caches and every model trained on them must be
+> regenerated with it** — prior chirp-vs-LTI comparisons were made through a handicapped
+> stage 1. Symptoms this explains: forecast-vs-target correlation of only +0.06…+0.32 at
+> h=48, a forecast oscillating ~4× too fast, and flat recovered pole trajectories.
+> Residual headroom remains (0.86 vs the ~0.99 generator noise permits), and latent
+> capacity may matter NOW that pooling no longer destroys the signal — re-run the
+> capacity sweep on a reswept, phase-narrowed cache before concluding anything about K.
+
+> 🔴 **HORIZON-BLIND ρ INIT (2026-07-22) — affects BOTH cores, and h=168 worst.**
+> Both `LaplaceTransformEncoder` (LTI) and `ChirpModalField` (chirp) initialised
+> `ρ ~ U(0.01, 0.2)` with **no horizon term**, but the envelope is `e^{-ρ̄(t)}` so survival
+> depends on **ρ·H**: [0.12, 2.4] at h=12 (fine), [0.5, 9.6] at h=48, **[1.7, 33.6] at
+> h=168 (NOAA-UK headline) = nearly all modes dead at init**. Measured on trained h=48
+> models: every mode at a real signal frequency had ρ ≈ 0.08–0.25 (**26–76× the truth
+> 0.0032**), envelope mass 0.03–0.12 — extinct within the horizon — leaving only near-DC
+> modes alive (up to 92% of output energy). That is the true cause of the flat recovered
+> pole trajectories and the damped "DC-hedging" forecast. ρ is a **null direction** of the
+> loss here (true ρ·H = 0.15 ⇒ almost no decay to learn from), so training never corrects
+> a bad init. **Both arms were affected equally — prior chirp-vs-LTI ties compared two
+> equally crippled models.** Fixed: ρ init anchored to the horizon (`U(0.1, 2.0)/H`) via a
+> new `pole_init_horizon` threaded to both cores from `config.PRED`; pre-fix checkpoints
+> keep the legacy init. Audit: modes need **ρ ≲ 2/H** (0.042 at h=48, 0.012 at h=168);
+> red flag = oscillating modes with `envelope_mass < 0.1`, or recovered ρ spanning the
+> init range. **Full write-up: `w_docs/CMD_BUG_REPORT.md` (B6, B7).**
+
+> 🔴 **THE POLE BASIS COULD NOT DRIFT (2026-07-23) — this invalidates the Fig-2 negative.**
+> `basis_freqs = linspace(1, M, M)` gives every basis function a **whole number of cycles**
+> across the window, so `phi_m(0) = phi_m(L) = 2` is its maximum; with squared (nonnegative)
+> coefficients that forces **`omega(0) == omega(L) == sup_t omega(t)` for every mode**
+> (measured: |diff| = 2e-7 over 512 modes, `argmax` always at an endpoint). The
+> instantaneous frequency could only dip and return — a monotone sweep, which is what the
+> chirp truth does across a window, was **outside the function class**. Fitted to the real
+> truth over 120 test windows with the model's own basis and its nonnegativity constraint:
+> **R² = 0.119 ± 0.266** (legacy) vs **0.990 ± 0.008** (half-integer); the net endpoint drift
+> the legacy class sets to zero is **73% of the within-window range**. The five "independent"
+> designs (fm-2, fm-4, sweet-spot, period-96, period-32) varied sweep steepness and period but
+> never the **shape class**, so they shared one confound and their agreement looked like
+> robustness. Fixed by `CHIRP_BASIS="half_integer"` (default): harmonics f = 0.5, 0.5, 1.0,
+> 1.0, … paired with ± signs, so a nonnegative combination spans a *signed* multiple of each
+> cosine. Every bound is unchanged (φ ∈ [0,2], |φ−1| ≤ 1), Theorem A stays closed-form, and
+> each element is still zero-mean over the window (2·f_m integer) as the `centered` ρ basis
+> requires. Pre-fix checkpoints `setdefault` to `"integer"`. **Any pre-2026-07-23 Fig-2
+> result measured whether the model learns a sweep it could not express — re-run it.**
+> Full write-up: `w_docs/CMD_BUG_REPORT.md` (B9-B14); pilot:
+> `ldt/scripts/run_fig2_basis_pilot.sh`.
+>
+> Companion metric defect fixed with it: `omega_eff` weights modes by their **time-averaged**
+> energy, so for the LTI core (constant ω_k) its trend slope is **identically 0 by
+> construction** — the "LTI fails structurally" panel was a tautology, not evidence. And a
+> model that sweeps by redistributing energy **across** constant-frequency modes scores 0
+> too; the LTI arm demonstrably does this (instantaneous mean frequency moves 0.188 ± 0.142,
+> 59% of the truth's swing, vs 0.023 for chirp). `omega_trend_slope_dyn` /
+> `omega_eff_dyn_rmse` (instantaneous weights) are now recorded alongside the static ones.
+> **Do not claim "LTI is spectrally static".**
+
+**Modal budget (`--laplace-k`, `--chirp-num-basis`).** Both were previously hardcoded or
+inherited from the base config — which is how `CHIRP_NUM_BASIS=256` (≈10× past Nyquist at
+H=48) leaked into H2. Keep `M ≤ horizon/2` (the model warns otherwise); `K` controls
+identifiability, not smoothness — the synthetic latents are ~rank 2, so at K=256 roughly
+8 modes carry R²=0.99 of the output and *which* 8 changes between training runs, making
+per-mode poles meaningless. Both are recorded in every result row, and non-default values
+tag the denoiser directory so scan cells cannot overwrite each other.
+
+**Recovery honesty knobs.** `--recovery-guidance 1.0` pins CFG for the capture (the TEST
+schedule reaches w≈2 exactly at the captured final step, so by default the poles belong to
+the conditional half of a guided blend). `--recovery-draws N` averages the E_k weighting
+over N DDIM draws — the poles are deterministic given the conditioning but the residues
+are not, so a single draw gives a noisy `omega_trend_slope`. The JSON/CSV now carry
+`omega_trend_slope` (1 = tracks the sweep, 0 = flat, NaN when truth is constant) and
+`forecast_freq_slope` (same regression on the instantaneous frequency of the **forecast**,
+which is identifiable however the modes split the signal).
+
 **Within-window sweep (`--sweep-period`, fix-plan P5).** The legacy profiles ramp
 over the whole series, so one 48-step horizon sees only ~6% of the sweep —
 within a window both arms face near-constant poles and "LTI fails structurally"
@@ -290,6 +396,34 @@ the purged split uses. Applies to the four smooth-ramp tasks; piecewise
 change-point tasks ignore it. The period is tagged in the cache dir
 (`..._sweep-144`); omit the flag for the legacy slow ramp (bit-identical caches),
 which remains the right regime for the cross-window stitched figure.
+
+> 🔴 **Sweep AMPLITUDE (`--freq-multiplier`) — `--sweep-period` alone is not enough.**
+> A constant-pole (LTI) forecast desyncs from a chirp by a phase error ≈ Δω·H/12 over
+> the horizon. At the default `--freq-multiplier 2` the within-window Δω is only ~0.13
+> rad/step → ~0.5 rad desync (~0.09 cycle), which a constant pole absorbs — so **LTI
+> never structurally fails and the benchmark cannot separate the arms** (confirmed on the
+> converged, Gate-0-passing phase-fixed run: chirp ties LTI, and LTI's own constant-ω
+> recovery is *valid* and beats chirp's). Raise the multiplier to build the LTI-failure
+> regime: `--freq-multiplier 4` → Δω ~0.4 rad/step, ~1.6 rad desync (~0.26 cycle), where a
+> constant pole visibly breaks. Cost: ω rises to ~1.0 rad/step (~6 samples/cycle) — still
+> reconstruction-safe; `--freq-multiplier 5` (ω→1.3, ~5 samples/cycle) risks the Gate-0
+> round-trip, so re-check it. Tagged `..._fm-4`; recorded per result row and summary key.
+
+**Denoiser schedule (`--epochs`, `--early-stop`).** The default (80 epochs, early-stop on
+the cheap `val_diag_mse_raw` proxy) stopped the denoiser at **~epoch 19** (val v-MSE 0.60),
+a weak forecast that confounds the recovery figure — **any recovery-quality run must train
+to convergence.** `--epochs 400 --early-stop 30` auto-switches selection to CRPS and scores
+it every 5 epochs; non-default `--epochs` tags the denoiser dir `_ep-NNN` so it does not
+clobber the short-schedule checkpoints. Every result row now records `best_epoch`, so a
+best_epoch far below `--epochs` (early stopping fired) is a visible undertraining tell.
+
+> 🔴 **GATE 0 first (`llapdiff-stage1-roundtrip`).** Before trusting ANY Fig-2 number,
+> confirm the stage-1 VAE reconstructs its own targets: `llapdiff-stage1-roundtrip
+> --tasks … --phase-spread 0.393 [--freq-multiplier N] --artifact-root …` PASS/FAILs
+> against 0.85 and exits non-zero on failure. Below the gate the pipeline cannot represent
+> the signal and every downstream chirp-vs-LTI comparison is meaningless (the phase-2π
+> caches sat at 0.62; the `--phase-spread 0.393` fix reaches 0.857). A steeper
+> `--freq-multiplier` can re-break the gate — always recheck it after changing difficulty.
 
 **Irregular sampling (the plan's H2 premise, added 2026-07-05).** Signals are
 sampled at **Gamma renewal gaps by default**: `--gap-distribution gamma`
@@ -385,6 +519,9 @@ so an edit holds for every subsequent run** (record the value per run in your lo
 | `CHIRP_UQ_HEAD` | False | Theorem-C analytic UQ head (U2; needs chirp + x0 + certified path) |
 | `CHIRP_GROWTH_BUDGET` | 0.0 | Theorem-B′ growth budget c_g (T2 sweep {0, log 2, log 5}); 0 = Thm B exactly |
 | `CHIRP_PARAMETERIZATION` | "p_exact" | Phase-4 pole-field ablation: p_exact / p_mono / p_grid |
+| `CHIRP_BASIS` | "half_integer" | Pole-basis harmonics. `"integer"` = the legacy f=1..M set, which pins ω(0)=ω(L)=sup ω so the poles **cannot drift** across the window (red box below). Also `--chirp-basis`, tags the denoiser dir `_cb-<mode>` |
+| `CHIRP_RHO_BASIS` | "centered" | ρ variation basis. `"centered"` (φ−1 = cos, zero mean over the window ⇒ variation adds **no net decay**) vs `"nonneg"` (legacy 1+cos, whose mean-1 basis couples ρ variation to ρ mean and extinguishes oscillatory modes when the true decay is small). Also `--chirp-rho-basis` |
+| `CHIRP_RHO_MAX_SCALE` | 4.0 | ρ_max = scale/horizon — the decay analogue of the Nyquist cap on ω (a mode needs ρ·H ≲ a few to survive the window). Also `--chirp-rho-max-scale`; the Fig-2 campaign used 1 |
 | `CHIRP_COEFF_L2` | 0.0 | Tier-2 L2 on the pole-variation coefficients (shrinks toward LTI); training-only, chirp-only, all three parameterizations; growth head excluded (c_g governs it) |
 | `DIFF_LOSS_MODE` | "mse" | "gaussian_nll" trains mean+variance jointly (needs `CHIRP_UQ_HEAD`) |
 | `TRAIN_T_SAMPLER` | "uniform" | "max_only" = the U3 one-shot (no-diffusion) regression arm |

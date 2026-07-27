@@ -491,11 +491,28 @@ def modal_contributions(capture: Dict[str, torch.Tensor]) -> Dict[str, torch.Ten
         rho = rho_c.unsqueeze(1).expand(-1, t_rel.shape[1], -1)
         omega = omega_c.unsqueeze(1).expand(-1, t_rel.shape[1], -1)
 
-    envelope_mass = torch.exp(-2.0 * rho_bar).mean(dim=1)  # [B,K]
+    # The sign of omega is a pure gauge: the synthesis uses cos(omega_bar)/sin(omega_bar)
+    # with free residues, so omega -> -omega is absorbed exactly by b_k -> -b_k. The
+    # physically recoverable quantity is the instantaneous FREQUENCY |omega|. This is a
+    # no-op for the lti core and for the nonneg omega basis (both keep omega >= 0), and
+    # matters only for the centred basis, whose variation may carry omega through zero.
+    omega = omega.abs()
+    envelope_t = torch.exp(-2.0 * rho_bar)  # [B,T,K]
+    envelope_mass = envelope_t.mean(dim=1)  # [B,K]
     energy = residue_norm2 * envelope_mass  # [B,K]
     share = energy / energy.sum(dim=-1, keepdim=True).clamp_min(1e-30)
     w = energy.unsqueeze(1)  # [B,1,K]
     denom = w.sum(dim=-1).clamp_min(1e-30)  # [B,1]
+    # Time-resolved weights E_k(t) = e^{-2 rho_bar_k(t)} ||theta_k||^2, i.e. the same
+    # decomposition WITHOUT averaging the envelope over t first. The static weighting
+    # above makes omega_eff a fixed convex combination of the per-mode omega_k(t), so it
+    # moves only if the modes themselves sweep -- for the lti core, whose omega_k are
+    # constant, it is constant by construction and its trend slope is identically 0
+    # (a tautology, not evidence). The instantaneous version is the first moment of the
+    # modal time-frequency energy, so it also sees a model that redistributes energy
+    # ACROSS constant-frequency modes.
+    w_t = envelope_t * residue_norm2.unsqueeze(1)  # [B,T,K]
+    denom_t = w_t.sum(dim=-1).clamp_min(1e-30)  # [B,T]
     return {
         "energy": energy,
         "energy_share": share,
@@ -505,6 +522,8 @@ def modal_contributions(capture: Dict[str, torch.Tensor]) -> Dict[str, torch.Ten
         "omega": omega,
         "rho_eff": (rho * w).sum(dim=-1) / denom,
         "omega_eff": (omega * w).sum(dim=-1) / denom,
+        "rho_eff_dyn": (rho * w_t).sum(dim=-1) / denom_t,
+        "omega_eff_dyn": (omega * w_t).sum(dim=-1) / denom_t,
         "t_rel": t_rel,
     }
 

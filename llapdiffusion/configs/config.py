@@ -161,6 +161,31 @@ CHIRP_COEFF_L2 = 0.0
 # trapezoid integration on the query grid — numerical error grows with gap width,
 # the deliberate contrast case).
 CHIRP_PARAMETERIZATION = "p_exact"
+# Basis for the chirp rho variation. "centered" (default) uses phi-1 = cos, which has
+# zero integral over the window, so making rho time-varying adds NO net decay and the
+# envelope over the horizon is set purely by the rho floor. "nonneg" is the legacy
+# phi = 1+cos expansion, whose mean-1 basis couples rho variation to rho mean and
+# extinguishes oscillatory modes when the true decay is small.
+CHIRP_RHO_BASIS = "centered"
+# Same choice for the omega variation. "centered" (default) uses phi-1 = s*cos, zero mean
+# over the window, so a swept frequency does not drag the mean frequency up with it.
+# "nonneg" is the legacy 1+s*cos, whose mean-1 basis taxes every unit of variation with an
+# equal mean shift and lets a redundant common mode inflate the mean for free (a trained
+# half-integer model spent 63% of its omega coefficient mass on that common mode, pushing
+# mean omega to 1.23 vs a truth mean of 0.40). Pre-fix checkpoints keep "nonneg".
+CHIRP_OMEGA_BASIS = "centered"
+# Upper bound on the chirp rho floor as a multiple of 1/horizon (rho_max = scale/PRED),
+# the decay analogue of the Nyquist cap on omega: a mode needs rho*H <~ a few to survive
+# the forecast window. Sweepable via --chirp-rho-max-scale.
+CHIRP_RHO_MAX_SCALE = 4.0
+# Harmonic set for the pole basis phi_m(t) = 1 + s_m cos(2 pi f_m t / L). "half_integer"
+# (default) uses f = 0.5, 0.5, 1.0, 1.0, ... with alternating signs, so each harmonic is
+# available with both signs and the poles can DRIFT across the window. "integer" is the
+# legacy f = 1..M with all signs +1: every basis function then completes a whole number of
+# cycles, pinning omega(0) = omega(L) = sup_t omega for every mode, so a monotone sweep is
+# outside the function class entirely (it fits the H2 chirp truth at only R^2 = 0.35 vs
+# 0.99 for half_integer). Pre-fix checkpoints keep "integer".
+CHIRP_BASIS = "half_integer"
 
 
 # ============================ Training Hyperparameters ============================
@@ -248,3 +273,12 @@ POLE_PROBE = False
 POLE_PROBE_EVERY = 5
 VAL_DIAG_SNR_BINS = 0
 IRREG_CHECK_BATCHES = 4
+
+# Normalization of the history-summary conditioning. "sample" (default) z-scores each
+# window over its own sequence axis, so the conditioning is a function of that window
+# alone. "batch" is the legacy mode: it z-scores over (batch, sequence), which couples a
+# window's conditioning to the OTHER windows in its batch -- and training batches are
+# shuffled while eval batches are sequential, so the same window is conditioned
+# differently at eval than in training (measured on H2: 41% relative error, cos 0.92).
+# That mismatch made conditioning actively harmful (MSE_cond > MSE_uncond).
+COND_NORM_MODE = "sample"

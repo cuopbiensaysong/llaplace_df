@@ -329,6 +329,11 @@ class LapFormer(nn.Module):
         chirp_uq_head: bool = False,
         chirp_growth_budget: float = 0.0,
         chirp_parameterization: str = "p_exact",
+        pole_init_horizon: Optional[float] = None,
+        chirp_rho_basis: str = "nonneg",
+        chirp_omega_basis: str = "nonneg",
+        chirp_basis: str = "integer",
+        chirp_rho_max_scale: float = 4.0,
     ) -> None:
         super().__init__()
         self.hidden_dim = int(hidden_dim)
@@ -355,6 +360,10 @@ class LapFormer(nn.Module):
             attn_cond_dim=(hidden_dim if self.analysis_summary_qk else None),
             rho_conditioning_mode=self.rho_conditioning_mode,
             attn_dropout=attn_dropout,
+            # Same horizon anchor as the chirp core so both arms start with modes that
+            # survive the forecast window (a horizon-independent rho init leaves only
+            # near-DC modes alive at long horizons).
+            rho_init_horizon=pole_init_horizon,
         )
         # Chirp (time-varying poles) replaces the LTI residual-MLP correction with
         # stability-by-construction, so the residual MLP is off by default in that mode.
@@ -373,6 +382,11 @@ class LapFormer(nn.Module):
                 uq_head=self.chirp_uq_head,
                 growth_budget=float(chirp_growth_budget),
                 parameterization=chirp_parameterization,
+                rho_init_horizon=pole_init_horizon,
+                rho_basis=chirp_rho_basis,
+                omega_basis=chirp_omega_basis,
+                basis=chirp_basis,
+                rho_max_scale=float(chirp_rho_max_scale),
             )
         else:
             if output_head != "off":

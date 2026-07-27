@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import gc
 import math
+import time
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple, Union
+from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import torch
 from llapdiffusion.configs import config
@@ -505,7 +506,13 @@ def _build_cond_summary_pair(
     if adapter is not None:
         stats = _history_stat_tokens(V, T, mask_bn, device, dt=dt, x_obs_mask=x_obs_mask)
         cond_summary_raw = adapter(cond_summary_raw, stats)
-    cond_summary = normalize_cond_per_batch(cond_summary_raw) if norm else cond_summary_raw
+    # COND_NORM_MODE="sample" makes the conditioning a function of the window alone;
+    # the legacy "batch" mode couples it to batch composition, which differs between
+    # shuffled training batches and sequential eval batches (see normalize_cond_per_batch).
+    cond_norm_mode = str(getattr(config, "COND_NORM_MODE", "batch"))
+    cond_summary = (
+        normalize_cond_per_batch(cond_summary_raw, mode=cond_norm_mode) if norm else cond_summary_raw
+    )
     return cond_summary, cond_summary_raw
 
 
@@ -1496,6 +1503,13 @@ def _llapdiff_model_kwargs(config_obj: object) -> Dict[str, object]:
         "chirp_uq_head": bool(getattr(config_obj, "CHIRP_UQ_HEAD", False)),
         "chirp_growth_budget": float(getattr(config_obj, "CHIRP_GROWTH_BUDGET", 0.0)),
         "chirp_parameterization": str(getattr(config_obj, "CHIRP_PARAMETERIZATION", "p_exact")),
+        # Anchor the pole rho init to the forecast horizon for BOTH cores: a
+        # horizon-independent init leaves only near-DC modes alive at long h.
+        "pole_init_horizon": float(getattr(config_obj, "PRED", 0) or 0) or None,
+        "chirp_rho_basis": str(getattr(config_obj, "CHIRP_RHO_BASIS", "centered")),
+        "chirp_omega_basis": str(getattr(config_obj, "CHIRP_OMEGA_BASIS", "centered")),
+        "chirp_basis": str(getattr(config_obj, "CHIRP_BASIS", "half_integer")),
+        "chirp_rho_max_scale": float(getattr(config_obj, "CHIRP_RHO_MAX_SCALE", 4.0)),
     }
 
 
@@ -1544,6 +1558,11 @@ def _llapdiff_config_from_checkpoint(payload: object) -> Dict[str, object]:
     config.setdefault("chirp_uq_head", False)
     config.setdefault("chirp_growth_budget", 0.0)
     config.setdefault("chirp_parameterization", "p_exact")
+    config.setdefault("pole_init_horizon", None)  # pre-fix ckpts keep legacy rho init
+    config.setdefault("chirp_rho_basis", "nonneg")      # pre-fix ckpts: legacy 1+cos rho basis
+    config.setdefault("chirp_omega_basis", "nonneg")    # pre-fix ckpts: legacy 1+cos omega basis
+    config.setdefault("chirp_basis", "integer")         # pre-fix ckpts: legacy integer-cycle basis
+    config.setdefault("chirp_rho_max_scale", 4.0)
     return config
 
 
@@ -1617,7 +1636,10 @@ def _select_eval_checkpoint_path(
     best_ckpt_path_raw: Path,
     best_ckpt_path_ema: Path,
     last_ckpt_path: Path,
+    written: Optional[Callable[[Path], bool]] = None,
 ) -> Optional[Path]:
+    """``written`` filters out checkpoint files this run did not produce (stale
+    files from earlier runs sharing the output directory)."""
     if test_metric_source == "raw":
         preferred = [best_ckpt_path_raw]
         if val_metric_source == "raw":
@@ -1631,7 +1653,7 @@ def _select_eval_checkpoint_path(
 
     preferred.extend([best_ckpt_path, last_ckpt_path])
     for path in preferred:
-        if path.exists():
+        if path.exists() and (written is None or written(path)):
             return path
     return None
 
@@ -2596,6 +2618,19 @@ def run(
     best_ckpt_path_ema = out_dir / f"llapdiff_{pred_tag}_best_ema.pt"
     last_ckpt_path = out_dir / f"llapdiff_{pred_tag}_last.pt"
     save_best = bool(getattr(config, "SAVE_BEST", True))
+    # Checkpoint files left by EARLIER runs share this directory (the artifact path
+    # encodes the run, not the dataset or the config). Reporting a path just because
+    # the file exists lets a stale checkpoint be evaluated as if this run produced
+    # it -- e.g. `_best_raw.pt` is only written when EMA_COMPARE_EVERY > 0, so with
+    # comparisons off a months-old raw checkpoint would be picked up. Only report
+    # what this run wrote.
+    run_start_time = time.time()
+
+    def _written_this_run(path: Path) -> Optional[str]:
+        try:
+            return str(path) if path.stat().st_mtime >= run_start_time - 1.0 else None
+        except OSError:
+            return None
 
     def _checkpoint_payload(**extra) -> Dict[str, object]:
         metadata = target_metadata_from_config(config)
@@ -2970,10 +3005,10 @@ def run(
         }),
     )
 
-    best_checkpoint = str(best_ckpt_path) if best_ckpt_path.exists() else None
-    best_checkpoint_raw = str(best_ckpt_path_raw) if best_ckpt_path_raw.exists() else None
-    best_checkpoint_ema = str(best_ckpt_path_ema) if best_ckpt_path_ema.exists() else None
-    last_checkpoint = str(last_ckpt_path) if last_ckpt_path.exists() else None
+    best_checkpoint = _written_this_run(best_ckpt_path)
+    best_checkpoint_raw = _written_this_run(best_ckpt_path_raw)
+    best_checkpoint_ema = _written_this_run(best_ckpt_path_ema)
+    last_checkpoint = _written_this_run(last_ckpt_path)
     best_val = best_val_crps if best_val_crps != float("inf") else None
 
     eval_checkpoint_path = _select_eval_checkpoint_path(
@@ -2983,6 +3018,7 @@ def run(
         best_ckpt_path_raw=best_ckpt_path_raw,
         best_ckpt_path_ema=best_ckpt_path_ema,
         last_ckpt_path=last_ckpt_path,
+        written=lambda p: _written_this_run(p) is not None,
     )
     final_test_eval_mode = _resolve_final_test_eval_mode(getattr(config, "FINAL_TEST_EVAL", "run"))
     loaded_checkpoint = str(eval_checkpoint_path) if eval_checkpoint_path is not None else None
