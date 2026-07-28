@@ -93,9 +93,12 @@ Per arm, in order:
 are skipped; failed ones are retried. Interrupt with Ctrl-C any time.
 
 Trial count per arm: 1 baseline + 4 (lr) + 2 (schedule) + 3 (warmup) + 3 (γ)
-= **13**, plus **11** more on chirp arms = **24**. Plus 15 sampling cells (no
-training). At ~2 min/trial on physionet h12 that is roughly an hour per arm;
-NOAA-UK h168 trials are far slower — trim with `--stages`.
+= **13**, plus **7–10** more on chirp arms = **20–23**. Plus 20 sampling cells
+(no training). The chirp range is the `chirp_num_basis` grid, which **scales
+with the horizon** (§7.6) — 1 swept value at h=4, 3 at h=12, 4 from h≥20 —
+because candidates equal to the resolved default are dropped automatically. At
+~2 min/trial on physionet h12 that is roughly an hour per arm; NOAA-UK h168
+trials are far slower — trim with `--stages`.
 
 Useful flags:
 
@@ -504,8 +507,10 @@ Add a tuple to the right tier list in `search_spaces.py`:
   (`kind="cli"` is wired only for `predict_type`; another CLI flag needs an edit
   in `run_trial.py`, near the `--predict-type` handling.)
 - **Which tier:** `TIER1_STAGES` if it applies to every arm (identical grid = the
-  matched-budget parity rule); `TIER2_STAGES` for chirp-only knobs (`CHIRP_*`);
-  `TIER3_STAGES` for capacity (needs `--include-tier3`).
+  matched-budget parity rule); `TIER2_FIXED_STAGES` for chirp-only knobs
+  (`CHIRP_*`) whose grid is the same at every horizon; `TIER3_STAGES` for
+  capacity (needs `--include-tier3`). (`TIER2_STAGES` is the assembled
+  horizon-agnostic view — read it, but add new stages to `TIER2_FIXED_STAGES`.)
 - **`stage_name` must be unique** — it is what you pass to `--stages` and what
   labels the trial in `RESULTS.md`.
 - Listing the current default among the candidates is safe: default-valued
@@ -592,3 +597,42 @@ done
 
 Prefer the `--stages` route in §7.2 — it scores, dedups, and writes `RESULTS.md`
 for you. Reach for this only when you are deliberately outside the orchestrator.
+
+### 7.6 The horizon-scaled `chirp_num_basis` grid
+
+`chirp_num_basis` (M) is the one Tier-2 grid that is **computed per setting**
+rather than written out, because M is not comparable across horizons. What the
+basis buys is a top frequency measured in **cycles across the window** L
+(`CHIRP_TIME_SCALE`, which resolves to `PRED`), and the conversion depends on
+`CHIRP_BASIS`:
+
+| basis | frequencies | top frequency | Nyquist ceiling |
+|---|---|---|---|
+| `half_integer` (default) | 0.5, 0.5, 1.0, 1.0, … | **M/4** cycles across L | `M ≤ 2·L` |
+| `integer` (legacy) | 1..M | **M** cycles across L | `M ≤ L/2` |
+
+A unit-gap grid resolves L/2 cycles, so anything past the ceiling cannot be
+resolved by the data — it only adds jitter to ρ(t)/ω(t) plus quadratically many
+coefficient-head parameters (2·K·M outputs), and trips the model's Nyquist
+`RuntimeWarning`.
+
+`search_spaces.CHIRP_BASIS_CYCLE_LADDER = (1, 2, 4, 8, 16)` states the ladder in
+cycles; `chirp_num_basis_grid()` converts it for the active basis and **clamps**
+(rather than drops) entries above the ceiling, so the maximum resolvable M stays
+in the grid at short horizons. The clamp is what used to pin the grid at
+h=12's `[4, 8, 16, 24]` for every dataset:
+
+| horizon | ceiling | grid |
+|---|---|---|
+| 12 (physionet) | 24 | `[4, 8, 16, 24]` — unchanged from the hand-written grid |
+| 24 | 48 | `[4, 8, 16, 32, 48]` |
+| 100 (crypto) | 200 | `[4, 8, 16, 32, 64]` |
+| 168 (noaa_*) | 336 | `[4, 8, 16, 32, 64]` |
+
+`tune.py` logs the resolved grid, basis, L and ceiling at the start of
+`phase_train` for chirp arms. Trial IDs are unaffected (they hash the override
+values, not the grid), so existing campaigns resume unchanged.
+
+To override the ladder, edit `CHIRP_BASIS_CYCLE_LADDER`; to pin a fixed grid
+regardless of horizon, replace the `chirp_num_basis` entry that
+`stages_for_arm` assembles.

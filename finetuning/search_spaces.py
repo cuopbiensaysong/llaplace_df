@@ -52,18 +52,36 @@ TIER1_STAGES = [
 ]
 
 # ---- Tier 2: chirp-specific (arms c and d only) ------------------------------
-TIER2_STAGES = [
-    # Fourier basis size M for the pole field.
-    # ⚠️ Under CHIRP_BASIS="half_integer" (the default) M does NOT equal the top
-    # frequency: the basis uses M/2 distinct frequencies, each present with both
-    # signs, so the top frequency is M/4 cycles across the window L. The Nyquist
-    # limit of a unit-gap grid is L/2 cycles, hence the resolvable ceiling is
-    #     M <= 2 * L        (L = CHIRP_TIME_SCALE, which resolves to PRED)
-    # At PRED=12 that is M <= 24; the grid below tops out there (top frequencies
-    # 1, 2, 4 and 6 cycles across the window). Anything larger cannot be resolved
-    # by the data, only adds jitter to rho(t)/omega(t), and trips the model's
-    # Nyquist RuntimeWarning. Raise this grid for longer horizons.
-    ("chirp_num_basis", "config", "CHIRP_NUM_BASIS", [4, 8, 16, 24]),
+#
+# The pole-basis size M is the one knob whose useful range depends on the
+# horizon, so its grid is COMPUTED per setting rather than written out (see
+# chirp_num_basis_grid). M itself is not comparable across horizons: what the
+# basis actually buys is a top frequency measured in *cycles across the window*
+# L, and the conversion depends on CHIRP_BASIS.
+#
+#   half_integer (default): f = 0.5, 0.5, 1.0, 1.0, ... — M/2 distinct
+#       frequencies, each present with both signs, so the top frequency is
+#       M/4 cycles across L.
+#   integer (legacy):       f = 1..M, so the top frequency is M cycles across L.
+#
+# A unit-gap grid resolves at most L/2 cycles (Nyquist), so the resolvable
+# ceiling is M <= 2*L for half_integer and M <= L/2 for integer. Past it the
+# extra basis functions cannot be resolved by the data, only add jitter to
+# rho(t)/omega(t) and quadratically many coefficient-head parameters (2*K*M
+# outputs), and trip the model's Nyquist RuntimeWarning.
+#
+# The ladder below is therefore stated in cycles and converted per setting: the
+# same *shape* resolution is offered at every horizon, and the Nyquist clamp
+# only bites at short ones. At PRED=12 (ceiling M<=24) it yields the historical
+# [4, 8, 16, 24]; at PRED>=32 it opens up to [4, 8, 16, 32, 64].
+CHIRP_BASIS_CYCLE_LADDER = (1, 2, 4, 8, 16)
+
+# Reference horizon for the module-level fallback grid (PhysioNet h=12). Callers
+# that know their horizon get the scaled grid via stages_for_arm(defaults=...).
+FALLBACK_CHIRP_TIME_SCALE = 12
+
+# Tier-2 stages whose grids do not depend on the horizon.
+TIER2_FIXED_STAGES = [
     # Minimum decay floor rho_min (the Theorem-B bound constant).
     ("chirp_rho_min", "config", "CHIRP_RHO_MIN", [1e-5, 1e-4, 1e-3]),
     # Theorem-B' growth budget c_g; 0.0 recovers Theorem B exactly (T2 sweep).
@@ -71,6 +89,90 @@ TIER2_STAGES = [
     # L2 shrinkage of the pole-variation coefficients toward the LTI case.
     ("chirp_coeff_l2", "config", "CHIRP_COEFF_L2", [0.0, 1e-4, 1e-2]),
 ]
+
+
+def basis_cycles_per_unit_m(basis: str) -> float:
+    """Cycles across the window contributed by the top basis function, per unit M."""
+    mode = str(basis).strip().lower()
+    if mode == "half_integer":
+        return 0.25
+    if mode == "integer":
+        return 1.0
+    raise ValueError(f"Unknown CHIRP_BASIS '{basis}'. Use 'half_integer' or 'integer'.")
+
+
+def nyquist_num_basis_ceiling(time_scale: float, *, basis: str = "half_integer") -> int:
+    """Largest M whose top basis frequency stays at or below the Nyquist limit.
+
+    A unit-gap grid resolves L/2 cycles across the window, so the ceiling is
+    (L/2) / cycles-per-unit-M: 2*L for the half-integer basis, L/2 for integer.
+    """
+    scale = float(time_scale)
+    if not math.isfinite(scale) or scale <= 0:
+        raise ValueError(f"chirp time scale must be a positive number, got {time_scale!r}")
+    ceiling = int(math.floor((scale / 2.0) / basis_cycles_per_unit_m(basis)))
+    return max(1, ceiling)
+
+
+def chirp_num_basis_grid(
+    time_scale: float,
+    *,
+    basis: str = "half_integer",
+    cycles=CHIRP_BASIS_CYCLE_LADDER,
+) -> list[int]:
+    """Candidate pole-basis sizes M for one horizon, clamped at Nyquist.
+
+    The ladder is specified in cycles across the window (the horizon-invariant
+    unit) and converted to M for the active basis, so a longer horizon
+    automatically raises the grid instead of leaving it pinned at the value that
+    happened to be resolvable at h=12. Clamping — rather than dropping — the
+    entries that exceed the ceiling keeps the maximum resolvable M in the grid
+    at short horizons, which is what the historical [4, 8, 16, 24] did.
+    """
+    per_m = basis_cycles_per_unit_m(basis)
+    ceiling = nyquist_num_basis_ceiling(time_scale, basis=basis)
+    values = [
+        min(max(1, int(round(float(count) / per_m))), ceiling)
+        for count in cycles
+    ]
+    return sorted(set(values))
+
+
+def resolve_chirp_time_scale(defaults) -> float:
+    """Window length L the chirp basis frequencies are normalized by.
+
+    Mirrors ``train_val_llapdiff._resolve_chirp_time_scale``: ``None`` (the
+    default) resolves to the run's horizon, a number pins L explicitly, and
+    ``"adaptive"`` uses a per-sample L = max|t_rel| — which has no fixed value
+    here, so the horizon is the right planning proxy for it too.
+    """
+    value = getattr(defaults, "CHIRP_TIME_SCALE", None)
+    if isinstance(value, str):
+        if value.strip().lower() != "adaptive":
+            raise ValueError(
+                f"Unknown CHIRP_TIME_SCALE '{value}'. Use None (horizon), a number, or 'adaptive'."
+            )
+        value = None
+    if value is None:
+        return float(getattr(defaults, "PRED"))
+    return float(value)
+
+
+def chirp_num_basis_stage(defaults=None) -> tuple:
+    """The ``chirp_num_basis`` sweep stage, scaled to this setting's horizon."""
+    if defaults is None:
+        time_scale = float(FALLBACK_CHIRP_TIME_SCALE)
+        basis = "half_integer"
+    else:
+        time_scale = resolve_chirp_time_scale(defaults)
+        basis = str(getattr(defaults, "CHIRP_BASIS", "half_integer"))
+    return ("chirp_num_basis", "config", "CHIRP_NUM_BASIS", chirp_num_basis_grid(time_scale, basis=basis))
+
+
+# Horizon-agnostic view of Tier 2, kept so the grids stay editable in one place
+# (README §7.2). ``stages_for_arm(defaults=...)`` substitutes the horizon-scaled
+# chirp_num_basis grid; without ``defaults`` this falls back to the h=12 grid.
+TIER2_STAGES = [chirp_num_basis_stage(), *TIER2_FIXED_STAGES]
 
 # ---- Tier 3: capacity (only if Tiers 1-2 leave a gap; --include-tier3) -------
 TIER3_STAGES = [
@@ -99,10 +201,16 @@ SAMPLING_GRID = {
 }
 
 
-def stages_for_arm(arm: str, *, include_tier3: bool = False) -> list[tuple]:
+def stages_for_arm(arm: str, *, include_tier3: bool = False, defaults=None) -> list[tuple]:
+    """Sweep stages for one arm.
+
+    ``defaults`` is the preset-applied config namespace for this (dataset,
+    horizon); pass it so the chirp_num_basis grid scales with the horizon
+    instead of using the h=12 fallback.
+    """
     stages = list(TIER1_STAGES)
     if arm in CHIRP_ARMS:
-        stages += TIER2_STAGES
+        stages += [chirp_num_basis_stage(defaults), *TIER2_FIXED_STAGES]
     if include_tier3:
         stages += TIER3_STAGES
     return stages

@@ -48,7 +48,12 @@ from common import (  # noqa: E402
     trial_id,
     values_equal,
 )
-from search_spaces import sampling_cells, stages_for_arm  # noqa: E402
+from search_spaces import (  # noqa: E402
+    nyquist_num_basis_ceiling,
+    resolve_chirp_time_scale,
+    sampling_cells,
+    stages_for_arm,
+)
 
 DEFAULT_FINAL_SEEDS = (0, 1, 2, 3, 4)
 
@@ -328,13 +333,27 @@ class Combo:
     # ---------------- phases
     def phase_train(self) -> None:
         defaults = resolve_defaults(self.dataset, self.pred)
-        stages = stages_for_arm(self.arm, include_tier3=self.args.include_tier3)
+        # defaults carries PRED/CHIRP_BASIS/CHIRP_TIME_SCALE, so the chirp_num_basis
+        # grid is scaled to this horizon's Nyquist ceiling rather than h=12's.
+        stages = stages_for_arm(
+            self.arm, include_tier3=self.args.include_tier3, defaults=defaults
+        )
         if self.args.stages is not None:
             wanted = set(self.args.stages)
             unknown = wanted - {s[0] for s in stages}
             if unknown:
                 raise SystemExit(f"Unknown/inapplicable stages for arm {self.arm}: {sorted(unknown)}")
             stages = [s for s in stages if s[0] in wanted]
+
+        grid = next((s[3] for s in stages if s[0] == "chirp_num_basis"), None)
+        if grid is not None:
+            basis = str(getattr(defaults, "CHIRP_BASIS", "half_integer"))
+            time_scale = resolve_chirp_time_scale(defaults)
+            self.log(
+                f"chirp_num_basis grid {grid} "
+                f"(basis={basis}, L={time_scale:g}, Nyquist ceiling M<="
+                f"{nyquist_num_basis_ceiling(time_scale, basis=basis)})"
+            )
 
         baseline = self.ensure_trial({}, "baseline", self.args.seed, need_score=True)
         if baseline is None and not self.args.dry_run:
@@ -667,7 +686,10 @@ def main() -> None:
                 combo.phase_sampling()
             if args.phase == "final":
                 combo.phase_final()
-            combo.save()
+            if not args.dry_run:
+                # --dry-run is documented as "touches nothing" (README §3a); the
+                # phases still populate self.state in memory, so only skip the write.
+                combo.save()
 
     if not args.dry_run:
         write_reports(args.run_tag)
