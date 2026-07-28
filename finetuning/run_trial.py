@@ -65,6 +65,11 @@ def main() -> None:
         config.NUM_EVAL_SAMPLES = 4
         config.GEN_STEPS = 8
         config.DOWNSTREAM_EVAL_EVERY = 1  # 3 epochs must still exercise the best-ckpt path
+        # Drop the per-role validation overrides so the smoke actually uses the tiny
+        # settings above (EVAL_* would otherwise win for the trainer's val evals).
+        config.EVAL_STEPS = None
+        config.EVAL_NUM_SAMPLES = None
+        config.EVAL_MAX_BATCHES = 0
     # The harness scores the checkpoint itself (eval_sampling/final_eval), so the
     # trainer's own final test pass is redundant.
     config.FINAL_TEST_EVAL = "skip"

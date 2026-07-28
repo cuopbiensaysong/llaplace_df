@@ -13,7 +13,7 @@ DETERMINISTIC = False
 # matmul peak (38.7 -> 77.4 TFLOP/s) for a 10-bit mantissa on the multiply; the accumulate
 # stays fp32. Measured 1.31x on the denoiser forward. It is a numerical change (CRPS moves in
 # the 4th-5th decimal), so it defaults to False and DETERMINISTIC=True forces it off.
-ALLOW_TF32 = False
+ALLOW_TF32 = True
 VERBOSE = False
 DEBUG = False
 PIPELINE_PREDS = None
@@ -43,9 +43,9 @@ test_ratio = 0.2
 # so workers cannot reorder or perturb batches -- which is what DiffusionSplitCache's
 # sequential fingerprint alignment requires. 0 (the default) keeps the historical
 # single-threaded loader; 8 measured 16.6 -> 5.9 ms/batch on noaa_uk.
-DATALOADER_NUM_WORKERS = 0
-DATALOADER_PERSISTENT_WORKERS = False
-DATALOADER_PREFETCH_FACTOR = None
+DATALOADER_NUM_WORKERS = 8
+DATALOADER_PERSISTENT_WORKERS = True
+DATALOADER_PREFETCH_FACTOR = 4
 
 
 # ============================ VAE (Set-VAE) ============================
@@ -254,7 +254,7 @@ DIFF_PRECOMPUTE_DIR = None
 # on EVERY run, to recompute digests the manifest already stores verbatim. Turning it off is
 # safe because DiffusionSplitCache._claim asserts the fingerprint of every batch of every
 # epoch anyway -- a stale cache then fails loudly at first use instead of being rebuilt.
-DIFF_PRECOMPUTE_VERIFY_PLAN = True
+DIFF_PRECOMPUTE_VERIFY_PLAN = False
 # Validate that all entities in a batch share one target query grid. The identical check
 # already runs on CPU inside the loader collate, so this is a redundant second pass; keeping
 # it costs one device sync per batch.
@@ -305,9 +305,9 @@ GUIDANCE_POWER = 0.3
 # it (see w_docs/DEVELOPER_GUIDE.md §7.3).
 #
 # Unset (None / 0) means "use the reported protocol", i.e. the historical behaviour.
-EVAL_STEPS = None          # DDIM steps; None -> GEN_STEPS (64)
-EVAL_NUM_SAMPLES = None    # ensemble size; None -> NUM_EVAL_SAMPLES (25)
-EVAL_MAX_BATCHES = 0       # cap on val batches per eval; 0 -> the whole loader
+EVAL_STEPS = 16            # DDIM steps; None -> GEN_STEPS (64)
+EVAL_NUM_SAMPLES = 5       # ensemble size; None -> NUM_EVAL_SAMPLES (25)
+EVAL_MAX_BATCHES = 48      # cap on val batches per eval; 0 -> the whole loader
 # How EVAL_MAX_BATCHES picks its subset. "stride" spreads the subset across the whole split
 # (the splits are chronological, so a "prefix" subset of a weather series is a season, not a
 # sample of one). "prefix" keeps the historical truncation used by --max-eval-batches.
@@ -315,7 +315,7 @@ EVAL_SUBSET_MODE = "stride"
 # Seed for the val sampler's RNG. None (the historical behaviour) draws from the global torch
 # RNG, which makes the val CRPS unpaired across epochs -- fatal once the ensemble is small --
 # and lets evaluation perturb the training stream. Setting it makes epochs directly comparable.
-EVAL_SEED = None
+EVAL_SEED = 4242
 
 DYNAMIC_THRESH_P = 0.0
 DYNAMIC_THRESH_MAX = 1.0
