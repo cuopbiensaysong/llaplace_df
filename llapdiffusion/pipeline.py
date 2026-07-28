@@ -11,6 +11,7 @@ from llapdiffusion.benchmark_protocol import llapdiff_protocol_metadata, split_p
 from llapdiffusion.configs.config_utils import (
     DEFAULT_PREDICT_TYPE,
     PREDICT_TYPES,
+    dataloader_kwargs,
     make_jsonable,
     normalize_predict_type,
 )
@@ -69,6 +70,7 @@ def prepare_dataloaders(
         exact_timestamp_batches=bool(getattr(config, "exact_timestamp_batches", True)),
         target_col=target_col,
         target_cols=target_cols,
+        **dataloader_kwargs(config),
     )
 
 

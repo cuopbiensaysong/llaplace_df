@@ -460,7 +460,11 @@ banner whenever `--select-split test` was used.
   `config.X = …` would be silently reverted.
 - **Parity.** All trials of all arms share the identical frozen VAE/summarizer
   (those paths are never trial-routed); Tier-1 grids are identical across arms
-  by construction; every eval uses the same generator seed.
+  by construction; every **scoring** eval (`eval_sampling.py`, `final_eval.py`) uses the
+  same generator seed. The *trainer's own* val CRPS did not: it drew from the global RNG,
+  which left its epoch-to-epoch estimate unpaired and let evaluation perturb the training
+  stream. Set `EVAL_SEED` in `configs/config.py` to pin it — required if you also shrink
+  `EVAL_NUM_SAMPLES`, since a small ensemble makes that noise decisive for epoch selection.
 - **No accidental test contact during training.** Trials train with
   `FINAL_TEST_EVAL="skip"` — the *trainer* never touches test. Test is read only
   by the harness's own scoring passes (which, with `--select-split test`, is

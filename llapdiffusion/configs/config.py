@@ -9,6 +9,11 @@ TARGET_COLS = None
 MKT = "dataset"
 SEED = 42
 DETERMINISTIC = False
+# Allow TF32 tensor cores for fp32 matmuls (Ampere+). On an A6000 this roughly doubles the
+# matmul peak (38.7 -> 77.4 TFLOP/s) for a 10-bit mantissa on the multiply; the accumulate
+# stays fp32. Measured 1.31x on the denoiser forward. It is a numerical change (CRPS moves in
+# the 4th-5th decimal), so it defaults to False and DETERMINISTIC=True forces it off.
+ALLOW_TF32 = False
 VERBOSE = False
 DEBUG = False
 PIPELINE_PREDS = None
@@ -32,6 +37,15 @@ DATES_PER_BATCH = 1
 train_ratio = 0.7
 val_ratio = 0.1
 test_ratio = 0.2
+
+# DataLoader worker settings. The date-batching path uses a fixed _ListBatchSampler with no
+# shuffling, and the only per-sample RNG (context missingness) is seeded by sample identity,
+# so workers cannot reorder or perturb batches -- which is what DiffusionSplitCache's
+# sequential fingerprint alignment requires. 0 (the default) keeps the historical
+# single-threaded loader; 8 measured 16.6 -> 5.9 ms/batch on noaa_uk.
+DATALOADER_NUM_WORKERS = 0
+DATALOADER_PERSISTENT_WORKERS = False
+DATALOADER_PREFETCH_FACTOR = None
 
 
 # ============================ VAE (Set-VAE) ============================
@@ -235,6 +249,16 @@ DIFF_PRECOMPUTE_INPUTS = True
 DIFF_PRECOMPUTE_LATENT_DTYPE = "float32"
 DIFF_PRECOMPUTE_SUMMARY_DTYPE = "float16"
 DIFF_PRECOMPUTE_DIR = None
+# Re-derive the cache's per-batch fingerprints by iterating train+val+test at startup, even
+# when the cache already exists. That is a full pass over all three splits (~25 s on noaa_uk)
+# on EVERY run, to recompute digests the manifest already stores verbatim. Turning it off is
+# safe because DiffusionSplitCache._claim asserts the fingerprint of every batch of every
+# epoch anyway -- a stale cache then fails loudly at first use instead of being rebuilt.
+DIFF_PRECOMPUTE_VERIFY_PLAN = True
+# Validate that all entities in a batch share one target query grid. The identical check
+# already runs on CPU inside the loader collate, so this is a redundant second pass; keeping
+# it costs one device sync per batch.
+DIFF_VALIDATE_DT_GRIDS = True
 
 
 # ============================ Evaluation & Sampling ============================
@@ -252,7 +276,11 @@ EVAL_EVERY = 1
 # feeds checkpoint selection and early stopping. At 0 the trainer computes no CRPS, so
 # it saves no best checkpoint and never early-stops (it falls back to the last epoch).
 DOWNSTREAM_EVAL_EVERY = 5
-VAL_DIAG_EVERY = 1
+# NOTE: EARLY_STOP counts EVALS, not epochs, so it is coupled to DOWNSTREAM_EVAL_EVERY:
+# at every=5 with EARLY_STOP=20 the patience is 100 epochs. Raising the interval without
+# lowering EARLY_STOP multiplies the patience and makes runs LONGER, not shorter.
+# The val diagnostic is a full pass over the val loader; at 1 it ran every single epoch.
+VAL_DIAG_EVERY = 5
 IRREG_CHECK_EVERY = 0
 EMA_COMPARE_EVERY = 0
 
@@ -263,6 +291,31 @@ IMPUTATION_RANDOM_MASK_RATIO = 0.30
 NUM_EVAL_SAMPLES = 25
 GUIDANCE_STRENGTH = (1.0, 2.0)
 GUIDANCE_POWER = 0.3
+
+
+# ---------------- In-training validation protocol (selection only) ----------------
+# _sampling_kwargs(prefix="EVAL") resolves EVAL_<NAME> before the global fallback, and
+# prefix="EVAL" is used at exactly two call sites -- the trainer's val CRPS evals, whose
+# ONLY jobs are choosing the best epoch and driving early stopping. Everything that
+# produces a reported number (the final test read, llapdiff-checkpoint-eval, the tuning
+# harness's eval_sampling.py) goes through prefix="TEST" and is unaffected by these keys.
+#
+# So this protocol only has to RANK checkpoints the same way the full one does; it does not
+# have to reproduce its values. Verify that with a rank-correlation check before relying on
+# it (see w_docs/DEVELOPER_GUIDE.md §7.3).
+#
+# Unset (None / 0) means "use the reported protocol", i.e. the historical behaviour.
+EVAL_STEPS = None          # DDIM steps; None -> GEN_STEPS (64)
+EVAL_NUM_SAMPLES = None    # ensemble size; None -> NUM_EVAL_SAMPLES (25)
+EVAL_MAX_BATCHES = 0       # cap on val batches per eval; 0 -> the whole loader
+# How EVAL_MAX_BATCHES picks its subset. "stride" spreads the subset across the whole split
+# (the splits are chronological, so a "prefix" subset of a weather series is a season, not a
+# sample of one). "prefix" keeps the historical truncation used by --max-eval-batches.
+EVAL_SUBSET_MODE = "stride"
+# Seed for the val sampler's RNG. None (the historical behaviour) draws from the global torch
+# RNG, which makes the val CRPS unpaired across epochs -- fatal once the ensemble is small --
+# and lets evaluation perturb the training stream. Setting it makes epochs directly comparable.
+EVAL_SEED = None
 
 DYNAMIC_THRESH_P = 0.0
 DYNAMIC_THRESH_MAX = 1.0

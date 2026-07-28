@@ -60,6 +60,28 @@ def main() -> None:
         config.NUM_EVAL_SAMPLES = 4
         config.GEN_STEPS = 8
 
+    # This is the touch-test-once step, so verify the cheap in-training validation protocol
+    # (the EVAL_* keys, which exist only to rank checkpoints) cannot reach it. The reported
+    # read resolves through prefix="TEST"; anything that made TEST disagree with the chosen
+    # sampling cell would silently downgrade the number we publish.
+    from llapdiffusion.trainers import train_val_llapdiff as tv
+
+    protocol = tv._sampling_kwargs(config, prefix="TEST")
+    expected_samples = int(getattr(config, "NUM_EVAL_SAMPLES", 25))
+    expected_steps = int(getattr(config, "GEN_STEPS", 64))
+    if int(protocol["num_samples"]) != expected_samples or int(protocol["steps"]) != expected_steps:
+        raise SystemExit(
+            "Final test protocol does not match the requested sampling: resolved "
+            f"steps={protocol['steps']} num_samples={protocol['num_samples']} vs requested "
+            f"steps={expected_steps} num_samples={expected_samples}. A TEST_STEPS / "
+            "TEST_NUM_SAMPLES override in configs/config.py is shadowing it."
+        )
+    if not args.smoke and int(protocol["num_samples"]) < 25:
+        raise SystemExit(
+            f"Refusing to spend the test split at num_samples={protocol['num_samples']}: "
+            "reported numbers use the 25-sample protocol (set NUM_EVAL_SAMPLES=25)."
+        )
+
     checkpoint = Path(args.checkpoint)
     if str(sampling.get("weights") or "raw") == "ema":
         import torch

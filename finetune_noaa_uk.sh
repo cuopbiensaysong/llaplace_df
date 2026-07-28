@@ -32,7 +32,7 @@ set -euo pipefail
 # the run trains and reports normally, on the wrong code.
 # --------------------------------------------------------------------------
 source /vol/dl-nguyenb5-solar/users/cuopbiensaysong/llaplace/bin/activate
-export LLAPDIFF_SRC=/vol/dl-nguyenb5-solar/users/cuopbiensaysong/fixed_bugs/llaplace_df
+export LLAPDIFF_SRC=/vol/dl-nguyenb5-solar/users/cuopbiensaysong/speed_up/llaplace_df
 export PYTHONPATH="$LLAPDIFF_SRC"
 cd "$LLAPDIFF_SRC"
 
@@ -47,9 +47,16 @@ if not got.startswith(want):
 print(f"[guard] llapdiffusion -> {got}")
 GUARD
 
-export CUDA_VISIBLE_DEVICES="2"
-RUN_TAG="${RUN_TAG:-fixed_bugs}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+# A fresh tag: this campaign selects on val (below), so it must not land in the
+# same results tree as the earlier test-selected runs.
+RUN_TAG="${RUN_TAG:-speed_up}"
 ARMS="${ARMS:-d}"
+# tune.py defaults to --select-split test, which costs 314 test batches per trial
+# AND makes the reported test CRPS selection-biased (see the banner in
+# finetuning/README.md). val is 2.15x cheaper and is what cmd_plan_v2.md §1
+# pre-registers.
+SELECT_SPLIT="${SELECT_SPLIT:-val}"
 # Subset of sweep stages, e.g. STAGES="base_lr minsnr_gamma". Empty = all of them.
 STAGES="${STAGES:-}"
 # Extra tune.py flags, e.g. EXTRA_ARGS="--dry-run" for a pre-flight, or
@@ -60,47 +67,66 @@ mkdir -p "$LOG_DIR"
 LOG="$LOG_DIR/noaa_uk_h168_${RUN_TAG}_$(date +%Y%m%dT%H%M%S).log"
 
 # --------------------------------------------------------------------------
-# COST (measured on an RTX A6000, 2026-07-27, chirp core, this cache):
+# COST (re-measured on an RTX A6000, 2026-07-28, chirp core, this cache).
 #
-#   train step (B=15)            70 ms  -> 77 s per epoch (1086 batches)
-#   ONE val CRPS eval            52 min (146 val batches x 25 samples x 64 DDIM
-#                                        steps) and it runs every 5 epochs
-#   => 89% of wall-clock is the val eval, not training
+# CORRECTION to the previous note in this file: it charged ONE forward per DDIM
+# step, but GUIDANCE_STRENGTH=(1.0, 2.0) makes CFG active, so every step runs
+# TWO forwards (conditional + unconditional, llapdiff.py `cfg_active`). The old
+# "52 min / 30 h per trial / 29 days" figures were therefore ~2x optimistic.
 #
-#   earliest possible early stop (157 epochs)   30 h/trial -> 23 trials = 29 days
-#   full 600-epoch schedule                    116 h/trial -> 23 trials = 111 days
+#   denoiser forward, B=15 rows   14.11 ms fp32 / 10.76 ms TF32 (measured)
+#   train step (B=15)             70 ms -> 77 s per epoch (1086 batches)
+#   ONE full val CRPS eval        146 batches x 25 samples x 64 steps x 2 fwd
+#                                 = 110 min, and it runs every 5 epochs
+#   => ~94% of wall-clock is the val eval, not training
+#
+#   earliest possible early stop (157 epochs)   60 h/trial -> 23 trials = 60 days
 #
 # Peak GPU memory is only ~1.3 GiB, so this is pure time, not capacity.
 #
-# The eval protocol is what costs, and it is base-config (not preset-stamped),
-# so editing llapdiffusion/configs/config.py holds for every subsequent run:
+# The fix is that the trainer's val CRPS is used ONLY to pick the best epoch and
+# to early-stop -- it does not need the reported protocol. `_sampling_kwargs`
+# resolves EVAL_* for the trainer's val evals and TEST_* for everything that
+# produces a reported number, so the two are separable. These are base-config
+# (not preset-stamped), so an edit in llapdiffusion/configs/config.py holds:
 #
-#   EVAL_STEPS = 16          # NEW key. _sampling_kwargs(prefix="EVAL") reads it
-#                            # before falling back to GEN_STEPS=64, and ONLY the
-#                            # trainer's val evals use prefix="EVAL" -- the final
-#                            # test read uses prefix="TEST". 4x, no effect on
-#                            # reported numbers.
-#   NUM_EVAL_SAMPLES = 5     # during tuning this only affects the in-trainer val
-#                            # eval: run_trial.py sets FINAL_TEST_EVAL="skip" and
-#                            # the harness scores separately via
-#                            # eval_sampling.py --num-samples. 5x.
-#   DOWNSTREAM_EVAL_EVERY = 10   # halves the eval count; EARLY_STOP counts EVALS,
-#   EARLY_STOP = 10              # so halve it too to keep the same patience in
-#                                # epochs.
+#   EVAL_STEPS       = 16   # vs GEN_STEPS=64            -> 4x
+#   EVAL_NUM_SAMPLES = 5    # vs NUM_EVAL_SAMPLES=25     -> 5x
+#   EVAL_MAX_BATCHES = 48   # strided over the 146       -> 3x
+#   EVAL_SEED        = 4242 # pairs the estimate across epochs (was global RNG)
 #
-# Together those take a trial from ~30 h to ~1 h. Restore 25 / 64 before the
-# --phase final read so the reported test numbers stay on protocol.
+# = 61x off the val eval, taking a trial from ~60 h to ~2.8 h. NONE of these
+# reach a reported number: the harness scores checkpoints via eval_sampling.py
+# and --phase final re-reads test, both at the full 25 x 64 protocol.
+#
+# Do NOT raise DOWNSTREAM_EVAL_EVERY without lowering EARLY_STOP: EARLY_STOP
+# counts EVALS, so at every=10 the patience becomes 200 epochs and trials get
+# LONGER, not shorter.
 # --------------------------------------------------------------------------
 echo "[run] noaa_uk h=168 | arms=$ARMS | run-tag=$RUN_TAG | GPU=$CUDA_VISIBLE_DEVICES"
-echo "[run] stages=${STAGES:-<all>} | log=$LOG"
+echo "[run] stages=${STAGES:-<all>} | select-split=$SELECT_SPLIT | log=$LOG"
 python - <<'COST'
 from llapdiffusion.configs import config
-n, s, every = config.NUM_EVAL_SAMPLES, getattr(config, "EVAL_STEPS", config.GEN_STEPS), config.DOWNSTREAM_EVAL_EVERY
-per_eval = 146 * n * (s / 64) * 0.85 / 60          # min, from the measured 0.85 s/draw at 64 steps
-per_trial = (157 / every) * per_eval + 157 * 77 / 60
-print(f"[cost] NUM_EVAL_SAMPLES={n} EVAL_STEPS={s} DOWNSTREAM_EVAL_EVERY={every}")
-print(f"[cost] ~{per_eval:.0f} min per val eval -> ~{per_trial/60:.1f} h per trial (earliest early stop)"
-      f" -> ~{per_trial*23/1440:.1f} days for 23 trials")
+from llapdiffusion.configs.dataset_defaults import apply_dataset_preset
+from llapdiffusion.trainers import train_val_llapdiff as tv
+
+apply_dataset_preset(config, "noaa_uk", pred=168)
+ev = tv._sampling_kwargs(config, prefix="EVAL")
+te = tv._sampling_kwargs(config, prefix="TEST")
+default_n = int(getattr(config, "NUM_EVAL_SAMPLES", 25))
+ev_n, te_n = int(ev.get("num_samples", default_n)), int(te.get("num_samples", default_n))
+cap = int(getattr(config, "EVAL_MAX_BATCHES", 0) or 0)
+nb = min(cap, 146) if cap > 0 else 146
+# Measured per-forward at B=15 rows; x2 because CFG runs cond + uncond per step.
+fwd_ms = 10.76 if getattr(config, "ALLOW_TF32", False) else 14.11
+every = int(config.DOWNSTREAM_EVAL_EVERY)
+per_eval = nb * ev_n * int(ev["steps"]) * 2 * fwd_ms / 1000 / 60            # minutes
+per_trial = (157 / every) * per_eval + 157 * 77 / 60                       # minutes
+print(f"[cost] val  protocol: steps={ev['steps']} samples={ev_n} batches={nb}/146 "
+      f"every={every} epochs  seed={getattr(config, 'EVAL_SEED', None)}")
+print(f"[cost] test protocol: steps={te['steps']} samples={te_n}  <- the reported numbers")
+print(f"[cost] ~{per_eval:.1f} min per val eval -> ~{per_trial/60:.1f} h per trial "
+      f"(earliest early stop) -> ~{per_trial*23/1440:.1f} days for 23 trials")
 COST
 
 python finetuning/tune.py \
@@ -108,6 +134,7 @@ python finetuning/tune.py \
   --preds 168 \
   --arms $ARMS \
   --run-tag "$RUN_TAG" \
+  --select-split "$SELECT_SPLIT" \
   ${STAGES:+--stages $STAGES} \
   ${EXTRA_ARGS} \
   2>&1 | tee "$LOG"

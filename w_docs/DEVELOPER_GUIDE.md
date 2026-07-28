@@ -158,6 +158,15 @@ target-mask-aux defaults, `TIMESTEPS`, `MODEL_WIDTH`, `LAPLACE_K`, and (for
 > `--modal-type` flag, set once in `main()`) **survives** both preset
 > applications. `_llapdiff_model_kwargs` reads them at model-build time.
 
+> **Note (performance / eval-protocol keys).** Same story for the knobs added for the
+> speed-up work — all base-config, none preset-stamped, and **all defaulting to the
+> historical behaviour** so existing checkpoints and results reproduce unchanged:
+> `ALLOW_TF32`; `DATALOADER_NUM_WORKERS` / `_PERSISTENT_WORKERS` / `_PREFETCH_FACTOR`;
+> `DIFF_VALIDATE_DT_GRIDS`; `DIFF_PRECOMPUTE_VERIFY_PLAN`; and the validation-protocol
+> block `EVAL_STEPS` / `EVAL_NUM_SAMPLES` / `EVAL_MAX_BATCHES` / `EVAL_SUBSET_MODE` /
+> `EVAL_SEED` (§7.6). For the `EVAL_*` keys, **`None` means "unset"** — `_sampling_kwargs`
+> skips them and falls back to the reported protocol.
+
 ### 🔴 Footgun #1: the preset is applied **twice**, and resets your edits
 
 `apply_dataset_preset` runs once in `main()` **and again inside
@@ -537,6 +546,39 @@ path, and the residues `theta [B,2K,D]` (the constant cₖ/bₖ) are reused unch
   (both cores, final-step semantics, no-op when absent) and
   `modal_contributions` (analytic E_k, lti expansion, junk-mode ranking guard).
 
+### 7.6 Validation protocol vs reported protocol (the campaign's cost)
+
+`_sampling_kwargs(config_obj, prefix=...)` (`train_val_llapdiff.py`) resolves
+`{prefix}_{NAME}` first and falls back to the global key. Two roles use it:
+
+- `prefix="EVAL"` — **exactly two call sites**, both the trainer's in-training val CRPS.
+  Their only jobs are picking the best epoch and driving early stopping.
+- `prefix="TEST"` — everything that produces a **reported** number: the trainer's final
+  test read, `llapdiff-checkpoint-eval`, `llapdiff-u1-sweep`, and the tuning harness's
+  `finetuning/eval_sampling.py` / `final_eval.py`.
+
+So the validation protocol only has to **rank** checkpoints the same way; it does not have
+to reproduce the reported values. That matters because it dominates wall-clock: on
+`noaa_uk` h=168 one full val CRPS eval is 146 batches × 25 samples × 64 DDIM steps × **2**
+forwards (CFG runs conditional + unconditional) ≈ 110 min, every 5 epochs — ~94 % of a
+trial. Setting `EVAL_STEPS=16`, `EVAL_NUM_SAMPLES=5`, `EVAL_MAX_BATCHES=48`,
+`EVAL_SEED=4242` cuts that ~61× and leaves every reported number untouched.
+
+🔴 **Before trusting a cheap protocol, check it still ranks.** Score ≥8 checkpoints under
+both protocols on val and require Spearman ρ ≥ 0.9. Otherwise you have made the campaign
+select the wrong hyperparameters, faster.
+
+Two traps:
+
+- `EARLY_STOP` counts **evals**, not epochs. At `DOWNSTREAM_EVAL_EVERY=5` and
+  `EARLY_STOP=20` the patience is 100 epochs. Raising the interval without lowering
+  `EARLY_STOP` makes runs **longer**.
+- `EVAL_MAX_BATCHES` uses a **strided** subset (`EVAL_SUBSET_MODE`, `llapdiffusion/eval_subsets.py`)
+  because splits are chronological — a prefix of a weather series is one season. It is
+  wired only into `evaluate_regression`; **`evaluate_val_diagnostics` must keep the full
+  loader**, because it consumes the sequential `DiffusionSplitCache`, whose `_claim` walks a
+  monotone cursor and tolerates stopping early but not skipping.
+
 > **Output routing.** A chirp run is nested under a `modal-chirp/` segment by
 > `_apply_modal_type_output_routing` (`pipeline.py`), composing with any
 > `predict-<type>/` segment (`predict-x0/modal-chirp/`), so chirp and lti never
@@ -601,6 +643,7 @@ checkpoint metadata. If the checkpoint records it, you don't pass `--predict-typ
 | Change which stages run / the skip logic                                      | `pipeline.py:run_single_pred` (281)                                                                         |
 | Change CLI flags                                                              | `pipeline.py:_parse_args` (475) and `tools/llapdiff_checkpoint_eval.py`                                     |
 | Change evaluation cases / sample counts                                       | `tools/llapdiff_checkpoint_eval.py:evaluate_checkpoint` (610)                                               |
+| Make a run faster (eval protocol, TF32, dataloader workers, device syncs)     | §7.6; keys in `configs/config.py`; subsetting in `llapdiffusion/eval_subsets.py` (the tool's `_limit_batches` is a `prefix`-mode shim over it); loader workers via `configs/config_utils.py:dataloader_kwargs` |
 | Change where artifacts land                                                   | `ARTIFACT_ROOT` in `config.py`; path assembly in `apply_dataset_preset`                                     |
 
 

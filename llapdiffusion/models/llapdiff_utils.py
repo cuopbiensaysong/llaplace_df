@@ -17,16 +17,34 @@ import torch.nn as nn
 # Runtime helpers
 # ============================
 
-def set_torch(seed: int = 42, *, deterministic: bool = False) -> torch.device:
-    """Set process seeds and return the active PyTorch device."""
+def set_torch(
+    seed: int = 42,
+    *,
+    deterministic: bool = False,
+    allow_tf32: bool = False,
+) -> torch.device:
+    """Set process seeds and precision policy, and return the active PyTorch device.
+
+    ``allow_tf32`` enables TF32 tensor cores for fp32 matmuls on Ampere and later. The
+    multiply drops to a 10-bit mantissa while the accumulate stays fp32, which roughly
+    doubles the matmul peak (38.7 -> 77.4 TFLOP/s on an A6000). It is therefore a numerical
+    change, not a free one, so it defaults to off and ``deterministic`` overrides it: TF32
+    matmuls are reproducible but they are not the same numbers a fp32 baseline produced.
+
+    Note this mutates process-global state, so the last caller in a process wins.
+    """
     seed = int(seed)
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     if deterministic:
         torch.use_deterministic_algorithms(True, warn_only=True)
+    tf32 = bool(allow_tf32) and not deterministic
+    torch.backends.cuda.matmul.allow_tf32 = tf32
+    torch.set_float32_matmul_precision("high" if tf32 else "highest")
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.allow_tf32 = tf32
         torch.backends.cudnn.benchmark = not deterministic
         torch.backends.cudnn.deterministic = deterministic
         return torch.device("cuda")

@@ -47,6 +47,30 @@ def clone_config(source: object = base_config) -> SimpleNamespace:
     return SimpleNamespace(**data)
 
 
+def dataloader_kwargs(config_obj: object) -> dict:
+    """DataLoader worker options for ``run_experiment``, resolved from the config.
+
+    Every dataset family's ``run_experiment`` accepts these, but nothing used to pass them,
+    so loaders ran single-threaded in the training process. The date-batching path uses a
+    fixed ``_ListBatchSampler`` with no shuffling and seeds its only per-sample RNG from the
+    sample identity, so workers can change neither the order nor the contents of a batch --
+    which is what ``DiffusionSplitCache``'s sequential fingerprint alignment relies on.
+
+    ``persistent_workers``/``prefetch_factor`` are omitted at 0 workers: PyTorch rejects both.
+    """
+    workers = int(getattr(config_obj, "DATALOADER_NUM_WORKERS", 0) or 0)
+    if workers <= 0:
+        return {"num_workers": 0}
+    prefetch = getattr(config_obj, "DATALOADER_PREFETCH_FACTOR", None)
+    kwargs = {
+        "num_workers": workers,
+        "persistent_workers": bool(getattr(config_obj, "DATALOADER_PERSISTENT_WORKERS", False)),
+    }
+    if prefetch is not None:
+        kwargs["prefetch_factor"] = int(prefetch)
+    return kwargs
+
+
 def make_jsonable(obj: Any):
     if isinstance(obj, (str, int, float, bool)) or obj is None:
         return obj

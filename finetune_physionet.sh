@@ -29,7 +29,7 @@ set -euo pipefail
 # the run trains and reports normally, on the wrong code.
 # --------------------------------------------------------------------------
 source /vol/dl-nguyenb5-solar/users/cuopbiensaysong/llaplace/bin/activate
-export LLAPDIFF_SRC=/vol/dl-nguyenb5-solar/users/cuopbiensaysong/fixed_bugs/llaplace_df
+export LLAPDIFF_SRC=/vol/dl-nguyenb5-solar/users/cuopbiensaysong/speed_up/llaplace_df
 export PYTHONPATH="$LLAPDIFF_SRC"
 cd "$LLAPDIFF_SRC"
 

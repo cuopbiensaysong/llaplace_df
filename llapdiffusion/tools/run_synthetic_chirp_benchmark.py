@@ -1123,7 +1123,11 @@ def main() -> None:
             for arm in args.arms:
                 cfg = _configure(task, str(arm), int(seed), args)
                 _artifact_cache_guard(cfg, args)
-                device = set_torch(seed=int(seed), deterministic=False)
+                device = set_torch(
+                    seed=int(seed),
+                    deterministic=False,
+                    allow_tf32=bool(getattr(cfg, "ALLOW_TF32", False)),
+                )
                 loaders = _build_loaders(cfg)
                 stage_payload = _train_or_reuse_stack(cfg, loaders, args)
                 checkpoint = str(stage_payload["paths"]["llapdiff"])

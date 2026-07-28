@@ -728,7 +728,11 @@ def _evaluate_checkpoint(
     args: argparse.Namespace,
 ) -> Dict[str, object]:
     train_dl, _, test_dl, _ = loaders
-    device = set_torch(seed=int(getattr(cfg, "SEED", 42)), deterministic=bool(getattr(cfg, "DETERMINISTIC", False)))
+    device = set_torch(
+        seed=int(getattr(cfg, "SEED", 42)),
+        deterministic=bool(getattr(cfg, "DETERMINISTIC", False)),
+        allow_tf32=bool(getattr(cfg, "ALLOW_TF32", False)),
+    )
     diff_model, vae, summarizer, mu_mean, mu_std = _load_stack(cfg, Path(checkpoint), device, train_dl)
     sampling = tv._sampling_kwargs(cfg, prefix="TEST")
     disable_conditioning = conditioning_mode == "unconditioned"

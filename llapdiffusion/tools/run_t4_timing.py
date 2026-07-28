@@ -49,7 +49,11 @@ def _infer_pred(path: Path) -> int:
 def _time_checkpoint(dataset_key: str, ckpt: Path, args) -> Dict[str, object]:
     pred = _infer_pred(ckpt)
     cfg = build_eval_config(dataset_key, pred)
-    device = set_torch(seed=int(getattr(cfg, "SEED", 42)), deterministic=False)
+    device = set_torch(
+        seed=int(getattr(cfg, "SEED", 42)),
+        deterministic=False,
+        allow_tf32=bool(getattr(cfg, "ALLOW_TF32", False)),
+    )
     loaders, stack = prepare_eval_stack(cfg, ckpt, device=device)
     _, _, test_dl, _ = loaders
     diff_model, vae, summarizer, mu_mean, mu_std = stack

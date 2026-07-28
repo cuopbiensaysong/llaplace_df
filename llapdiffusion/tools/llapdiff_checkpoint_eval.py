@@ -13,9 +13,19 @@ import torch
 from llapdiffusion.benchmark_protocol import llapdiff_protocol_metadata, split_protocol_metadata
 from llapdiffusion.trainers import train_val_llapdiff as tv
 from llapdiffusion.configs.dataset_archives import configure_dataset_archive
-from llapdiffusion.configs.config_utils import clone_config, make_jsonable, normalize_predict_type
+from llapdiffusion.configs.config_utils import (
+    clone_config,
+    dataloader_kwargs,
+    make_jsonable,
+    normalize_predict_type,
+)
 from llapdiffusion.configs.dataset_defaults import apply_dataset_preset, dataset_keys, default_horizons
 from llapdiffusion.configs.dataset_registry import resolve_run_experiment
+from llapdiffusion.eval_subsets import (
+    BatchSubset as _LimitedBatches,  # re-exported: external callers referenced this name
+    limit_batches,
+    resolve_max_eval_batches as _resolve_max_eval_batches,
+)
 from llapdiffusion.datasets.target_selection import resolve_target_selection
 from llapdiffusion.logging_utils import apply_verbosity, is_verbose, progress_task
 
@@ -142,42 +152,18 @@ def _resolve_sample_counts(
     return forecast_samples, imputation_samples
 
 
-def _resolve_max_eval_batches(max_eval_batches: Optional[int]) -> Optional[int]:
-    if max_eval_batches is None:
-        return None
-    batch_cap = int(max_eval_batches)
-    if batch_cap < 0:
-        raise ValueError("max_eval_batches must be non-negative")
-    return None if batch_cap == 0 else batch_cap
-
-
-class _LimitedBatches:
-    def __init__(self, dataloader, max_batches: int):
-        self._dataloader = dataloader
-        self._max_batches = int(max_batches)
-
-    def __iter__(self):
-        for batch_idx, batch in enumerate(self._dataloader):
-            if batch_idx >= self._max_batches:
-                break
-            yield batch
-
-    def __len__(self) -> int:
-        try:
-            return min(len(self._dataloader), self._max_batches)
-        except TypeError:
-            return self._max_batches
-
-
 def _limit_batches(dataloader, max_batches: Optional[int]):
-    if max_batches is None:
-        return dataloader
-    return _LimitedBatches(dataloader, max_batches)
+    """``--max-eval-batches`` keeps PREFIX semantics: it is a smoke-test knob, and switching
+    it to the trainer's strided default would silently move every number it has produced."""
+    return limit_batches(dataloader, max_batches, mode="prefix")
 
 
 def _config_with_num_eval_samples(cfg: SimpleNamespace, num_samples: int) -> SimpleNamespace:
     cfg_copy = SimpleNamespace(**vars(cfg))
     cfg_copy.NUM_EVAL_SAMPLES = int(num_samples)
+    # Also clear the per-role override, so an explicit --forecast-num-samples wins over a
+    # TEST_NUM_SAMPLES set in config.py (_sampling_kwargs prefers the prefixed key).
+    cfg_copy.TEST_NUM_SAMPLES = None
     return cfg_copy
 
 
@@ -643,7 +629,11 @@ def evaluate_checkpoint(
         imputation_num_samples=imputation_num_samples,
     )
     batch_cap = _resolve_max_eval_batches(max_eval_batches)
-    device = set_torch(seed=int(getattr(cfg, "SEED", 42)), deterministic=bool(getattr(cfg, "DETERMINISTIC", False)))
+    device = set_torch(
+        seed=int(getattr(cfg, "SEED", 42)),
+        deterministic=bool(getattr(cfg, "DETERMINISTIC", False)),
+        allow_tf32=bool(getattr(cfg, "ALLOW_TF32", False)),
+    )
     run_experiment = resolve_run_experiment(cfg.DATA_DIR)
     batch_size = int(getattr(cfg, "BATCH_SIZE", getattr(cfg, "DATES_PER_BATCH", 1)))
     train_dl, val_dl, test_dl, sizes = run_experiment(
@@ -659,6 +649,7 @@ def evaluate_checkpoint(
         exact_timestamp_batches=bool(getattr(cfg, "exact_timestamp_batches", True)),
         target_col=None if getattr(cfg, "TARGET_COLS", None) else getattr(cfg, "TARGET_COL", None),
         target_cols=getattr(cfg, "TARGET_COLS", None),
+        **dataloader_kwargs(cfg),
     )
     if verbose and sizes is not None:
         print("eval sizes:", tuple(sizes))
@@ -674,6 +665,9 @@ def evaluate_checkpoint(
     )
     test_sampling = tv._sampling_kwargs(cfg, prefix="TEST")
     forecast_cfg = _config_with_num_eval_samples(cfg, forecast_samples)
+    # Resolve the forecast protocol from forecast_cfg, not cfg: _sampling_kwargs emits
+    # num_samples, so passing cfg's value here would silently override --forecast-num-samples.
+    forecast_sampling = tv._sampling_kwargs(forecast_cfg, prefix="TEST")
 
     forecast = tv.evaluate_regression(
         diff_model,
@@ -690,7 +684,7 @@ def evaluate_checkpoint(
         verbose=verbose,
         progress_enabled=verbose,
         progress_label="checkpoint-eval forecast_test",
-        **test_sampling,
+        **forecast_sampling,
     )
     regular = _with_imputation_metric_target(_evaluate_impute_case(
         _limit_batches(test_dl, batch_cap),
