@@ -120,8 +120,13 @@ nb = min(cap, 146) if cap > 0 else 146
 # Measured per-forward at B=15 rows; x2 because CFG runs cond + uncond per step.
 fwd_ms = 10.76 if getattr(config, "ALLOW_TF32", False) else 14.11
 every = int(config.DOWNSTREAM_EVAL_EVERY)
+# Measured 2026-07-28 on this cache/GPU: 82.4 s per 1086-batch epoch (76 ms/step).
+# Training did NOT get faster with the 2026-07-28 changes -- the step is dominated by real
+# GPU compute in two small cond/uncond passes, where TF32 buys little at ~15 rows. It is now
+# the majority of a trial, so the next lever is LAPLACE_K (see CMD_RUNBOOK §3), not the eval.
+epoch_s = 82.4
 per_eval = nb * ev_n * int(ev["steps"]) * 2 * fwd_ms / 1000 / 60            # minutes
-per_trial = (157 / every) * per_eval + 157 * 77 / 60                       # minutes
+per_trial = (157 / every) * per_eval + 157 * epoch_s / 60                  # minutes
 print(f"[cost] val  protocol: steps={ev['steps']} samples={ev_n} batches={nb}/146 "
       f"every={every} epochs  seed={getattr(config, 'EVAL_SEED', None)}")
 print(f"[cost] test protocol: steps={te['steps']} samples={te_n}  <- the reported numbers")
