@@ -181,9 +181,20 @@ routing. Trials are rooted under `ldt/tuning/` so they can **never** collide
 with the paper runs in `ldt/output/` (which keep all variants). Delete
 `ldt/tuning/<run-tag>/` to reclaim disk; `results/` (the numbers) is unaffected.
 
-> A `*_emaweights.pt` sibling also appears after a `weights: ema` **final** eval:
-> `llapdiff-checkpoint-eval` always loads the `model` key, so `final_eval.py`
-> writes a copy whose `model` entries are the EMA shadow.
+> 🔴 **`final_eval.py` no longer materialises a `*_emaweights.pt` sibling** — it
+> passes `--weights ema` to `llapdiff-checkpoint-eval`, which applies the shadow to
+> the live parameters. The old approach rewrote the `model` state_dict key-wise and
+> was **wrong**: `LapFormer` passes `self.analysis` into `LaplacePseudoInverse`, so
+> `model.analysis.*` and `model.synthesis.encoder.*` are the same tensors.
+> `state_dict()` lists both names; the EMA shadow is built from
+> `named_parameters()`, which de-duplicates, so it carries only the first. The alias
+> therefore kept its RAW value and, being applied later by `load_state_dict`,
+> overwrote the EMA one — scoring a hybrid whose entire Laplace analysis encoder was
+> un-averaged. Measured cost on physionet h=12: **0.010 CRPS**, biased high, larger
+> than the whole tuning gain. Any `--phase final` result produced before this fix is
+> void; `*_emaweights.pt` files left on disk are stale and can be deleted.
+> Selection numbers are unaffected — `eval_sampling.py` always copied onto live
+> parameters, where aliasing is harmless.
 
 **Which checkpoint gets scored — and the config that makes it work.** Every
 checkpoint payload stores *both* raw weights (`model`) and the EMA shadow

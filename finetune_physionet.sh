@@ -45,7 +45,7 @@ print(f"[guard] llapdiffusion -> {got}")
 GUARD
 
 export CUDA_VISIBLE_DEVICES="1"
-RUN_TAG="${RUN_TAG:-fixed_bugs}"
+RUN_TAG="${RUN_TAG:-seed8}"
 ARMS="${ARMS:-d}"
 # Extra tune.py flags, e.g. EXTRA_ARGS="--dry-run" for a pre-flight, or
 # EXTRA_ARGS="--select-split val" / "--phase final --final-seeds 0 1 2 3 4".
@@ -64,7 +64,12 @@ echo "[run] expect a few hours for the whole campaign. Log: $LOG"
 python finetuning/tune.py \
   --dataset-key physionet \
   --preds 12 \
-  --arms $ARMS \
+  --arms $ARMS --seed 8\
   --run-tag "$RUN_TAG" \
   ${EXTRA_ARGS} \
   2>&1 | tee "$LOG"
+
+python finetuning/tune.py \
+  --dataset-key physionet --preds 12 --arms d \
+  --run-tag seed8 \
+  --phase final --final-seeds 0 1 2 3 4 5 6 7 8 9

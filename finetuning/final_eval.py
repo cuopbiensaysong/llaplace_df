@@ -30,9 +30,32 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--sampling-json", default="{}")
     parser.add_argument("--out-json", required=True)
     parser.add_argument("--imputation-random-mask-ratio", type=float, default=0.30)
+    parser.add_argument(
+        "--generator-seed", default="config",
+        help="DDIM sampling-noise seed. 'config' (default) = config.SEED, which is what "
+             "eval_sampling.py pins during the sweep -- so the final read is directly "
+             "comparable with the selected sampling cell instead of differing by a fresh "
+             "noise draw (measured ~0.012 CRPS on physionet h=12, larger than the whole "
+             "tuning gain). 'none' restores the legacy unpinned checkpoint-eval behaviour; "
+             "or pass an integer.",
+    )
     parser.add_argument("--smoke", action="store_true",
                         help="Tiny ensemble/steps plumbing check (never for reported numbers).")
     return parser.parse_args()
+
+
+def _resolve_generator_seed(value: object, config) -> int | None:
+    text = str(value).strip().lower()
+    if text == "none":
+        return None
+    if text == "config":
+        return int(getattr(config, "SEED", 42))
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise SystemExit(
+            f"--generator-seed must be 'config', 'none', or an integer; got {value!r}"
+        ) from exc
 
 
 def main() -> None:
@@ -41,6 +64,8 @@ def main() -> None:
     sampling = json.loads(args.sampling_json)
 
     from llapdiffusion.configs import config
+
+    generator_seed = _resolve_generator_seed(args.generator_seed, config)
 
     guidance = sampling.get("guidance")
     if guidance is not None:
@@ -61,24 +86,13 @@ def main() -> None:
         config.GEN_STEPS = 8
 
     checkpoint = Path(args.checkpoint)
-    if str(sampling.get("weights") or "raw") == "ema":
-        import torch
-
-        payload = torch.load(checkpoint, map_location="cpu")
-        shadow = payload.get("ema") or {}
-        if not shadow:
-            raise ValueError(f"weights=ema requested but checkpoint has no EMA state: {checkpoint}")
-        model_state = payload["model"]
-        replaced = 0
-        for name, tensor in shadow.items():
-            if name in model_state:
-                model_state[name] = tensor
-                replaced += 1
-        if replaced == 0:
-            raise ValueError("EMA shadow keys did not match any model parameters.")
-        checkpoint = checkpoint.with_name(checkpoint.stem + "_emaweights.pt")
-        torch.save(payload, checkpoint)
-        print(f"[final_eval] materialized EMA-weights checkpoint ({replaced} tensors): {checkpoint}")
+    # The weight source is handed to checkpoint-eval, which applies the EMA shadow to
+    # the live parameters. This used to materialise a sibling *_emaweights.pt by
+    # rewriting the state_dict key-wise, which silently scored a raw/EMA hybrid:
+    # model.synthesis.encoder.* aliases model.analysis.* and is absent from the
+    # shadow, so the raw alias overwrote the EMA values on load (0.010 CRPS on
+    # physionet h=12, larger than the whole tuning gain).
+    weights = str(sampling.get("weights") or "raw").strip().lower()
 
     from llapdiffusion.tools import llapdiff_checkpoint_eval as checkpoint_eval
 
@@ -89,7 +103,11 @@ def main() -> None:
         "--checkpoint", str(checkpoint),
         "--imputation-random-mask-ratio", str(args.imputation_random_mask_ratio),
         "--out-json", args.out_json,
+        "--weights", weights,
     ]
+    if generator_seed is not None:
+        sys.argv += ["--generator-seed", str(generator_seed)]
+        print(f"[final_eval] DDIM sampling noise pinned to generator seed {generator_seed}")
     checkpoint_eval.main()
 
 
