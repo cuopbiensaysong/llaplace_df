@@ -36,6 +36,26 @@ ARM_LABELS = {
 }
 CHIRP_ARMS = ("c", "d")
 
+# Chirp pole-function parameterizations (method §4.2). Mirrors
+# laptrans.CHIRP_PARAMETERIZATIONS / pipeline.CHIRP_PARAMETERIZATIONS; duplicated
+# as a literal so the env-free harness needn't import torch to plan a campaign.
+CHIRP_PARAMETERIZATIONS = ("p_exact", "p_mono", "p_grid")
+DEFAULT_CHIRP_PARAMETERIZATION = "p_exact"
+
+
+def campaign_run_tag(run_tag: str, chirp_parameterization: str) -> str:
+    """Namespace a campaign by its chirp parameterization.
+
+    p_exact keeps the bare run-tag (backward compatible with existing runs);
+    p_mono/p_grid nest under a ``pole-<param>`` segment so their state, tuning
+    artifacts, and reports are fully isolated from p_exact and from each other.
+    The whole tree (results + ldt/tuning) is keyed on the returned tag, so
+    incumbents are never mixed across parameterizations.
+    """
+    if chirp_parameterization == DEFAULT_CHIRP_PARAMETERIZATION:
+        return run_tag
+    return f"{run_tag}/pole-{chirp_parameterization}"
+
 
 def values_equal(a: object, b: object) -> bool:
     if isinstance(a, (int, float)) and isinstance(b, (int, float)):

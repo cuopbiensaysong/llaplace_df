@@ -50,6 +50,25 @@ def normalize_modal_type(mode: object) -> str:
     return value
 
 
+# Above this the naive log(expm1(y)) overflows float32 (expm1 saturates at
+# y ~ 88.7) while softplus(y) == y to well under float32 eps, so the identity
+# branch is both safe and exact.
+_INVERSE_SOFTPLUS_LINEAR_ABOVE = 20.0
+
+
+def inverse_softplus(y: torch.Tensor) -> torch.Tensor:
+    """Stable inverse of ``F.softplus``: returns x with ``softplus(x) == y``.
+
+    The naive ``log(expm1(y))`` overflows to ``inf`` for y ≳ 88.7 in float32,
+    which silently poisons any parameter initialized from it. For large y,
+    ``softplus(y) -> y``, so the identity is used there; the exact form is kept
+    for small y (where ``y + log1p(-exp(-y))`` would instead lose all precision
+    as ``exp(-y) -> 1``). ``y`` must be positive.
+    """
+    safe = y.clamp_max(_INVERSE_SOFTPLUS_LINEAR_ABOVE)
+    return torch.where(y > _INVERSE_SOFTPLUS_LINEAR_ABOVE, y, torch.log(torch.expm1(safe)))
+
+
 class LaplaceTransformEncoder(nn.Module):
     """Modal analysis that maps a time sequence to modal residues.
 
@@ -432,8 +451,12 @@ class ChirpModalField(nn.Module):
             init_u = math.log(math.expm1(1e-3))  # softplus(base) = 1e-3 -> near-LTI init
             self._mono_u_base = nn.Parameter(torch.full((2, self.k, self.num_basis), init_u))
             rates = torch.linspace(1.0, float(self.num_basis), self.num_basis)
+            # Stable inverse-softplus: the naive log(expm1(rates)) overflows to inf
+            # for rates > ~88.7 in float32, so any num_basis >= 89 (the config
+            # default is 256) initialized this parameter non-finite and the first
+            # training step died with "non-finite loss detected".
             self._mono_rate_raw = nn.Parameter(
-                torch.log(torch.expm1(rates)).view(1, self.num_basis).expand(self.k, -1).clone()
+                inverse_softplus(rates).view(1, self.num_basis).expand(self.k, -1).clone()
             )
             self._mono_shift = nn.Parameter(
                 torch.empty(self.k, self.num_basis).uniform_(-2.0, 2.0)

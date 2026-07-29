@@ -30,7 +30,14 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import ARM_FLAGS, REPO_ROOT, TUNING_ARTIFACT_ROOT  # noqa: E402
+from common import (  # noqa: E402
+    ARM_FLAGS,
+    CHIRP_ARMS,
+    CHIRP_PARAMETERIZATIONS,
+    DEFAULT_CHIRP_PARAMETERIZATION,
+    REPO_ROOT,
+    TUNING_ARTIFACT_ROOT,
+)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -38,6 +45,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset-key", required=True)
     parser.add_argument("--pred", type=int, required=True)
     parser.add_argument("--arm", choices=sorted(ARM_FLAGS), required=True)
+    parser.add_argument("--chirp-parameterization", choices=CHIRP_PARAMETERIZATIONS,
+                        default=DEFAULT_CHIRP_PARAMETERIZATION,
+                        help="Chirp pole-function parameterization. Only forwarded to the "
+                             "chirp arms (c, d); inert for the lti arms (a, b).")
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--trial-id", required=True)
     parser.add_argument("--run-tag", required=True)
@@ -116,6 +127,12 @@ def main() -> None:
     predict_type = cli_overrides.pop("predict_type", None)
     if predict_type and str(predict_type) != "v":
         argv += ["--predict-type", str(predict_type)]
+    # Forward the pole-function parameterization only to the chirp arms — the lti
+    # core builds no chirp field, and llapdiff-train rejects the flag without it.
+    # p_exact is the pipeline default, so skip it to keep argv (and thus the run)
+    # byte-identical to pre-parameterization campaigns.
+    if args.arm in CHIRP_ARMS and args.chirp_parameterization != DEFAULT_CHIRP_PARAMETERIZATION:
+        argv += ["--chirp-parameterization", args.chirp_parameterization]
     if cli_overrides:
         raise ValueError(f"Unsupported cli overrides: {sorted(cli_overrides)}")
 

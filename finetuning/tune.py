@@ -34,9 +34,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (  # noqa: E402
     ARM_FLAGS,
     ARM_LABELS,
+    CHIRP_PARAMETERIZATIONS,
+    DEFAULT_CHIRP_PARAMETERIZATION,
     FINETUNING_DIR,
     REPO_ROOT,
     RESULTS_ROOT,
+    campaign_run_tag,
     canonical_overrides,
     cell_key,
     combo_dir,
@@ -72,6 +75,15 @@ def _parse_args() -> argparse.Namespace:
                         help="Horizons to tune (one tuning campaign per horizon).")
     parser.add_argument("--arms", nargs="+", choices=sorted(ARM_FLAGS), default=["d"],
                         help="Factorial arms: a=lti+head b=lti-head c=chirp+head d=CMD.")
+    parser.add_argument("--chirp-parameterization", choices=CHIRP_PARAMETERIZATIONS,
+                        default=DEFAULT_CHIRP_PARAMETERIZATION,
+                        help="Chirp pole-function parameterization for the WHOLE campaign "
+                             "(method §4.2): p_exact (default; nonneg Fourier basis, closed-form "
+                             "antiderivative), p_mono (monotone integrated poles), or p_grid "
+                             "(pointwise poles + cumulative-trapezoid integration). Non-default "
+                             "campaigns are namespaced under <run-tag>/pole-<param>/ so their "
+                             "state, artifacts, and reports never mix with p_exact. Affects the "
+                             "chirp arms (c, d) only; the lti arms are trained identically.")
     parser.add_argument("--phase", choices=("train", "sampling", "final", "all", "report"),
                         default="all",
                         help="'all' = train + sampling. 'final' (multi-seed + imputation) "
@@ -173,6 +185,7 @@ class Combo:
         self.state.setdefault("run_tag", args.run_tag)
         self.state.setdefault("tune_seed", int(args.seed))
         self.state.setdefault("smoke", bool(args.smoke))
+        self.state["chirp_parameterization"] = args.chirp_parameterization
         self.state["selection"] = {"split": args.select_split, "weights": args.select_weights}
         self.state.setdefault("trials", {})
         self._planned: set[str] = set()
@@ -240,6 +253,7 @@ class Combo:
                 "--dataset-key", self.dataset,
                 "--pred", str(self.pred),
                 "--arm", self.arm,
+                "--chirp-parameterization", self.args.chirp_parameterization,
                 "--seed", str(seed),
                 "--trial-id", tid,
                 "--run-tag", self.args.run_tag,
@@ -521,10 +535,18 @@ def write_reports(run_tag: str) -> None:
     selection_note = ", ".join(sorted(selections))
     biased = any(s.startswith("test/") for s in selections)
 
+    parameterizations = {
+        (read_json(s) or {}).get("chirp_parameterization", DEFAULT_CHIRP_PARAMETERIZATION)
+        for s in states
+    }
+    param_note = ", ".join(sorted(parameterizations))
+
     lines = [
         f"# CMD hyperparameter tuning — run tag `{run_tag}`",
         "",
         f"_Updated {time.strftime('%Y-%m-%d %H:%M:%S')} by finetuning/tune.py._",
+        "",
+        f"**Chirp parameterization:** {param_note} (pole-function family; chirp arms only).",
         "",
         f"**Selection rule:** lowest CRPS on the **{selection_note}** "
         "(split/weights) at the default sampling protocol.",
@@ -573,6 +595,8 @@ def write_reports(run_tag: str) -> None:
         details.append(f"- Selection: CRPS on **{selection.get('split')}** split, "
                        f"**{selection.get('weights')}** weights; tuning seed "
                        f"{state.get('tune_seed')}")
+        details.append(f"- Chirp parameterization: "
+                       f"**{state.get('chirp_parameterization', DEFAULT_CHIRP_PARAMETERIZATION)}**")
         if inc:
             details.append(f"- **Incumbent trial** `{incumbent}` — {describe_overrides(inc['overrides'])}; "
                            f"select CRPS **{inc['select']['crps']:.4f}**")
@@ -614,6 +638,9 @@ def write_reports(run_tag: str) -> None:
             "pred": state.get("pred"),
             "arm": state.get("arm"),
             "arm_label": state.get("arm_label"),
+            "chirp_parameterization": state.get(
+                "chirp_parameterization", DEFAULT_CHIRP_PARAMETERIZATION
+            ),
             "smoke": state.get("smoke", False),
             "selection": {
                 **selection,
@@ -655,6 +682,12 @@ def main() -> None:
     os.chdir(REPO_ROOT)
     if args.smoke and args.run_tag == "v1":
         args.run_tag = "smoke"
+    # Namespace the whole campaign by its chirp parameterization (no-op for the
+    # default p_exact) so p_mono/p_grid never share state, artifacts, or reports
+    # with p_exact. Everything downstream keys on this effective run-tag; the raw
+    # args.chirp_parameterization is still forwarded to run_trial.py to select the
+    # model. Applied after the smoke rename so both compose.
+    args.run_tag = campaign_run_tag(args.run_tag, args.chirp_parameterization)
 
     for pred in args.preds:
         if args.phase in ("train", "final", "all") and not args.dry_run:

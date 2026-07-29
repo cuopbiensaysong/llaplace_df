@@ -38,6 +38,11 @@ MODAL_TYPE_DIR_PREFIX = "modal"
 DEFAULT_MODAL_TYPE = "lti"
 OUTPUT_HEAD_DIR_PREFIX = "head"
 DEFAULT_OUTPUT_HEAD = "auto"
+POLE_PARAM_DIR_PREFIX = "pole"
+DEFAULT_CHIRP_PARAMETERIZATION = "p_exact"
+# Mirrors laptrans.CHIRP_PARAMETERIZATIONS. Duplicated as a literal (like the
+# --modal-type choices) so argparse stays importable without pulling in torch.
+CHIRP_PARAMETERIZATIONS = ("p_exact", "p_mono", "p_grid")
 SEED_DIR_PREFIX = "seed"
 
 
@@ -269,6 +274,32 @@ def _apply_output_head_routing(*, config=config) -> str:
     return mode
 
 
+def _active_chirp_parameterization(config=config) -> str:
+    value = str(
+        getattr(config, "CHIRP_PARAMETERIZATION", DEFAULT_CHIRP_PARAMETERIZATION)
+    ).strip().lower()
+    return value or DEFAULT_CHIRP_PARAMETERIZATION
+
+
+def _apply_chirp_parameterization_routing(*, config=config) -> str:
+    """
+    Put a non-default chirp pole-function parameterization in its own artifact dirs.
+
+    The default 'p_exact' keeps the historical paths; 'p_mono'/'p_grid' nest under a
+    pole-<param>/ segment so the Phase-4 parameterization ablation never overwrites
+    the p_exact runs. Inert for the lti core (which builds no chirp field), so the
+    segment is only added when the chirp core is active. Composes after the
+    output-head routing.
+    """
+    param = _active_chirp_parameterization(config=config)
+    if param == DEFAULT_CHIRP_PARAMETERIZATION:
+        return param
+    if _active_modal_type(config=config) != "chirp":
+        return param
+    _nest_artifact_dirs(f"{POLE_PARAM_DIR_PREFIX}-{param}", config=config)
+    return param
+
+
 def _apply_seed_output_routing(*, config=config) -> int | None:
     """
     Put an explicitly requested --seed in its own artifact dirs (seed-<n>).
@@ -416,6 +447,7 @@ def run_single_pred(
         _apply_predict_type_output_routing(config=config)
         _apply_modal_type_output_routing(config=config)
         _apply_output_head_routing(config=config)
+        _apply_chirp_parameterization_routing(config=config)
         _apply_seed_output_routing(config=config)
     _apply_training_overrides(training_overrides, config=config)
     data_policy = _sync_target_shape_config(config=config)
@@ -552,6 +584,7 @@ def run_preds(
     _apply_predict_type_output_routing(config=config)
     _apply_modal_type_output_routing(config=config)
     _apply_output_head_routing(config=config)
+    _apply_chirp_parameterization_routing(config=config)
     _apply_seed_output_routing(config=config)
     base_out_dir = Path(getattr(config, "OUT_DIR", "./outputs"))
     base_ckpt_dir = Path(getattr(config, "CKPT_DIR", str(base_out_dir / "checkpoints")))
@@ -642,6 +675,18 @@ def _parse_args() -> argparse.Namespace:
         "it for lti and drops it for chirp; 'on'/'off' force it for ablations. Non-default "
         "values are routed into a head-<mode>/ artifact segment. Defaults to "
         "config.DENOISER_OUTPUT_HEAD.",
+    )
+    parser.add_argument(
+        "--chirp-parameterization",
+        type=str,
+        choices=CHIRP_PARAMETERIZATIONS,
+        default=None,
+        help="How the chirp core parameterizes the instantaneous poles (rho, omega): "
+        "'p_exact' (nonneg Fourier basis with closed-form antiderivative), 'p_mono' "
+        "(monotone integrated poles directly), or 'p_grid' (pointwise positive poles + "
+        "cumulative-trapezoid integration on the query grid). Requires --modal-type chirp. "
+        "Non-default values are routed into a pole-<param>/ artifact segment. Defaults to "
+        "config.CHIRP_PARAMETERIZATION.",
     )
     parser.add_argument(
         "--seed",
@@ -960,6 +1005,17 @@ def main() -> Dict[int, Dict[str, object]]:
         config.DENOISER_MODAL_TYPE = args.modal_type
     if args.output_head is not None:
         config.DENOISER_OUTPUT_HEAD = args.output_head
+    # CHIRP_PARAMETERIZATION is not preset-stamped, so it survives both preset
+    # applications (same as DENOISER_MODAL_TYPE / DENOISER_OUTPUT_HEAD above).
+    if args.chirp_parameterization is not None:
+        if _active_modal_type(config=config) != "chirp":
+            raise ValueError(
+                f"--chirp-parameterization {args.chirp_parameterization} requires the chirp "
+                "core, but the active denoiser is "
+                f"'{_active_modal_type(config=config)}'. The lti core builds no chirp pole "
+                "field, so the flag would be silently ignored. Pass --modal-type chirp."
+            )
+        config.CHIRP_PARAMETERIZATION = args.chirp_parameterization
     # SEED / REQUESTED_SEED_ARG are not preset-stamped, so they survive both preset
     # applications; the explicit-request marker also drives the seed-<n>/ routing.
     config.REQUESTED_SEED_ARG = args.seed
@@ -978,6 +1034,7 @@ def main() -> Dict[int, Dict[str, object]]:
     _apply_predict_type_output_routing(config=config)
     _apply_modal_type_output_routing(config=config)
     _apply_output_head_routing(config=config)
+    _apply_chirp_parameterization_routing(config=config)
     _apply_seed_output_routing(config=config)
     base_out_dir = Path(getattr(config, "OUT_DIR", "./outputs"))
     base_ckpt_dir = Path(getattr(config, "CKPT_DIR", str(base_out_dir / "checkpoints")))
