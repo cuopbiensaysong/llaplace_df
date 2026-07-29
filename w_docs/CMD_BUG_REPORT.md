@@ -37,7 +37,7 @@ the one to read and maintain.
 | **B15** | Conditioning normalised per **batch** → 41% train/eval mismatch | `llapdiff_utils.py` | 🔴 critical | fixed 2026-07-25 |
 | **B16** | `_best.pt` and `_best_ema.pt` hold identical weights; `_load_stack` never applies EMA (`finetuning/` is unaffected) | `train_val_llapdiff.py`, `llapdiff_checkpoint_eval.py` | 🔴 critical | **OPEN** |
 | **B17** | `llapdiff-synthetic-regime` crashes at its own default geometry | `run_synthetic_regime_shift.py` | 🟡 minor | **OPEN** (workaround documented) |
-
+| **B18** | `final_eval.py` scored a raw/EMA **hybrid**: the shared `analysis`/`synthesis.encoder` alias kept raw weights | `finetuning/final_eval.py` | 🔴 critical | fixed 2026-07-29 |
 ---
 
 ## 1. Bugs fixed in this session (2026-07-23 → 2026-07-25)
@@ -442,17 +442,69 @@ weights live under a separate `ema` key that `_load_stack` never applies.
 **the reported CRPS is a raw-weight number labelled EMA** despite `USE_EMA_EVAL = True` —
 including the G2/G3 factorial and the 5-seed Fig-2 campaign.
 
-**The `finetuning/` harness is NOT affected**, and an earlier blanket claim here that *every*
-CRPS in the project was raw-weight was too broad. That harness applies the EMA shadow
-correctly: `eval_sampling.py` copies `payload["ema"]` into the model before scoring (and marks
-a cell `skipped_no_ema` when the shadow is missing), and `final_eval.py` materialises a
-sibling `*_emaweights.pt` checkpoint whose `model` holds the EMA tensors, raising if the
-checkpoint carries no EMA state. So `finetuning` results tagged `weights=ema` really are EMA.
+**The `finetuning/` harness is only partly affected.** `eval_sampling.py` — the selection
+path — applies the EMA shadow correctly: it copies `payload["ema"]` onto the live model
+parameters before scoring (and marks a cell `skipped_no_ema` when the shadow is missing), so
+selection numbers tagged `weights=ema` really are EMA. ⚠️ **`final_eval.py` did NOT** — see
+**B18**; an earlier version of this paragraph claimed it did, and that was wrong.
 
 **Suggested fix:** either write the EMA weights into `model` when saving `_best_ema.pt`, or
 have `_load_stack` apply `payload["ema"]` when `USE_EMA_EVAL` is set — the second matches what
 `finetuning/eval_sampling.py` already does and would make the whole codebase consistent. Add a
 test asserting the two files differ when EMA is enabled.
+
+### B18 — `final_eval.py` scored a raw/EMA hybrid 🔴 *(found & fixed 2026-07-29)*
+
+**What was wrong.** `LapFormer.__init__` passes `self.analysis` into
+`LaplacePseudoInverse(self.analysis, …)`, which keeps it as `self.encoder`. So
+`model.analysis.*` and `model.synthesis.encoder.*` are the **same tensors**:
+`state_dict()` lists both names (202 keys), `named_parameters()` de-duplicates (168).
+`EMA` shadows `named_parameters()`, so the shadow carries only the `model.analysis.*`
+name. `final_eval.py` materialised its EMA checkpoint key-wise:
+
+```python
+for name, tensor in shadow.items():
+    model_state[name] = tensor      # updates model.analysis.*, not the alias
+```
+
+leaving `model.synthesis.encoder.*` at its **raw** value — and since the alias is applied
+later by `load_state_dict` (index 29 vs 2), raw won for all 23 aliased tensors. The
+evaluated model was EMA everywhere except the **entire Laplace analysis encoder**
+(`comp_emb`, `pole_embedding`, `time_key_proj`, `attention`, `out_proj`, `_rho_raw`,
+`_omega_raw`), which was un-averaged.
+
+**Impact.** Measured on physionet h=12 arm d, seed 0, same checkpoint and sampling cell:
+
+| | forecast CRPS |
+|---|---|
+| hybrid (what `--phase final` scored) | 0.3577 |
+| true EMA | **0.3472** |
+
+**0.010 CRPS, biased high — larger than the entire tuning gain over defaults (0.0014).**
+Every `--phase final` number with `weights=ema` produced before this fix is void. Selection
+scores are unaffected (`eval_sampling.py` copies onto live parameters, where aliasing is a
+non-issue because it is one object).
+
+**The fix.** Stop materialising a file. `llapdiff-checkpoint-eval` gained
+`--weights {raw,ema}`; `evaluate_checkpoint` applies the shadow via
+`_apply_ema_weights(diff_model, payload)` over `named_parameters()` after `_load_stack`,
+which is alias-proof by construction. `final_eval.py` passes `--weights ema`. The CLI
+default stays `raw`, so the published reference numbers are untouched. `weights` and
+`generator_seed` are now recorded in every result payload. Verified: the fixed path
+reproduces the independent `eval_sampling.py` score to **2.9e-06**.
+
+**Audit recipe.** Any code that transplants an EMA shadow into a `state_dict` by key is
+suspect whenever a module is reachable under two names. Copy onto `named_parameters()`
+instead, or compare `len(state_dict())` against `len(list(named_parameters()))` — here 202
+vs 168 was the tell.
+
+**Two smaller estimator artefacts found alongside** (not bugs, but they bound what a CRPS
+delta can mean at this scale): `evaluate_regression` draws its 200 CRPS comparison pairs from
+the **global** RNG, so a cell's score depends on its position in a multi-cell sweep (~0.0015);
+and `evaluate_checkpoint` left the DDIM generator unseeded (~0.0003), now controllable with
+`--generator-seed`.
+
+---
 
 ### B17 — `llapdiff-synthetic-regime` crashes at its own default geometry 🟡 **OPEN**
 

@@ -395,6 +395,35 @@ def _load_stack(
     return diff_model, vae, summarizer, mu_mean, mu_std
 
 
+def _apply_ema_weights(diff_model, payload: object) -> int:
+    """Copy the checkpoint's EMA shadow onto the live model parameters.
+
+    Deliberately operates on ``named_parameters()`` rather than rewriting a
+    ``state_dict``. ``LapFormer`` passes ``self.analysis`` into
+    ``LaplacePseudoInverse``, so ``model.analysis.*`` and
+    ``model.synthesis.encoder.*`` are the SAME tensors: ``state_dict()`` lists both
+    names, while the EMA shadow (built from ``named_parameters()``, which
+    de-duplicates) carries only the first. A key-wise transplant therefore leaves
+    the alias holding RAW weights, and since the alias is applied later,
+    ``load_state_dict`` lets raw win for the whole Laplace analysis encoder --
+    measured at 0.010 CRPS on physionet h=12. Copying onto live parameters is
+    alias-proof: there is one tensor, reachable under either name.
+    """
+    shadow = payload.get("ema") if isinstance(payload, dict) else None
+    if not shadow:
+        raise ValueError("weights='ema' requested but the checkpoint carries no EMA state.")
+    replaced = 0
+    with torch.no_grad():
+        for name, param in diff_model.named_parameters():
+            tensor = shadow.get(name)
+            if tensor is not None:
+                param.data.copy_(tensor.to(device=param.device, dtype=param.dtype))
+                replaced += 1
+    if replaced == 0:
+        raise ValueError("EMA shadow keys did not match any model parameters.")
+    return replaced
+
+
 @torch.inference_mode()
 def _evaluate_impute_case(
     test_dl,
@@ -606,8 +635,12 @@ def evaluate_checkpoint(
     imputation_num_samples: Optional[int] = None,
     max_eval_batches: Optional[int] = None,
     predict_type: Optional[str] = None,
+    weights: str = "raw",
     verbose: Optional[bool] = None,
 ) -> Dict[str, object]:
+    weights_source = str(weights or "raw").strip().lower()
+    if weights_source not in {"raw", "ema"}:
+        raise ValueError(f"weights must be 'raw' or 'ema', got {weights!r}")
     ckpt_path = Path(ckpt_path)
     checkpoint_payload = torch.load(ckpt_path, map_location="cpu")
     _apply_checkpoint_predict_type(cfg, checkpoint_payload, explicit_predict_type=predict_type)
@@ -663,6 +696,10 @@ def evaluate_checkpoint(
         predict_type=predict_type,
         verbose=verbose,
     )
+    if weights_source == "ema":
+        replaced = _apply_ema_weights(diff_model, checkpoint_payload)
+        if verbose:
+            print(f"[checkpoint-eval] applied the EMA shadow to {replaced} parameters")
     test_sampling = tv._sampling_kwargs(cfg, prefix="TEST")
     forecast_cfg = _config_with_num_eval_samples(cfg, forecast_samples)
     # Resolve the forecast protocol from forecast_cfg, not cfg: _sampling_kwargs emits
@@ -734,6 +771,8 @@ def evaluate_checkpoint(
     result = {
         "label": label,
         "checkpoint": str(ckpt_path),
+        "weights": weights_source,
+        "generator_seed": generator_seed,
         "predict_type": getattr(cfg, "PREDICT_TYPE", None),
         "predict_type_source": getattr(cfg, "PREDICT_TYPE_SOURCE", None),
         "checkpoint_target_metadata_applied": bool(
@@ -859,6 +898,26 @@ def _parse_args() -> argparse.Namespace:
         help=PREDICT_TYPE_HELP,
     )
     parser.add_argument(
+        "--weights",
+        choices=("raw", "ema"),
+        default="raw",
+        help="Which weights to score: the checkpoint's raw parameters (default, and what "
+        "the published reference numbers were produced with) or its EMA shadow. 'ema' "
+        "applies the shadow to the live parameters, which is alias-safe -- rewriting the "
+        "state_dict instead misses model.synthesis.encoder.*, an alias of model.analysis.*, "
+        "and silently scores a raw/EMA hybrid.",
+    )
+    parser.add_argument(
+        "--generator-seed",
+        type=int,
+        default=None,
+        help="Seed for the DDIM sampling noise. Default (unset) draws from the global RNG, "
+        "so repeated evaluations of the SAME checkpoint differ by the sampling noise alone "
+        "(measured ~0.012 CRPS on physionet h=12). Pin it to make the read reproducible and "
+        "comparable with llapdiff-u1-sweep / the tuning harness, which seed a dedicated "
+        "generator with config.SEED. The imputation cases derive their seeds from this one.",
+    )
+    parser.add_argument(
         "--dataset-zip",
         type=str,
         default=None,
@@ -899,6 +958,8 @@ def main() -> None:
         imputation_num_samples=args.imputation_num_samples,
         max_eval_batches=args.max_eval_batches,
         predict_type=args.predict_type,
+        weights=args.weights,
+        generator_seed=args.generator_seed,
         verbose=args.verbose or args.debug,
     )
     if args.print_json:

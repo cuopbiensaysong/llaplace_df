@@ -63,6 +63,10 @@ class DatasetPreset:
     epochs: int = 600
     sum_lr: float | None = None
     sum_amp: bool | None = None
+    # Modal budget K. A dedicated field rather than a model_overrides entry, because
+    # apply_dataset_preset stamps LAPLACE_K *after* the model_overrides loop, so an override
+    # there is silently discarded.
+    laplace_k: int = 256
     model_overrides: Mapping[str, object] | None = None
     split_policy: str = "global_purged_horizon"
     split_scope: str = "global_target_time"
@@ -142,6 +146,11 @@ DATASET_PRESETS: Mapping[str, DatasetPreset] = {
         minsnr_gamma=4.5,
         sum_lr=1e-4,
         sum_amp=False,
+        # k_probe (2026-07-29, arm d, seed 0, val/ema): K=128 beat K=256 on every metric --
+        # CRPS 0.3213 vs 0.3358, MAE 0.4418 vs 0.4619, MSE 0.3206 vs 0.3616 -- at 1.07x the
+        # training speed. Single seed, so treat the quality margin as suggestive, not proven;
+        # the adoption case is that it is no worse and cheaper. Set 256 to revert.
+        laplace_k=128,
     ),
     "us_equity": DatasetPreset(
         key="us_equity",
@@ -291,7 +300,7 @@ def apply_dataset_preset(cfg: object, dataset_key: str, *, pred: int | None = No
     setattr(cfg, "MODEL_WIDTH", 256)
     setattr(cfg, "NUM_LAYERS", 5)
     setattr(cfg, "NUM_HEADS", 4)
-    setattr(cfg, "LAPLACE_K", 256)
+    setattr(cfg, "LAPLACE_K", int(preset.laplace_k))
 
     return cfg
 
