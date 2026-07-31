@@ -91,6 +91,12 @@ def sample_training_timesteps(
     sampler_name = str(sampler).strip().lower()
     if sampler_name in {"uniform", "rand", "random"}:
         return sample_t_uniform(scheduler, n, device, exclude_t0=exclude_t0)
+    if sampler_name in {"max_only", "max"}:
+        # One-shot regression arm: always train at the final (pure-noise) step, so
+        # x_t is information-free and the denoiser learns p(z0 | conditioning) alone.
+        return torch.full(
+            (int(n),), int(scheduler.timesteps) - 1, device=device, dtype=torch.long
+        )
     if sampler_name in {"karras", "sigma", "sigma_uniform"}:
         return sample_t_uniform_karras(
             scheduler,
@@ -100,7 +106,7 @@ def sample_training_timesteps(
             exclude_t0=exclude_t0,
         )
     raise ValueError(
-        f"Unknown training timestep sampler '{sampler}'. Use 'uniform' or 'karras'."
+        f"Unknown training timestep sampler '{sampler}'. Use 'uniform', 'karras', or 'max_only'."
     )
 
 
@@ -493,10 +499,28 @@ def _broadcast_norm_stats(stats: torch.Tensor, ref: torch.Tensor) -> torch.Tenso
     )
 
 
-def normalize_cond_per_batch(cs: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-    """z-score over (B,S) for each feature dim; keeps gradients."""
-    m = cs.mean(dim=(0, 1), keepdim=True)
-    v = cs.var(dim=(0, 1), keepdim=True, unbiased=False)
+def normalize_cond_per_batch(
+    cs: torch.Tensor, eps: float = 1e-6, mode: str = "batch"
+) -> torch.Tensor:
+    """z-score the conditioning summary for each feature dim; keeps gradients.
+
+    ``mode="batch"`` (legacy) reduces over (B, S), so a window's conditioning depends on
+    which OTHER windows share its batch. Training batches are shuffled (batch statistics
+    ~ global statistics) while eval/test batches are sequential and strongly correlated,
+    so the SAME window is handed a different conditioning vector at eval than in training
+    -- measured on the H2 chirp benchmark: 41% relative error, cosine 0.92 between the two
+    normalisations. The denoiser then learns a mapping on one input distribution and is
+    scored on another, which makes conditioning actively HARMFUL (MSE_cond > MSE_uncond,
+    worsening as the model relies on conditioning more).
+
+    ``mode="sample"`` reduces over S only, so the result is a function of the window alone
+    and train/eval are identical by construction.
+    """
+    if mode not in ("batch", "sample"):
+        raise ValueError(f"Unknown cond norm mode '{mode}'. Use 'batch' or 'sample'.")
+    dims = (0, 1) if mode == "batch" else (1,)
+    m = cs.mean(dim=dims, keepdim=True)
+    v = cs.var(dim=dims, keepdim=True, unbiased=False)
     return (cs - m) / (v.sqrt() + eps)
 
 
@@ -776,6 +800,7 @@ def build_context(
     dt: Optional[torch.Tensor] = None,
     x_obs_mask: Optional[torch.Tensor] = None,
     norm: bool = True,
+    norm_mode: str = "batch",
     requires_grad: bool = False,
 ):
     """
@@ -836,7 +861,11 @@ def build_context(
         cond_summary, _ = context_module(**kwargs)
 
     if norm:
-        cond_summary = normalize_cond_per_batch(cond_summary)
+        # Every in-tree caller passes norm=False and normalizes downstream via
+        # _build_cond_summary_pair, which resolves the mode from the model/checkpoint.
+        # norm_mode defaults to the legacy "batch" so this path cannot silently change
+        # behaviour for an out-of-tree caller.
+        cond_summary = normalize_cond_per_batch(cond_summary, mode=norm_mode)
     if not requires_grad:
         return cond_summary.detach()
     return cond_summary
@@ -878,28 +907,58 @@ def diffusion_loss(
     target_mask: Optional[torch.Tensor] = None,
     minsnr_normalize: str = "auto",
     return_stats: bool = False,
+    loss_mode: str = "mse",
+    coeff_l2: float = 0.0,
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, torch.Tensor]]]:
     """
-    MSE on x0/v/eps with optional horizon masking and MinSNR weighting.
+    MSE (or Gaussian NLL) on x0/v/eps with optional horizon masking and MinSNR weighting.
 
     target_mask:
         Optional boolean mask aligned to [B, H] (or broadcastable to that),
         used to ignore timesteps/horizons that have no observed supervision.
+    loss_mode:
+        "mse" (default) or "gaussian_nll". The NLL mode requires predict_type='x0'
+        and a model exposing return_variance (the Theorem-C chirp UQ head); the
+        per-element error becomes 0.5*(log var + (pred-target)^2/var), reduced and
+        MinSNR-weighted exactly like the MSE path.
+    coeff_l2:
+        Weight of the L2 penalty on the chirp pole-variation coefficients
+        (Tier-2 CHIRP_COEFF_L2 ablation; shrinks the pole functions toward the
+        constant-pole LTI special case). Requires the chirp core when > 0; added
+        unweighted (not MinSNR-scaled) after the reconstruction term.
     """
+    loss_mode = str(loss_mode).strip().lower()
+    if loss_mode not in {"mse", "gaussian_nll"}:
+        raise ValueError(f"Unknown loss_mode '{loss_mode}'. Use 'mse' or 'gaussian_nll'.")
+    if loss_mode == "gaussian_nll" and predict_type != "x0":
+        raise ValueError("loss_mode='gaussian_nll' requires predict_type='x0'.")
+
     if reuse_xt_eps is None:
         noise = torch.randn_like(x0_lat_norm)
         x_t, eps_true = scheduler.q_sample(x0_lat_norm, t, noise)
     else:
         x_t, eps_true = reuse_xt_eps
 
-    pred = model(
-        x_t,
-        t,
-        cond_summary=cond_summary,
-        cond_summary_raw=cond_summary_raw,
-        sc_feat=sc_feat,
-        dt=dt,
-    )
+    variance = None
+    if loss_mode == "gaussian_nll":
+        pred, variance = model(
+            x_t,
+            t,
+            cond_summary=cond_summary,
+            cond_summary_raw=cond_summary_raw,
+            sc_feat=sc_feat,
+            dt=dt,
+            return_variance=True,
+        )
+    else:
+        pred = model(
+            x_t,
+            t,
+            cond_summary=cond_summary,
+            cond_summary_raw=cond_summary_raw,
+            sc_feat=sc_feat,
+            dt=dt,
+        )
 
     if predict_type == "eps":
         target = eps_true
@@ -912,7 +971,11 @@ def diffusion_loss(
             f"Unknown predict_type '{predict_type}'. Use 'x0', 'v', or 'eps'."
         )
 
-    err = (pred - target).pow(2)
+    if loss_mode == "gaussian_nll":
+        var = variance.clamp_min(1e-6)
+        err = 0.5 * (torch.log(var) + (pred - target).pow(2) / var)
+    else:
+        err = (pred - target).pow(2)
 
     per_sample = _reduce_loss_per_sample(err, target_mask=target_mask)
 
@@ -939,12 +1002,21 @@ def diffusion_loss(
     ).to(device=per_sample.device, dtype=per_sample.dtype).detach()
     weighted_per_sample = weights * per_sample
     loss = weighted_per_sample.mean()
+
+    coeff_penalty = None
+    if float(coeff_l2) > 0.0:
+        coeff_penalty = model.pole_coefficient_penalty(
+            t, cond_summary=cond_summary, cond_summary_raw=cond_summary_raw
+        )
+        loss = loss + float(coeff_l2) * coeff_penalty
+
     if not return_stats:
         return loss
 
     stats = {
         "raw_loss": per_sample.mean().detach(),
         "weighted_loss": loss.detach(),
+        **({"coeff_penalty": coeff_penalty.detach()} if coeff_penalty is not None else {}),
         "per_sample_raw": per_sample.detach(),
         "per_sample_weighted": weighted_per_sample.detach(),
         "weights": weights.detach(),

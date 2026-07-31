@@ -1,10 +1,25 @@
-from typing import Optional
+import math
+from typing import Dict, Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from llapdiffusion.models.laptrans import LaplaceTransformEncoder, LaplacePseudoInverse
+from llapdiffusion.models.laptrans import (
+    ChirpModalField,
+    LaplacePseudoInverse,
+    LaplaceTransformEncoder,
+    normalize_modal_type,
+)
+
+OUTPUT_HEAD_MODES = ("auto", "on", "off")
+
+
+def normalize_output_head_mode(value: str) -> str:
+    mode = str(value).strip().lower()
+    if mode not in OUTPUT_HEAD_MODES:
+        raise ValueError(f"Unknown output_head '{value}'. Use one of {OUTPUT_HEAD_MODES}.")
+    return mode
 
 
 def _init_small_out_proj(layer: nn.Linear, *, std: float = 1e-2) -> None:
@@ -305,11 +320,27 @@ class LapFormer(nn.Module):
         analysis_summary_qk: bool = False,
         analysis_qk_use_raw_summary: bool = False,
         rho_conditioning_mode: str = "raw",
+        denoiser_modal_type: str = "lti",
+        chirp_num_basis: int = 8,
+        chirp_rho_min: float = 1e-4,
+        chirp_use_mlp_residual: bool = False,
+        chirp_time_scale: Optional[float] = None,
+        output_head: str = "auto",
+        chirp_uq_head: bool = False,
+        chirp_uq_init_var: float = 1e-2,
+        chirp_growth_budget: float = 0.0,
+        chirp_parameterization: str = "p_exact",
+        pole_init_horizon: Optional[float] = None,
+        chirp_rho_basis: str = "nonneg",
+        chirp_omega_basis: str = "nonneg",
+        chirp_basis: str = "integer",
+        chirp_rho_max_scale: float = 4.0,
     ) -> None:
         super().__init__()
         self.hidden_dim = int(hidden_dim)
         self.self_conditioning = bool(self_conditioning)
         self.k = int(laplace_k)
+        self.denoiser_modal_type = normalize_modal_type(denoiser_modal_type)
         pool_mode = str(summary_pool_mode).strip().lower()
         if pool_mode not in {"mean", "attn"}:
             raise ValueError(f"Unknown summary_pool_mode '{summary_pool_mode}'. Use 'mean' or 'attn'.")
@@ -330,11 +361,46 @@ class LapFormer(nn.Module):
             attn_cond_dim=(hidden_dim if self.analysis_summary_qk else None),
             rho_conditioning_mode=self.rho_conditioning_mode,
             attn_dropout=attn_dropout,
+            # Same horizon anchor as the chirp core so both arms start with modes that
+            # survive the forecast window (a horizon-independent rho init leaves only
+            # near-DC modes alive at long horizons).
+            rho_init_horizon=pole_init_horizon,
         )
+        # Chirp (time-varying poles) replaces the LTI residual-MLP correction with
+        # stability-by-construction, so the residual MLP is off by default in that mode.
+        self.chirp_uq_head = bool(chirp_uq_head)
+        if self.chirp_uq_head and self.denoiser_modal_type != "chirp":
+            raise ValueError("chirp_uq_head requires denoiser_modal_type='chirp'.")
+        if self.denoiser_modal_type == "chirp":
+            synth_use_mlp_residual = bool(chirp_use_mlp_residual)
+            self.chirp_field = ChirpModalField(
+                k=self.k,
+                cond_dim=2 * hidden_dim,
+                num_basis=int(chirp_num_basis),
+                rho_min=float(chirp_rho_min),
+                omega_max=math.pi,
+                time_scale=chirp_time_scale,
+                uq_head=self.chirp_uq_head,
+                uq_init_var=float(chirp_uq_init_var),
+                growth_budget=float(chirp_growth_budget),
+                parameterization=chirp_parameterization,
+                rho_init_horizon=pole_init_horizon,
+                rho_basis=chirp_rho_basis,
+                omega_basis=chirp_omega_basis,
+                basis=chirp_basis,
+                rho_max_scale=float(chirp_rho_max_scale),
+            )
+        else:
+            if output_head != "off":
+                synth_use_mlp_residual = use_mlp_residual
+            else:
+                synth_use_mlp_residual = False
+            self.chirp_field = None
+
         self.synthesis = LaplacePseudoInverse(
             self.analysis,
             hidden_dim=hidden_dim,
-            use_mlp_residual=use_mlp_residual,
+            use_mlp_residual=synth_use_mlp_residual,
         )
 
         # Optional self-conditioning in modal space: project sc_feat -> theta_sc
@@ -362,11 +428,30 @@ class LapFormer(nn.Module):
             ]
         )
 
-        self.head_norm = nn.LayerNorm(input_dim)
-        self.head_proj = nn.Linear(input_dim, input_dim)
-        nn.init.zeros_(self.head_proj.weight)
-        nn.init.zeros_(self.head_proj.bias)
+        # The LLapDiff backbone's output head does two jobs: output_skip_scale * y_time is a
+        # certified learnable magnitude (it rescales the K-mode modal sum back to the unit-scale
+        # latent), while head_proj(head_norm(y_time)) is an uncertified residual whose LayerNorm
+        # re-inflates the decaying modal envelope, breaking the chirp stability certificate
+        # (Theorem B). "auto" keeps the head for lti and drops only the uncertified residual
+        # for chirp; "on"/"off" force it either way (the 2x2 factorial ablation cells).
         self.output_skip_scale = nn.Parameter(torch.tensor(0.1))
+        self.output_head = normalize_output_head_mode(output_head)
+        if self.output_head == "auto":
+            self._use_output_head = self.denoiser_modal_type != "chirp"
+        else:
+            self._use_output_head = self.output_head == "on"
+        if self._use_output_head:
+            self.head_norm = nn.LayerNorm(input_dim)
+            self.head_proj = nn.Linear(input_dim, input_dim)
+            nn.init.zeros_(self.head_proj.weight)
+            nn.init.zeros_(self.head_proj.bias)
+        if self.chirp_uq_head and self._use_output_head:
+            raise ValueError(
+                "chirp_uq_head requires the certified output path (no LayerNorm head): "
+                "the analytic Gaussian law (Theorem C) applies to the scaled modal sum only."
+            )
+        
+        print(f"self._use_output_head: {self._use_output_head}")
 
     def _select_summary_tokens(
         self,
@@ -453,6 +538,25 @@ class LapFormer(nn.Module):
         )
         return torch.cat([t_vec, summary_pool], dim=-1)
 
+    def pole_coefficient_penalty(
+        self,
+        t_vec: torch.Tensor,
+        *,
+        cond_summary: Optional[torch.Tensor] = None,
+        cond_summary_raw: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """L2 penalty on the chirp field's conditioned pole coefficients
+        (CHIRP_COEFF_L2 ablation); rebuilds the same pole-conditioning vector the
+        forward pass uses. Requires the chirp core."""
+        if self.chirp_field is None:
+            raise RuntimeError("pole_coefficient_penalty requires denoiser_modal_type='chirp'.")
+        cond_vec = self.make_pole_cond(
+            t_vec,
+            cond_summary=cond_summary,
+            cond_summary_raw=cond_summary_raw,
+        )
+        return self.chirp_field.coefficient_penalty(cond_vec)
+
     def forward(
         self,
         x_tokens: torch.Tensor,                 # [B,T,D]
@@ -462,7 +566,13 @@ class LapFormer(nn.Module):
         sc_feat: Optional[torch.Tensor] = None,       # [B,T,D]
         dt: Optional[torch.Tensor] = None,
         t: Optional[torch.Tensor] = None,
+        return_variance: bool = False,
+        modal_capture: Optional[Dict[str, torch.Tensor]] = None,
     ) -> torch.Tensor:
+        if return_variance and not self.chirp_uq_head:
+            raise RuntimeError(
+                "return_variance=True requires a model built with chirp_uq_head=True."
+            )
         B, T, _ = x_tokens.shape
         if t_vec.dim() != 2 or t_vec.shape[0] != B or t_vec.shape[1] != self.hidden_dim:
             raise ValueError(
@@ -500,8 +610,12 @@ class LapFormer(nn.Module):
             cond_summary_raw=cond_summary_raw,
         )
 
-        # Compute poles once per forward (reused for x and optional self-conditioning)
-        rho, omega = self.analysis.effective_poles(B, x_tokens.dtype, x_tokens.device, cond=cond_vec)
+        # Compute poles once per forward (reused for x and optional self-conditioning).
+        # For chirp, residue extraction is seeded with the instantaneous poles at t=0.
+        if self.chirp_field is not None:
+            rho, omega = self.chirp_field.seed_poles(cond_vec)
+        else:
+            rho, omega = self.analysis.effective_poles(B, x_tokens.dtype, x_tokens.device, cond=cond_vec)
 
         # Modal analysis: x_time -> theta
         theta, _, _, _ = self.analysis(
@@ -539,5 +653,44 @@ class LapFormer(nn.Module):
             )
 
         # Synthesis (parallel over all queried timestamps)
-        y_time = self.synthesis(theta, rho=rho, omega=omega, dt=dt, t=t, target_T=T)
+        variance = None
+        if self.chirp_field is not None:
+            t_rel = self.analysis.relative_time(B, T, x_tokens.dtype, x_tokens.device, dt=dt, t=t)
+            rho_bar, omega_bar = self.chirp_field.integrated(cond_vec, t_rel)
+            y_time = self.synthesis(theta, rho_bar=rho_bar, omega_bar=omega_bar)
+            if return_variance:
+                # Theorem C (Eq. 7), diagonal readout: Var(z_d) = sum_k s_k(t) (c_kd^2 + b_kd^2).
+                p0, q = self.chirp_field.uq_params(cond_vec)
+                s_modal = self.chirp_field.modal_variance(rho_bar, t_rel, q, p0)  # [B,T,K]
+                energy = theta[:, : self.k, :].pow(2) + theta[:, self.k :, :].pow(2)  # [B,K,D]
+                variance = torch.einsum("btk,bkd->btd", s_modal, energy)
+            if modal_capture is not None:
+                rho_inst, omega_inst = self.chirp_field.instantaneous(cond_vec, t_rel)
+                modal_capture.update(
+                    modal_type="chirp",
+                    theta=theta.detach(),
+                    t_rel=t_rel.detach(),
+                    rho_bar=rho_bar.detach(),
+                    omega_bar=omega_bar.detach(),
+                    rho_inst=rho_inst.detach(),
+                    omega_inst=omega_inst.detach(),
+                )
+        else:
+            y_time = self.synthesis(theta, rho=rho, omega=omega, dt=dt, t=t, target_T=T)
+            if modal_capture is not None:
+                t_rel = self.analysis.relative_time(B, T, x_tokens.dtype, x_tokens.device, dt=dt, t=t)
+                modal_capture.update(
+                    modal_type="lti",
+                    theta=theta.detach(),
+                    t_rel=t_rel.detach(),
+                    rho_const=rho.detach(),
+                    omega_const=omega.detach(),
+                )
+        if not self._use_output_head:
+            # Certified path: scaled modal sum only, no uncertified residual. The clamp
+            # keeps the Theorem-B bound constant at |s| <= 1.
+            s = self.output_skip_scale.clamp(min=-1.0, max=1.0)
+            if return_variance:
+                return s * y_time, variance * s.pow(2)
+            return s * y_time
         return self.output_skip_scale * y_time + self.head_proj(self.head_norm(y_time))

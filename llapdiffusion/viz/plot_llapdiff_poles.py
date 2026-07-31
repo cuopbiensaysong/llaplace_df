@@ -399,6 +399,161 @@ def _extract_conditioned_poles(
     return rho.detach().cpu(), omega.detach().cpu()
 
 
+@torch.no_grad()
+def extract_chirp_pole_trajectories(
+    model: LLapDiff,
+    *,
+    t_idx: int,
+    cond_summary: torch.Tensor,
+    cond_summary_raw: torch.Tensor,
+    t_grid: torch.Tensor,
+    top_modes: int = 4,
+) -> Dict[str, torch.Tensor]:
+    """Instantaneous pole trajectories of a chirp model for real conditioning.
+
+    ``t_grid`` is a 1-D tensor of relative query times (native steps). Modes are
+    ranked per example by their time-variation energy (sum of squared basis
+    coefficients), so the returned top modes are the ones the model actually
+    makes time-varying. Returns CPU tensors:
+    ``rho``/``omega`` [B, T, top_modes], ``mode_indices`` [B, top_modes],
+    ``variation_energy`` [B, K], ``t_grid`` [T].
+    """
+    chirp_field = model.model.chirp_field
+    if chirp_field is None:
+        raise ValueError("Checkpoint uses the lti core; pole trajectories require a chirp model.")
+
+    device = next(model.parameters()).device
+    batch = cond_summary.size(0)
+    t = torch.full((batch,), int(t_idx), device=device, dtype=torch.long)
+    t_vec = model._time_embed(t).to(cond_summary.dtype)
+    cond_vec = model.model.make_pole_cond(
+        t_vec,
+        cond_summary=cond_summary,
+        cond_summary_raw=cond_summary_raw,
+    )
+
+    t_rel = t_grid.to(device=device, dtype=cond_vec.dtype).view(1, -1, 1).expand(batch, -1, 1)
+    rho, omega = chirp_field.instantaneous(cond_vec, t_rel.contiguous())  # [B,T,K]
+
+    a_rho2, a_omega2 = chirp_field._coeffs(cond_vec)  # [B,K,M]
+    energy = a_rho2.sum(dim=-1) + a_omega2.sum(dim=-1)  # [B,K]
+    k_top = min(int(top_modes), energy.shape[1])
+    mode_indices = energy.topk(k_top, dim=1).indices  # [B,k_top]
+    gather_idx = mode_indices.unsqueeze(1).expand(-1, rho.shape[1], -1)  # [B,T,k_top]
+
+    return {
+        "rho": rho.gather(2, gather_idx).detach().cpu(),
+        "omega": omega.gather(2, gather_idx).detach().cpu(),
+        "mode_indices": mode_indices.detach().cpu(),
+        "variation_energy": energy.detach().cpu(),
+        "t_grid": t_grid.detach().cpu(),
+    }
+
+
+def modal_contributions(capture: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    """Per-mode output-contribution diagnostics from a ``modal_capture`` dict.
+
+    ``capture`` is the dict filled by ``LLapDiff.generate(..., modal_capture=...)`` —
+    the residues and poles of the conditional forward at the final denoising step.
+    Each mode's contribution to the synthesized modal sum is
+
+        E_k = mean_t e^{-2 rho_bar_k(t)} * (||c_k||^2 + ||b_k||^2)
+
+    (per-mode squared envelope × residue energy, the Theorem-B decomposition).
+    Both cores are supported: the lti capture expands its constant poles over the
+    query grid. On head-on models this covers the modal sum only, not the
+    LayerNorm residual.
+
+    Returns CPU tensors: ``energy``/``energy_share``/``residue_norm2``/
+    ``envelope_mass`` [B,K]; instantaneous ``rho``/``omega`` [B,T,K]; the
+    energy-weighted effective trajectories ``rho_eff``/``omega_eff`` [B,T]
+    (weighted over ALL modes — the identifiable recovered pole function when many
+    modes share one signal); ``t_rel`` [B,T].
+    """
+    theta = capture["theta"].detach().float().cpu()  # [B,2K,D]
+    k = theta.shape[1] // 2
+    residue_norm2 = theta[:, :k, :].pow(2).sum(-1) + theta[:, k:, :].pow(2).sum(-1)  # [B,K]
+    t_rel = capture["t_rel"].detach().float().cpu()
+    if t_rel.dim() == 3:
+        t_rel = t_rel.squeeze(-1)  # [B,T]
+
+    if capture.get("modal_type") == "chirp":
+        rho_bar = capture["rho_bar"].detach().float().cpu()  # [B,T,K]
+        rho = capture["rho_inst"].detach().float().cpu()
+        omega = capture["omega_inst"].detach().float().cpu()
+    else:
+        rho_c = capture["rho_const"].detach().float().cpu()  # [B,K]
+        omega_c = capture["omega_const"].detach().float().cpu()
+        if rho_c.dim() == 1:  # unconditioned poles come back unbatched
+            rho_c = rho_c.unsqueeze(0).expand(theta.shape[0], -1)
+            omega_c = omega_c.unsqueeze(0).expand(theta.shape[0], -1)
+        rho_bar = rho_c.unsqueeze(1) * t_rel.unsqueeze(-1)  # [B,T,K]
+        rho = rho_c.unsqueeze(1).expand(-1, t_rel.shape[1], -1)
+        omega = omega_c.unsqueeze(1).expand(-1, t_rel.shape[1], -1)
+
+    # The sign of omega is a pure gauge: the synthesis uses cos(omega_bar)/sin(omega_bar)
+    # with free residues, so omega -> -omega is absorbed exactly by b_k -> -b_k. The
+    # physically recoverable quantity is the instantaneous FREQUENCY |omega|. This is a
+    # no-op for the lti core and for the nonneg omega basis (both keep omega >= 0), and
+    # matters only for the centred basis, whose variation may carry omega through zero.
+    omega = omega.abs()
+    envelope_t = torch.exp(-2.0 * rho_bar)  # [B,T,K]
+    envelope_mass = envelope_t.mean(dim=1)  # [B,K]
+    energy = residue_norm2 * envelope_mass  # [B,K]
+    share = energy / energy.sum(dim=-1, keepdim=True).clamp_min(1e-30)
+    w = energy.unsqueeze(1)  # [B,1,K]
+    denom = w.sum(dim=-1).clamp_min(1e-30)  # [B,1]
+    # Time-resolved weights E_k(t) = e^{-2 rho_bar_k(t)} ||theta_k||^2, i.e. the same
+    # decomposition WITHOUT averaging the envelope over t first. The static weighting
+    # above makes omega_eff a fixed convex combination of the per-mode omega_k(t), so it
+    # moves only if the modes themselves sweep -- for the lti core, whose omega_k are
+    # constant, it is constant by construction and its trend slope is identically 0
+    # (a tautology, not evidence). The instantaneous version is the first moment of the
+    # modal time-frequency energy, so it also sees a model that redistributes energy
+    # ACROSS constant-frequency modes.
+    w_t = envelope_t * residue_norm2.unsqueeze(1)  # [B,T,K]
+    denom_t = w_t.sum(dim=-1).clamp_min(1e-30)  # [B,T]
+    return {
+        "energy": energy,
+        "energy_share": share,
+        "residue_norm2": residue_norm2,
+        "envelope_mass": envelope_mass,
+        "rho": rho,
+        "omega": omega,
+        "rho_eff": (rho * w).sum(dim=-1) / denom,
+        "omega_eff": (omega * w).sum(dim=-1) / denom,
+        "rho_eff_dyn": (rho * w_t).sum(dim=-1) / denom_t,
+        "omega_eff_dyn": (omega * w_t).sum(dim=-1) / denom_t,
+        "t_rel": t_rel,
+    }
+
+
+def _plot_pole_trajectories(traj: Dict[str, torch.Tensor], save_path: Path, *, title: str) -> None:
+    """Two-panel rho(t)/omega(t) figure: solid = top mode, faint = next modes."""
+    t = traj["t_grid"].numpy()
+    rho = traj["rho"].numpy()  # [B,T,k_top]
+    omega = traj["omega"].numpy()
+    cmap = plt.get_cmap("tab10")
+
+    fig, (ax_rho, ax_omega) = plt.subplots(1, 2, figsize=(11, 4.2))
+    for b in range(rho.shape[0]):
+        color = cmap(b % 10)
+        for k in range(rho.shape[2]):
+            alpha = 0.95 if k == 0 else 0.25
+            label = f"example {b}" if k == 0 else None
+            ax_rho.plot(t, rho[b, :, k], color=color, alpha=alpha, label=label)
+            ax_omega.plot(t, omega[b, :, k], color=color, alpha=alpha)
+    ax_rho.set_xlabel("relative time t̃ (native steps)")
+    ax_rho.set_ylabel("instantaneous ρ(t̃)")
+    ax_omega.set_xlabel("relative time t̃ (native steps)")
+    ax_omega.set_ylabel("instantaneous ω(t̃) [rad/step]")
+    ax_rho.legend(loc="best", fontsize=8)
+    fig.suptitle(title)
+    fig.tight_layout()
+    fig.savefig(save_path)
+    plt.close(fig)
+
+
 def _pick_timesteps(total_steps: int, n: int) -> Sequence[int]:
     if n <= 1:
         return [total_steps // 2]
@@ -530,6 +685,25 @@ def main() -> None:
     plt.savefig(save_path)
     plt.close()
     print(f"Saved pole plot to: {save_path}")
+
+    # Chirp core: additionally plot the pole *trajectories* rho_k(t), omega_k(t)
+    # over the forecast window (the static scatter above only shows t=0 seeds).
+    if model.model.chirp_field is not None:
+        t_grid = torch.arange(1, int(pred) + 1, dtype=torch.float32)
+        traj = extract_chirp_pole_trajectories(
+            model,
+            t_idx=int(timesteps[len(timesteps) // 2]),
+            cond_summary=cond_summary,
+            cond_summary_raw=cond_summary_raw,
+            t_grid=t_grid,
+        )
+        traj_path = output_dir / f"{dataset_key}_pred{pred}_{checkpoint.stem}_pole_trajectories.pdf"
+        _plot_pole_trajectories(
+            traj,
+            traj_path,
+            title=f"Chirp pole trajectories ({dataset_key}, pred={pred}, split={args.split})",
+        )
+        print(f"Saved pole-trajectory plot to: {traj_path}")
 
 
 if __name__ == "__main__":

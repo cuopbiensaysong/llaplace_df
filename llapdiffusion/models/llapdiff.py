@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import Optional, Tuple, Union
+from typing import Dict, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -39,10 +39,30 @@ class LLapDiff(nn.Module):
         analysis_summary_qk: bool = False,
         analysis_qk_use_raw_summary: bool = False,
         rho_conditioning_mode: str = "raw",
+        denoiser_modal_type: str = "lti",
+        chirp_num_basis: int = 8,
+        chirp_rho_min: float = 1e-4,
+        chirp_use_mlp_residual: bool = False,
+        chirp_time_scale: Optional[float] = None,
+        output_head: str = "auto",
+        chirp_uq_head: bool = False,
+        chirp_uq_init_var: float = 1e-2,
+        chirp_growth_budget: float = 0.0,
+        chirp_parameterization: str = "p_exact",
+        pole_init_horizon: Optional[float] = None,
+        chirp_rho_basis: str = "nonneg",
+        chirp_omega_basis: str = "nonneg",
+        chirp_basis: str = "integer",
+        chirp_rho_max_scale: float = 4.0,
     ) -> None:
         super().__init__()
         if predict_type not in {"eps", "v", "x0"}:
             raise ValueError("predict_type must be either 'eps', 'v', or 'x0'")
+        if chirp_uq_head and predict_type != "x0":
+            raise ValueError(
+                "chirp_uq_head requires predict_type='x0': the analytic Gaussian law "
+                "(Theorem C) is a law for z0, so the mean must be the x0 prediction."
+            )
 
         self.predict_type = predict_type
         self.self_conditioning = bool(self_conditioning)
@@ -71,6 +91,21 @@ class LLapDiff(nn.Module):
             analysis_summary_qk=analysis_summary_qk,
             analysis_qk_use_raw_summary=analysis_qk_use_raw_summary,
             rho_conditioning_mode=rho_conditioning_mode,
+            denoiser_modal_type=denoiser_modal_type,
+            chirp_num_basis=chirp_num_basis,
+            chirp_rho_min=chirp_rho_min,
+            chirp_use_mlp_residual=chirp_use_mlp_residual,
+            chirp_time_scale=chirp_time_scale,
+            output_head=output_head,
+            chirp_uq_head=chirp_uq_head,
+            chirp_uq_init_var=chirp_uq_init_var,
+            chirp_growth_budget=chirp_growth_budget,
+            chirp_parameterization=chirp_parameterization,
+            pole_init_horizon=pole_init_horizon,
+            chirp_rho_basis=chirp_rho_basis,
+            chirp_omega_basis=chirp_omega_basis,
+            chirp_basis=chirp_basis,
+            chirp_rho_max_scale=chirp_rho_max_scale,
         )
         self.time_dim = hidden_dim
 
@@ -79,6 +114,19 @@ class LLapDiff(nn.Module):
     # -------------------------------
     def _time_embed(self, t: torch.Tensor) -> torch.Tensor:
         return F.silu(self.time_embed(t.long()))
+
+    def pole_coefficient_penalty(
+        self,
+        t: torch.Tensor,
+        *,
+        cond_summary: Optional[torch.Tensor] = None,
+        cond_summary_raw: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """L2 penalty on the chirp pole-variation coefficients (CHIRP_COEFF_L2)."""
+        t_emb = self._time_embed(t)
+        return self.model.pole_coefficient_penalty(
+            t_emb, cond_summary=cond_summary, cond_summary_raw=cond_summary_raw
+        )
 
     # -------------------------------
     # Forward call
@@ -92,6 +140,8 @@ class LLapDiff(nn.Module):
         cond_summary_raw: Optional[torch.Tensor] = None,
         sc_feat: Optional[torch.Tensor] = None,
         dt: Optional[torch.Tensor] = None,
+        return_variance: bool = False,
+        modal_capture: Optional[Dict[str, torch.Tensor]] = None,
     ) -> torch.Tensor:
         t_emb = self._time_embed(t).to(x_t.dtype)
         out_tokens = self.model(
@@ -101,6 +151,8 @@ class LLapDiff(nn.Module):
             cond_summary_raw=cond_summary_raw,
             sc_feat=sc_feat,
             dt=dt,
+            return_variance=return_variance,
+            modal_capture=modal_capture,
         )
         return out_tokens
 
@@ -127,6 +179,8 @@ class LLapDiff(nn.Module):
         generator: Optional[torch.Generator] = None,
         dynamic_thresh_p: float = 0.0,
         dynamic_thresh_max: float = 1.0,
+        clip_stats: Optional[Dict[str, float]] = None,
+        modal_capture: Optional[Dict[str, torch.Tensor]] = None,
     ) -> torch.Tensor:
         """
         Sample trajectories with DDIM and optional CFG.
@@ -145,6 +199,11 @@ class LLapDiff(nn.Module):
             rho: Karras sigma schedule exponent.
             generator: Optional RNG for reproducible initial/DDIM noise.
             dynamic_thresh_p / dynamic_thresh_max: Parameters for dynamic thresholding of ``x0``.
+            modal_capture: Optional dict filled in-place with the modal internals
+                (residues theta and pole trajectories) of the CONDITIONAL forward at
+                the final denoising step — the poles/residues that synthesized the
+                returned forecast. Also records ``t_idx``, the diffusion timestep of
+                that step.
 
         Returns:
             The final ``x0`` prediction corresponding to the denoised samples.
@@ -244,6 +303,13 @@ class LLapDiff(nn.Module):
                 return x0
             x = x0.float()
             s = torch.quantile(x.reshape(B, -1).abs(), q=p, dim=1).clamp_min(1.0).view(B, 1, 1)
+            if clip_stats is not None:
+                # Fraction of elements the threshold actually clips (U1 diagnostics).
+                frac = ((x.abs() / s) > max_val).float().mean()
+                clip_stats["clipped_fraction_sum"] = (
+                    clip_stats.get("clipped_fraction_sum", 0.0) + float(frac)
+                )
+                clip_stats["steps"] = clip_stats.get("steps", 0) + 1
             x = (x / s).clamp(-max_val, max_val)
             return x.to(dtype=x0.dtype)
 
@@ -289,6 +355,9 @@ class LLapDiff(nn.Module):
             # Avoid an unnecessary unconditional pass when CFG is inactive.
             cond_present = (cond_summary is not None) or (cond_summary_raw is not None)
             cfg_active = cond_present and torch.any(torch.abs(g_scalar - 1.0) > 1e-12).item()
+            is_final_step = int(t_prev_i) < 0
+            if modal_capture is not None and is_final_step:
+                modal_capture["t_idx"] = int(t_i)
             pred_c = self.forward(
                 x_t,
                 t_b,
@@ -296,6 +365,7 @@ class LLapDiff(nn.Module):
                 cond_summary_raw=cond_summary_raw,
                 sc_feat=sc_feat_next if self_cond else None,
                 dt=dt,
+                modal_capture=modal_capture if is_final_step else None,
             )
             if cfg_active:
                 pred_u = self.forward(

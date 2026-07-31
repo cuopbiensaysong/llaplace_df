@@ -652,10 +652,16 @@ def _train_or_reuse_stack(cfg: SimpleNamespace, loaders, args: argparse.Namespac
         sizes=sizes,
         config=cfg,
     )
+    # Use the checkpoint the trainer itself selected for evaluation: it honours
+    # TEST_METRIC_SOURCE (ema here) and only considers files this run wrote.
+    # Preferring "_raw" outright silently evaluated stale raw checkpoints left in
+    # the shared output directory by earlier runs -- `_best_raw.pt` is written only
+    # when EMA_COMPARE_EVERY > 0, so with comparisons off it was never refreshed.
     checkpoint = (
-        llap_stats.get("best_checkpoint_raw")
+        llap_stats.get("loaded_checkpoint")
         or llap_stats.get("best_checkpoint")
-        or llap_stats.get("loaded_checkpoint")
+        or llap_stats.get("best_checkpoint_ema")
+        or llap_stats.get("best_checkpoint_raw")
         or llap_stats.get("last_checkpoint")
     )
     if not checkpoint:

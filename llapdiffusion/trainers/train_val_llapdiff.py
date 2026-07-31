@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import gc
 import math
+import time
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple, Union
+from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import torch
 from llapdiffusion.configs import config
@@ -467,7 +468,11 @@ def _build_cond_summary(
     if adapter is not None:
         stats = _history_stat_tokens(V, T, mask_bn, device, dt=dt, x_obs_mask=x_obs_mask)
         cond_summary_raw = adapter(cond_summary_raw, stats)
-    cond_summary = normalize_cond_per_batch(cond_summary_raw) if norm else cond_summary_raw
+    cond_summary = (
+        normalize_cond_per_batch(cond_summary_raw, mode=_resolve_cond_norm_mode(diff_model))
+        if norm
+        else cond_summary_raw
+    )
     return cond_summary
 
 
@@ -505,7 +510,14 @@ def _build_cond_summary_pair(
     if adapter is not None:
         stats = _history_stat_tokens(V, T, mask_bn, device, dt=dt, x_obs_mask=x_obs_mask)
         cond_summary_raw = adapter(cond_summary_raw, stats)
-    cond_summary = normalize_cond_per_batch(cond_summary_raw) if norm else cond_summary_raw
+    # COND_NORM_MODE="sample" makes the conditioning a function of the window alone;
+    # the legacy "batch" mode couples it to batch composition, which differs between
+    # shuffled training batches and sequential eval batches (see normalize_cond_per_batch).
+    cond_summary = (
+        normalize_cond_per_batch(cond_summary_raw, mode=_resolve_cond_norm_mode(diff_model))
+        if norm
+        else cond_summary_raw
+    )
     return cond_summary, cond_summary_raw
 
 
@@ -578,6 +590,43 @@ def _load_module_state(module: nn.Module, state_dict: Dict[str, torch.Tensor], *
         print(f"[load] missing keys for {module.__class__.__name__}: {missing}")
     if unexpected:
         print(f"[load] unexpected keys for {module.__class__.__name__}: {unexpected}")
+
+
+_UQ_HEAD_KEY_MARKERS = (
+    "chirp_field.to_uq",
+    "chirp_field._p0_base",
+    "chirp_field._q_base",
+)
+
+
+def _load_diff_init_state(
+    diff_model: nn.Module,
+    init_state: Dict[str, torch.Tensor],
+    *,
+    verbose: bool = False,
+) -> None:
+    """Warm-start the diffusion model from DIFF_INIT_CKPT.
+
+    Strict load with one tolerated exception: a CHIRP_UQ_HEAD model may warm-start
+    from an MSE-trained (no-UQ) chirp checkpoint — the freshly initialized UQ-head
+    tensors are the only keys allowed to be missing (the recommended recipe for
+    stabilizing Gaussian-NLL training). Any other mismatch fails loudly.
+    """
+    own_keys = set(diff_model.state_dict().keys())
+    missing = own_keys - set(init_state.keys())
+    unexpected = set(init_state.keys()) - own_keys
+    uq_only_missing = bool(missing) and all(
+        any(marker in key for marker in _UQ_HEAD_KEY_MARKERS) for key in missing
+    )
+    if uq_only_missing and not unexpected:
+        _load_module_state(diff_model, init_state, strict=False)
+        if verbose:
+            print(
+                "[init] DIFF_INIT_CKPT lacks the UQ head; kept fresh init for: "
+                f"{sorted(missing)}"
+            )
+        return
+    _load_module_state(diff_model, init_state, strict=True)
 
 
 def _init_pole_probe(
@@ -992,6 +1041,7 @@ def evaluate_val_diagnostics(
             reuse_xt_eps=(x_t, eps_true),
             target_mask=obs_any,
             return_stats=True,
+            loss_mode=_diff_loss_mode(config),
         )
         raw_sum += float(stats["raw_loss"].item()) * Beff
         num_samples += Beff
@@ -1106,9 +1156,9 @@ def _sampling_kwargs(config_obj: object, *, prefix: str = "EVAL") -> Dict[str, o
     )
 
     return {
-        "steps": int(_read("STEPS", default=36, aliases=("GEN_STEPS",))),
+        "steps": int(_read("STEPS", default=64, aliases=("GEN_STEPS",))),
         "guidance_strength": guidance_strength,
-        "guidance_power": float(_read("GUIDANCE_POWER", default=0.3)),
+        "guidance_power": float(_read("GUIDANCE_POWER", default=0.3, aliases=("GUIDANCE_POWER",))),
         "eta": float(_read("ETA", default=0.0, aliases=("GEN_ETA",))),
         "aggregation_method": str(_read("AGGREGATION", default="mean")),
         "quantiles": tuple(
@@ -1177,6 +1227,7 @@ def evaluate_regression(
     verbose: bool = False,
     progress_enabled: bool = False,
     progress_label: Optional[str] = None,
+    clip_stats: Optional[Dict[str, float]] = None,
 ):
     """
     Evaluate probabilistic forecasts in observation space (set-VAE pipeline).
@@ -1292,6 +1343,7 @@ def evaluate_regression(
                     dynamic_thresh_max=dynamic_thresh_max,
                     rho=rho,
                     generator=generator,
+                    clip_stats=clip_stats,
                 )
                 y_hat_sample = decode_latents_with_vae(
                     vae, x0_norm, entity_pad=entity_pad, mu_mean=mu_mean, mu_std=mu_std
@@ -1394,6 +1446,40 @@ def _save_checkpoint(out_path: Path, payload: Dict[str, object]) -> None:
     torch.save(payload, out_path)
 
 
+def _diff_loss_mode(config_obj: object) -> str:
+    """Training loss mode: 'mse' or 'gaussian_nll' (needs the Theorem-C UQ head)."""
+    mode = str(getattr(config_obj, "DIFF_LOSS_MODE", "mse")).strip().lower()
+    if mode not in {"mse", "gaussian_nll"}:
+        raise ValueError(f"Unknown DIFF_LOSS_MODE '{mode}'. Use 'mse' or 'gaussian_nll'.")
+    if mode == "gaussian_nll" and not bool(getattr(config_obj, "CHIRP_UQ_HEAD", False)):
+        raise ValueError("DIFF_LOSS_MODE='gaussian_nll' requires CHIRP_UQ_HEAD=True.")
+    return mode
+
+
+def _resolve_chirp_time_scale(config_obj: object) -> Optional[float]:
+    """Window length L for the chirp basis (a fixed constant per run).
+
+    ``None`` (the default) resolves to the run's horizon ``config.PRED`` so the pole
+    function class does not depend on the sample; a number pins L explicitly; the
+    string ``"adaptive"`` opts into the per-sample L = max|t_rel| inside the model.
+    The resolved value is persisted in the checkpoint's model config.
+    """
+    value = getattr(config_obj, "CHIRP_TIME_SCALE", None)
+    if isinstance(value, str):
+        mode = value.strip().lower()
+        if mode == "adaptive":
+            return None
+        raise ValueError(
+            f"Unknown CHIRP_TIME_SCALE '{value}'. Use None (horizon), a number, or 'adaptive'."
+        )
+    if value is None:
+        modal_type = str(getattr(config_obj, "DENOISER_MODAL_TYPE", "lti")).strip().lower()
+        if modal_type != "chirp":
+            return None  # unused by the lti core; don't require PRED
+        return float(getattr(config_obj, "PRED"))
+    return float(value)
+
+
 def _llapdiff_model_kwargs(config_obj: object) -> Dict[str, object]:
     return {
         "data_dim": int(getattr(config_obj, "VAE_LATENT_CHANNELS")),
@@ -1413,6 +1499,23 @@ def _llapdiff_model_kwargs(config_obj: object) -> Dict[str, object]:
         "analysis_summary_qk": bool(getattr(config_obj, "ANALYSIS_SUMMARY_QK", False)),
         "analysis_qk_use_raw_summary": bool(getattr(config_obj, "ANALYSIS_QK_USE_RAW", False)),
         "rho_conditioning_mode": str(getattr(config_obj, "RHO_CONDITIONING_MODE", "raw")),
+        "denoiser_modal_type": str(getattr(config_obj, "DENOISER_MODAL_TYPE", "lti")),
+        "chirp_num_basis": int(getattr(config_obj, "CHIRP_NUM_BASIS", 8)),
+        "chirp_rho_min": float(getattr(config_obj, "CHIRP_RHO_MIN", 1e-4)),
+        "chirp_use_mlp_residual": bool(getattr(config_obj, "CHIRP_USE_MLP_RESIDUAL", False)),
+        "chirp_time_scale": _resolve_chirp_time_scale(config_obj),
+        "output_head": str(getattr(config_obj, "DENOISER_OUTPUT_HEAD", "auto")),
+        "chirp_uq_head": bool(getattr(config_obj, "CHIRP_UQ_HEAD", False)),
+        "chirp_uq_init_var": float(getattr(config_obj, "CHIRP_UQ_INIT_VAR", 1e-2)),
+        "chirp_growth_budget": float(getattr(config_obj, "CHIRP_GROWTH_BUDGET", 0.0)),
+        "chirp_parameterization": str(getattr(config_obj, "CHIRP_PARAMETERIZATION", "p_exact")),
+        # Anchor the pole rho init to the forecast horizon for BOTH cores: a
+        # horizon-independent init leaves only near-DC modes alive at long h.
+        "pole_init_horizon": float(getattr(config_obj, "PRED", 0) or 0) or None,
+        "chirp_rho_basis": str(getattr(config_obj, "CHIRP_RHO_BASIS", "centered")),
+        "chirp_omega_basis": str(getattr(config_obj, "CHIRP_OMEGA_BASIS", "centered")),
+        "chirp_basis": str(getattr(config_obj, "CHIRP_BASIS", "half_integer")),
+        "chirp_rho_max_scale": float(getattr(config_obj, "CHIRP_RHO_MAX_SCALE", 4.0)),
     }
 
 
@@ -1430,11 +1533,41 @@ def _cond_adapter_config(config_obj: object) -> Dict[str, object]:
     }
 
 
+def _resolve_cond_norm_mode(diff_model: Optional[nn.Module] = None) -> str:
+    """Conditioning-normalization mode, preferring the one the model was TRAINED with.
+
+    ``build_llapdiff_model`` stamps ``cond_norm_mode`` onto the model (from the checkpoint
+    when rebuilding one, else from the live config), so a pre-fix checkpoint keeps the
+    legacy per-batch normalization it was trained under instead of silently picking up the
+    current default. Without this, loading an old checkpoint re-creates the very train/eval
+    conditioning mismatch the "sample" mode was introduced to remove, in reverse.
+    """
+    mode = getattr(diff_model, "cond_norm_mode", None) if diff_model is not None else None
+    if mode is None:
+        mode = getattr(config, "COND_NORM_MODE", "batch")
+    return str(mode)
+
+
 def _llapdiff_model_config(config_obj: object) -> Dict[str, object]:
     return {
         "llapdiff": _llapdiff_model_kwargs(config_obj),
         "cond_adapter": _cond_adapter_config(config_obj),
+        # A pipeline setting, not a LLapDiff constructor kwarg: it governs how the
+        # summarizer's output is normalized before the denoiser consumes it, so it is
+        # persisted alongside cond_adapter rather than inside "llapdiff".
+        "cond_norm_mode": str(getattr(config_obj, "COND_NORM_MODE", "sample")),
     }
+
+
+def _cond_norm_mode_from_checkpoint(payload: object) -> str:
+    """Checkpoints predating COND_NORM_MODE were trained under per-batch normalization."""
+    if isinstance(payload, dict):
+        model_config = payload.get("model_config")
+        if isinstance(model_config, dict):
+            mode = model_config.get("cond_norm_mode")
+            if mode is not None:
+                return str(mode)
+    return "batch"
 
 
 def _llapdiff_config_from_checkpoint(payload: object) -> Dict[str, object]:
@@ -1453,6 +1586,20 @@ def _llapdiff_config_from_checkpoint(payload: object) -> Dict[str, object]:
             if key != "cond_adapter"
         }
     config.setdefault("rho_conditioning_mode", "legacy_effective")
+    # Checkpoints predating the chirp variant are LTI; keep them loadable unchanged.
+    config.setdefault("denoiser_modal_type", "lti")
+    config.setdefault("chirp_time_scale", None)
+    # Checkpoints predating the decoupled head flag used the modal-type-dependent head.
+    config.setdefault("output_head", "auto")
+    config.setdefault("chirp_uq_head", False)
+    config.setdefault("chirp_uq_init_var", 1e-2)  # pre-knob ckpts used the 1e-2 init
+    config.setdefault("chirp_growth_budget", 0.0)
+    config.setdefault("chirp_parameterization", "p_exact")
+    config.setdefault("pole_init_horizon", None)  # pre-fix ckpts keep legacy rho init
+    config.setdefault("chirp_rho_basis", "nonneg")      # pre-fix ckpts: legacy 1+cos rho basis
+    config.setdefault("chirp_omega_basis", "nonneg")    # pre-fix ckpts: legacy 1+cos omega basis
+    config.setdefault("chirp_basis", "integer")         # pre-fix ckpts: legacy integer-cycle basis
+    config.setdefault("chirp_rho_max_scale", 4.0)
     return config
 
 
@@ -1474,6 +1621,14 @@ def build_llapdiff_model(
         else _llapdiff_model_kwargs_from_checkpoint(config_obj, checkpoint_payload)
     )
     model = LLapDiff(**model_kwargs).to(device)
+    # Stamp the conditioning-normalization mode the model is to be used with: from the
+    # checkpoint when rebuilding one (so it keeps what it was trained under), else from
+    # the live config. Read back by _resolve_cond_norm_mode.
+    model.cond_norm_mode = (
+        str(getattr(config_obj, "COND_NORM_MODE", "sample"))
+        if checkpoint_payload is None
+        else _cond_norm_mode_from_checkpoint(checkpoint_payload)
+    )
     adapter_cfg = _cond_adapter_config(config_obj)
     if adapter_cfg["mode"] == "stats":
         model.cond_adapter = ContextStatsAdapter(
@@ -1526,7 +1681,10 @@ def _select_eval_checkpoint_path(
     best_ckpt_path_raw: Path,
     best_ckpt_path_ema: Path,
     last_ckpt_path: Path,
+    written: Optional[Callable[[Path], bool]] = None,
 ) -> Optional[Path]:
+    """``written`` filters out checkpoint files this run did not produce (stale
+    files from earlier runs sharing the output directory)."""
     if test_metric_source == "raw":
         preferred = [best_ckpt_path_raw]
         if val_metric_source == "raw":
@@ -1540,7 +1698,7 @@ def _select_eval_checkpoint_path(
 
     preferred.extend([best_ckpt_path, last_ckpt_path])
     for path in preferred:
-        if path.exists():
+        if path.exists() and (written is None or written(path)):
             return path
     return None
 
@@ -1908,7 +2066,7 @@ def run(
         init_state = init_payload.get("model") if isinstance(init_payload, dict) else init_payload
         if init_state is None:
             raise ValueError(f"DIFF_INIT_CKPT does not contain model weights: {init_ckpt_path}")
-        _load_module_state(diff_model, init_state, strict=True)
+        _load_diff_init_state(diff_model, init_state, verbose=verbose)
         if isinstance(init_payload, dict):
             init_ema_state = init_payload.get("ema")
         if verbose:
@@ -2339,6 +2497,8 @@ def run(
                         reuse_xt_eps=(x_t_c, eps_true_c),
                         target_mask=target_mask_c,
                         return_stats=True,
+                        loss_mode=_diff_loss_mode(config),
+                        coeff_l2=float(getattr(config, "CHIRP_COEFF_L2", 0.0)),
                     )
                     loss = loss + loss_c * w_c
                     raw_loss = raw_loss + loss_c_stats["raw_loss"] * w_c
@@ -2368,6 +2528,8 @@ def run(
                         reuse_xt_eps=(x_t[idx_u], eps_true[idx_u]),
                         target_mask=obs_any[idx_u],
                         return_stats=True,
+                        loss_mode=_diff_loss_mode(config),
+                        coeff_l2=float(getattr(config, "CHIRP_COEFF_L2", 0.0)),
                     )
                     loss = loss + loss_u * w_u
                     raw_loss = raw_loss + loss_u_stats["raw_loss"] * w_u
@@ -2501,6 +2663,19 @@ def run(
     best_ckpt_path_ema = out_dir / f"llapdiff_{pred_tag}_best_ema.pt"
     last_ckpt_path = out_dir / f"llapdiff_{pred_tag}_last.pt"
     save_best = bool(getattr(config, "SAVE_BEST", True))
+    # Checkpoint files left by EARLIER runs share this directory (the artifact path
+    # encodes the run, not the dataset or the config). Reporting a path just because
+    # the file exists lets a stale checkpoint be evaluated as if this run produced
+    # it -- e.g. `_best_raw.pt` is only written when EMA_COMPARE_EVERY > 0, so with
+    # comparisons off a months-old raw checkpoint would be picked up. Only report
+    # what this run wrote.
+    run_start_time = time.time()
+
+    def _written_this_run(path: Path) -> Optional[str]:
+        try:
+            return str(path) if path.stat().st_mtime >= run_start_time - 1.0 else None
+        except OSError:
+            return None
 
     def _checkpoint_payload(**extra) -> Dict[str, object]:
         metadata = target_metadata_from_config(config)
@@ -2875,10 +3050,10 @@ def run(
         }),
     )
 
-    best_checkpoint = str(best_ckpt_path) if best_ckpt_path.exists() else None
-    best_checkpoint_raw = str(best_ckpt_path_raw) if best_ckpt_path_raw.exists() else None
-    best_checkpoint_ema = str(best_ckpt_path_ema) if best_ckpt_path_ema.exists() else None
-    last_checkpoint = str(last_ckpt_path) if last_ckpt_path.exists() else None
+    best_checkpoint = _written_this_run(best_ckpt_path)
+    best_checkpoint_raw = _written_this_run(best_ckpt_path_raw)
+    best_checkpoint_ema = _written_this_run(best_ckpt_path_ema)
+    last_checkpoint = _written_this_run(last_ckpt_path)
     best_val = best_val_crps if best_val_crps != float("inf") else None
 
     eval_checkpoint_path = _select_eval_checkpoint_path(
@@ -2888,6 +3063,7 @@ def run(
         best_ckpt_path_raw=best_ckpt_path_raw,
         best_ckpt_path_ema=best_ckpt_path_ema,
         last_ckpt_path=last_ckpt_path,
+        written=lambda p: _written_this_run(p) is not None,
     )
     final_test_eval_mode = _resolve_final_test_eval_mode(getattr(config, "FINAL_TEST_EVAL", "run"))
     loaded_checkpoint = str(eval_checkpoint_path) if eval_checkpoint_path is not None else None

@@ -24,16 +24,21 @@ from llapdiffusion.target_artifacts import (
     sync_target_artifact_config,
 )
 
+import warnings
+warnings.filterwarnings("ignore")
+# import debugpy
+# debugpy.listen(5678)
+# print("Waiting for debugger to attach...")
+# debugpy.wait_for_client()
+# print("Debugger attached")
 
 COVERAGE_HELP = "fraction of observed context entries to hide; 0 disables induced missingness"
 PREDICT_TYPE_DIR_PREFIX = "predict"
-
-
-import debugpy
-debugpy.listen(5677)
-print("Waiting for debugger to attach...")
-debugpy.wait_for_client()
-print("Debugger attached")
+MODAL_TYPE_DIR_PREFIX = "modal"
+DEFAULT_MODAL_TYPE = "lti"
+OUTPUT_HEAD_DIR_PREFIX = "head"
+DEFAULT_OUTPUT_HEAD = "auto"
+SEED_DIR_PREFIX = "seed"
 
 
 def _import_trainers():
@@ -188,6 +193,96 @@ def _apply_predict_type_output_routing(*, config=config) -> str:
     return predict_type
 
 
+def _active_modal_type(config=config) -> str:
+    value = str(getattr(config, "DENOISER_MODAL_TYPE", DEFAULT_MODAL_TYPE)).strip().lower()
+    return value or DEFAULT_MODAL_TYPE
+
+
+def _modal_type_dir_name(modal_type: str) -> str:
+    return f"{MODAL_TYPE_DIR_PREFIX}-{modal_type}"
+
+
+def _apply_modal_type_output_routing(*, config=config) -> str:
+    """
+    Put a non-default denoiser dynamical core in its own artifact dirs.
+
+    The default ``lti`` core keeps the historical paths; a ``chirp`` run is nested
+    under a ``modal-chirp`` segment so it no longer overwrites ``lti`` checkpoints
+    for the same (dataset, pred, predict-type). Applied after — and composes with —
+    the predict-type routing, mirroring _apply_predict_type_output_routing.
+    """
+    modal_type = _active_modal_type(config=config)
+    if modal_type == DEFAULT_MODAL_TYPE:
+        return modal_type
+
+    dirname = _modal_type_dir_name(modal_type)
+
+    def route(value: object) -> Path:
+        path = Path(str(value))
+        if any(part == dirname or part.startswith(f"{dirname}_") for part in path.parts):
+            return path
+        return path / dirname
+
+    if hasattr(config, "OUT_DIR"):
+        config.OUT_DIR = str(route(getattr(config, "OUT_DIR")))
+    if hasattr(config, "CKPT_DIR"):
+        config.CKPT_DIR = str(route(getattr(config, "CKPT_DIR")))
+    if hasattr(config, "POLE_PLOT_DIR") and hasattr(config, "OUT_DIR"):
+        config.POLE_PLOT_DIR = str(Path(str(config.OUT_DIR)) / "pole_plots")
+    return modal_type
+
+
+def _nest_artifact_dirs(dirname: str, *, config=config) -> None:
+    """Idempotently append ``dirname`` to OUT_DIR/CKPT_DIR (and rebase POLE_PLOT_DIR)."""
+
+    def route(value: object) -> Path:
+        path = Path(str(value))
+        if any(part == dirname or part.startswith(f"{dirname}_") for part in path.parts):
+            return path
+        return path / dirname
+
+    if hasattr(config, "OUT_DIR"):
+        config.OUT_DIR = str(route(getattr(config, "OUT_DIR")))
+    if hasattr(config, "CKPT_DIR"):
+        config.CKPT_DIR = str(route(getattr(config, "CKPT_DIR")))
+    if hasattr(config, "POLE_PLOT_DIR") and hasattr(config, "OUT_DIR"):
+        config.POLE_PLOT_DIR = str(Path(str(config.OUT_DIR)) / "pole_plots")
+
+
+def _active_output_head(config=config) -> str:
+    value = str(getattr(config, "DENOISER_OUTPUT_HEAD", DEFAULT_OUTPUT_HEAD)).strip().lower()
+    return value or DEFAULT_OUTPUT_HEAD
+
+
+def _apply_output_head_routing(*, config=config) -> str:
+    """
+    Put a forced output-head mode ('on'/'off') in its own artifact dirs.
+
+    The default 'auto' (modal-type-dependent head) keeps the historical paths, so
+    the 2x2 factorial cells (lti/chirp x head on/off) never overwrite each other or
+    the default runs. Composes after the modal-type routing.
+    """
+    mode = _active_output_head(config=config)
+    if mode == DEFAULT_OUTPUT_HEAD:
+        return mode
+    _nest_artifact_dirs(f"{OUTPUT_HEAD_DIR_PREFIX}-{mode}", config=config)
+    return mode
+
+
+def _apply_seed_output_routing(*, config=config) -> int | None:
+    """
+    Put an explicitly requested --seed in its own artifact dirs (seed-<n>).
+
+    Runs without --seed keep the historical paths. Applied last so seeds nest inside
+    the predict-type / modal-type / output-head segments.
+    """
+    seed = getattr(config, "REQUESTED_SEED_ARG", None)
+    if seed is None:
+        return None
+    _nest_artifact_dirs(f"{SEED_DIR_PREFIX}-{int(seed)}", config=config)
+    return int(seed)
+
+
 def _target_policy(config=config) -> Dict[str, object]:
     requested = getattr(config, "TARGET_COL", None)
     requested_cols = getattr(config, "TARGET_COLS", None)
@@ -319,6 +414,9 @@ def run_single_pred(
         )
     else:
         _apply_predict_type_output_routing(config=config)
+        _apply_modal_type_output_routing(config=config)
+        _apply_output_head_routing(config=config)
+        _apply_seed_output_routing(config=config)
     _apply_training_overrides(training_overrides, config=config)
     data_policy = _sync_target_shape_config(config=config)
 
@@ -452,6 +550,9 @@ def run_preds(
     Run the pipeline for multiple prediction horizons and collect stats.
     """
     _apply_predict_type_output_routing(config=config)
+    _apply_modal_type_output_routing(config=config)
+    _apply_output_head_routing(config=config)
+    _apply_seed_output_routing(config=config)
     base_out_dir = Path(getattr(config, "OUT_DIR", "./outputs"))
     base_ckpt_dir = Path(getattr(config, "CKPT_DIR", str(base_out_dir / "checkpoints")))
 
@@ -523,6 +624,32 @@ def _parse_args() -> argparse.Namespace:
         choices=PREDICT_TYPES,
         default=None,
         help="Diffusion prediction parameterization. Defaults to v.",
+    )
+    parser.add_argument(
+        "--modal-type",
+        type=str,
+        choices=("lti", "chirp"),
+        default=None,
+        help="Denoiser dynamical core: 'lti' (original) or 'chirp' (time-varying poles). "
+        "Defaults to config.DENOISER_MODAL_TYPE.",
+    )
+    parser.add_argument(
+        "--output-head",
+        type=str,
+        choices=("auto", "on", "off"),
+        default=None,
+        help="LapFormer output head (skip-scale + LayerNorm/Linear residual): 'auto' keeps "
+        "it for lti and drops it for chirp; 'on'/'off' force it for ablations. Non-default "
+        "values are routed into a head-<mode>/ artifact segment. Defaults to "
+        "config.DENOISER_OUTPUT_HEAD.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Global RNG seed for all three training stages. When set, artifacts are "
+        "routed into a seed-<n>/ segment so multi-seed runs don't overwrite each other. "
+        "Defaults to config.SEED without routing.",
     )
     parser.add_argument(
         "--recompute-vae",
@@ -829,6 +956,15 @@ def main() -> Dict[int, Dict[str, object]]:
     if args.calendar_day_batches:
         config.exact_timestamp_batches = False
     config.COVERAGE = _validate_coverage(args.coverage)
+    if args.modal_type is not None:
+        config.DENOISER_MODAL_TYPE = args.modal_type
+    if args.output_head is not None:
+        config.DENOISER_OUTPUT_HEAD = args.output_head
+    # SEED / REQUESTED_SEED_ARG are not preset-stamped, so they survive both preset
+    # applications; the explicit-request marker also drives the seed-<n>/ routing.
+    config.REQUESTED_SEED_ARG = args.seed
+    if args.seed is not None:
+        config.SEED = int(args.seed)
     config.REQUESTED_PREDICT_TYPE_ARG = args.predict_type
     if args.predict_type is not None:
         config.PREDICT_TYPE = args.predict_type
@@ -840,6 +976,9 @@ def main() -> Dict[int, Dict[str, object]]:
         raise ValueError("No prediction horizons provided to the pipeline.")
 
     _apply_predict_type_output_routing(config=config)
+    _apply_modal_type_output_routing(config=config)
+    _apply_output_head_routing(config=config)
+    _apply_seed_output_routing(config=config)
     base_out_dir = Path(getattr(config, "OUT_DIR", "./outputs"))
     base_ckpt_dir = Path(getattr(config, "CKPT_DIR", str(base_out_dir / "checkpoints")))
 

@@ -24,6 +24,7 @@ from llapdiffusion.latent_space.latent_vae import LatentVAE
 from llapdiffusion.latent_space.latent_vae_utils import normalize_and_check
 from llapdiffusion.models.llapdiff_utils import (
     infer_target_dim_from_loader,
+    set_torch,
     target_obs_mask_to_bhnc,
     target_time_observed,
     targets_to_bhnc,
@@ -753,7 +754,12 @@ def run(
         _log_dataset_summary(train_dl, sizes)
         print(f"VAE target_dim: {target_dim}")
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # Seed all RNGs so multi-seed pipeline runs are reproducible (mirrors the
+    # summarizer's set_seed and the diffusion trainer's set_torch call).
+    device = set_torch(
+        seed=int(getattr(config, "SEED", 42)),
+        deterministic=bool(getattr(config, "DETERMINISTIC", False)),
+    )
     amp_enabled = _vae_amp_enabled(device, config=config)
     if verbose:
         print(f"Using device: {device}")
