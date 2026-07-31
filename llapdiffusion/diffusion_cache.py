@@ -154,6 +154,11 @@ class DiffusionSplitCache:
         self.root = Path(root)
         self.batch_rows = [int(x) for x in batch_rows]
         self.batch_digests = [str(x) for x in batch_digests]
+        # Row offset of each batch. _claim used to re-sum the prefix on every batch, which is
+        # O(N^2) per epoch (1086 batches -> ~1.2M additions).
+        self._offsets: List[int] = [0]
+        for rows in self.batch_rows:
+            self._offsets.append(self._offsets[-1] + rows)
         self.latent_shape = tuple(int(x) for x in latent_shape)
         self.summary_shape = None if summary_shape is None else tuple(int(x) for x in summary_shape)
         self.cursor = 0
@@ -181,8 +186,8 @@ class DiffusionSplitCache:
                 f"{self.name} diffusion cache order mismatch at batch {self.cursor}: "
                 f"expected {expected}, got {got}"
             )
-        start = int(sum(self.batch_rows[: self.cursor]))
-        stop = start + int(self.batch_rows[self.cursor])
+        start = self._offsets[self.cursor]
+        stop = self._offsets[self.cursor + 1]
         self.cursor += 1
         return slice(start, stop)
 
@@ -442,10 +447,18 @@ def _split_from_manifest(root: Path, name: str, split_manifest: Dict[str, object
 def _load_existing_cache(
     root: Path,
     manifest_core: Dict[str, object],
-    plans: Dict[str, _SplitPlan],
+    plans: Optional[Dict[str, _SplitPlan]],
     *,
     device: torch.device,
 ) -> Optional[DiffusionInputCache]:
+    """Reuse a cache on disk. ``plans=None`` skips the batch-fingerprint cross-check.
+
+    Building the plans requires a full pass over all three dataloaders, so with ``None`` the
+    manifest's own recorded digests are trusted. That is safe because ``DiffusionSplitCache.
+    _claim`` re-checks the fingerprint of every batch of every epoch anyway -- the only thing
+    lost is that a mismatch surfaces as a loud RuntimeError at first use rather than as a
+    silent rebuild at load time.
+    """
     manifest_path = root / "manifest.json"
     if not manifest_path.exists():
         return None
@@ -454,14 +467,16 @@ def _load_existing_cache(
     if manifest.get("core") != manifest_core:
         return None
     splits = manifest.get("splits", {})
-    for name, plan in plans.items():
+    for name in (plans.keys() if plans is not None else ("train", "val", "test")):
         split = splits.get(name)
         if split is None:
             return None
-        if split.get("batch_digest") != plan.digest:
-            return None
-        if split.get("total_rows") != plan.total_rows:
-            return None
+        if plans is not None:
+            plan = plans[name]
+            if split.get("batch_digest") != plan.digest:
+                return None
+            if split.get("total_rows") != plan.total_rows:
+                return None
         if not (root / f"{name}_latents.npy").exists():
             return None
         if not (root / f"{name}_obs_any.npy").exists():
@@ -678,6 +693,18 @@ def build_or_load_diffusion_input_cache(
         default=np.float16,
     )
 
+    core = _manifest_core(config_obj, summary_enabled=summary_enabled)
+
+    # Planning means iterating train+val+test in full (~1550 batches on noaa_uk, ~25 s) purely
+    # to recompute digests the manifest already stores. On a cache hit that is pure overhead,
+    # paid by every trial process, so it is skippable.
+    if not _bool_config(config_obj, "DIFF_PRECOMPUTE_VERIFY_PLAN", True):
+        existing = _load_existing_cache(root, core, None, device=device)
+        if existing is not None:
+            if verbose:
+                print(f"[diffusion cache] reusing precomputed inputs from {root} (plan not re-verified)")
+            return existing
+
     if verbose:
         print(f"[diffusion cache] planning cache at {root}")
     plans = {
@@ -685,7 +712,6 @@ def build_or_load_diffusion_input_cache(
         "val": _metadata_plan("val", val_dl),
         "test": _metadata_plan("test", test_dl),
     }
-    core = _manifest_core(config_obj, summary_enabled=summary_enabled)
     existing = _load_existing_cache(root, core, plans, device=device)
     if existing is not None:
         if verbose:

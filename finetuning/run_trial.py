@@ -49,6 +49,44 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+# The in-training validation protocol (DEVELOPER_GUIDE.md §7.6). These knobs make the
+# trainer's val CRPS ~61x cheaper, and they are NOT global defaults on purpose: they change
+# which epoch the trainer selects, i.e. the epoch this harness then scores. The cheap
+# protocol was validated on noaa_uk h=168 only, so it is opted into per campaign rather than
+# inherited. finetune_noaa_uk.sh exports these; every other run keeps the full protocol.
+#
+# Precedence: env profile < --smoke < per-trial --overrides-json.
+_EVAL_PROFILE_ENV = {
+    "LLAPDIFF_EVAL_STEPS": ("EVAL_STEPS", int),
+    "LLAPDIFF_EVAL_NUM_SAMPLES": ("EVAL_NUM_SAMPLES", int),
+    "LLAPDIFF_EVAL_MAX_BATCHES": ("EVAL_MAX_BATCHES", int),
+    "LLAPDIFF_EVAL_SUBSET_MODE": ("EVAL_SUBSET_MODE", str),
+    "LLAPDIFF_EVAL_SEED": ("EVAL_SEED", int),
+    "LLAPDIFF_VAL_DIAG_EVERY": ("VAL_DIAG_EVERY", int),
+}
+
+
+def _apply_eval_profile_env(config) -> None:
+    """Stamp any LLAPDIFF_EVAL_* / LLAPDIFF_VAL_DIAG_EVERY env overrides onto the config.
+
+    These are base-config keys (not preset-stamped), so a plain setattr survives both
+    applications of apply_dataset_preset -- see DEVELOPER_GUIDE.md §3.
+    """
+    applied = {}
+    for env_name, (attr, cast) in _EVAL_PROFILE_ENV.items():
+        raw = os.environ.get(env_name)
+        if raw is None or raw == "":
+            continue
+        try:
+            value = cast(raw)
+        except ValueError as exc:
+            raise SystemExit(f"{env_name}={raw!r} is not a valid {cast.__name__}") from exc
+        setattr(config, attr, value)
+        applied[attr] = value
+    if applied:
+        print(f"[run_trial] validation-protocol profile from env: {applied}", flush=True)
+
+
 def main() -> None:
     args = _parse_args()
     os.chdir(REPO_ROOT)  # ARTIFACT_ROOT ("./ldt") is CWD-relative
@@ -60,11 +98,18 @@ def main() -> None:
     from llapdiffusion.configs import config
     import llapdiffusion.pipeline as pipeline
 
+    _apply_eval_profile_env(config)
+
     if args.smoke:
         config_overrides.setdefault("EPOCHS", 3)
         config.NUM_EVAL_SAMPLES = 4
         config.GEN_STEPS = 8
         config.DOWNSTREAM_EVAL_EVERY = 1  # 3 epochs must still exercise the best-ckpt path
+        # Drop the per-role validation overrides so the smoke actually uses the tiny
+        # settings above (EVAL_* would otherwise win for the trainer's val evals).
+        config.EVAL_STEPS = None
+        config.EVAL_NUM_SAMPLES = None
+        config.EVAL_MAX_BATCHES = 0
     # The harness scores the checkpoint itself (eval_sampling/final_eval), so the
     # trainer's own final test pass is redundant.
     config.FINAL_TEST_EVAL = "skip"

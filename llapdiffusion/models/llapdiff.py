@@ -267,6 +267,23 @@ class LLapDiff(nn.Module):
             step_indices = torch.flip(torch.unique(idx, sorted=True), dims=[0]).long()
 
         ts_prev = torch.cat([step_indices[1:], step_indices.new_tensor([-1])])
+        # Read the schedule to host once. Iterating the device tensors and calling .item()
+        # per step costs two device syncs per denoising step (~128 per generate call).
+        step_list = [int(v) for v in step_indices.tolist()]
+        prev_list = [int(v) for v in ts_prev.tolist()]
+
+        # Whether the unconditional pass is needed at all. This depends only on the Python
+        # guidance value, so it is hoisted out of the loop: the scheduled weight
+        # g = g_min + (g_max - g_min) * alpha_bar**power equals 1 for every alpha_bar in
+        # [0, 1] exactly when g_min == g_max == 1. Evaluating it inside the loop cost one
+        # device sync per step.
+        cond_present = (cond_summary is not None) or (cond_summary_raw is not None)
+        if isinstance(guidance_strength, (tuple, list)):
+            _g_min, _g_max = float(guidance_strength[0]), float(guidance_strength[1])
+            _guidance_is_unit = abs(_g_min - 1.0) <= 1e-12 and abs(_g_max - 1.0) <= 1e-12
+        else:
+            _guidance_is_unit = abs(float(guidance_strength) - 1.0) <= 1e-12
+        cfg_active = cond_present and not _guidance_is_unit
 
         def _randn_like(ref: torch.Tensor) -> torch.Tensor:
             if generator is None:
@@ -335,29 +352,27 @@ class LLapDiff(nn.Module):
 
         # ---- main loop ----
         last_x0 = None
-        for t_i, t_prev_i in zip(step_indices, ts_prev):
-            t_b = torch.full((B,), int(t_i.item()), device=device, dtype=torch.long)
+        for t_i, t_prev_i in zip(step_list, prev_list):
+            t_b = torch.full((B,), t_i, device=device, dtype=torch.long)
 
             # classifier-free guidance (optionally scheduled)
-            if isinstance(guidance_strength, (tuple, list)):
-                g_min, g_max = guidance_strength
+            if cfg_active and isinstance(guidance_strength, (tuple, list)):
                 ab_b = _alpha_bar_batched(t_b)  # [B,1,1]
-                g_min_t = torch.as_tensor(g_min, device=device, dtype=ab_b.dtype)
-                g_max_t = torch.as_tensor(g_max, device=device, dtype=ab_b.dtype)
+                g_min_t = torch.as_tensor(_g_min, device=device, dtype=ab_b.dtype)
+                g_max_t = torch.as_tensor(_g_max, device=device, dtype=ab_b.dtype)
                 g_scalar = g_min_t + (g_max_t - g_min_t) * (ab_b ** guidance_power)
-            else:
+            elif cfg_active:
                 g_scalar = (
                     torch.as_tensor(float(guidance_strength), device=device)
                     .view(1, 1, 1)
                     .expand(B, 1, 1)
                 )
+            else:
+                g_scalar = None  # unused: the unconditional pass is skipped below
 
-            # Avoid an unnecessary unconditional pass when CFG is inactive.
-            cond_present = (cond_summary is not None) or (cond_summary_raw is not None)
-            cfg_active = cond_present and torch.any(torch.abs(g_scalar - 1.0) > 1e-12).item()
-            is_final_step = int(t_prev_i) < 0
+            is_final_step = t_prev_i < 0
             if modal_capture is not None and is_final_step:
-                modal_capture["t_idx"] = int(t_i)
+                modal_capture["t_idx"] = t_i
             pred_c = self.forward(
                 x_t,
                 t_b,
@@ -388,8 +403,8 @@ class LLapDiff(nn.Module):
                 sc_feat_next = x0_hat.detach()
 
             # time update
-            if int(t_prev_i) >= 0:
-                tprev_b = torch.full((B,), int(t_prev_i.item()), device=device, dtype=torch.long)
+            if t_prev_i >= 0:
+                tprev_b = torch.full((B,), t_prev_i, device=device, dtype=torch.long)
                 x_t = self.scheduler.ddim_step_from(
                     x_t,
                     t_b,
@@ -404,7 +419,7 @@ class LLapDiff(nn.Module):
 
             # keep observed values consistent across steps (inpainting)
             if (y_obs is not None) and (obs_u is not None):
-                if int(t_prev_i) >= 0:
+                if t_prev_i >= 0:
                     y_obs_typed = y_obs.to(device=device, dtype=x_t.dtype)
                     x_obs_t, _ = self.scheduler.q_sample(y_obs_typed, tprev_b, noise=_randn_like(y_obs_typed))
                     x_t = obs_u * x_obs_t + (1.0 - obs_u) * x_t

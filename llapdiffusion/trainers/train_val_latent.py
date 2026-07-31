@@ -759,6 +759,7 @@ def run(
     device = set_torch(
         seed=int(getattr(config, "SEED", 42)),
         deterministic=bool(getattr(config, "DETERMINISTIC", False)),
+        allow_tf32=bool(getattr(config, "ALLOW_TF32", False)),
     )
     amp_enabled = _vae_amp_enabled(device, config=config)
     if verbose:

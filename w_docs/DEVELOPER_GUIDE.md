@@ -158,6 +158,24 @@ target-mask-aux defaults, `TIMESTEPS`, `MODEL_WIDTH`, `LAPLACE_K`, and (for
 > `--modal-type` flag, set once in `main()`) **survives** both preset
 > applications. `_llapdiff_model_kwargs` reads them at model-build time.
 
+> **Note (performance / eval-protocol keys).** Same story for the knobs added for the
+> speed-up work — all base-config, none preset-stamped. They split into two groups, and
+> the difference matters:
+>
+> **Changed from historical, on by default** (they alter numerics or throughput but not
+> *what* is computed): `ALLOW_TF32 = True` (TF32 matmuls — CRPS moves in the 4th–5th
+> decimal; `DETERMINISTIC = True` forces it off), `DATALOADER_NUM_WORKERS = 8` /
+> `_PERSISTENT_WORKERS` / `_PREFETCH_FACTOR` (was effectively 0 — nothing passed them),
+> `DIFF_PRECOMPUTE_VERIFY_PLAN = False` (skips a startup rescan; a stale cache still fails
+> loudly at first use). `DIFF_VALIDATE_DT_GRIDS = True` keeps the check, now vectorised.
+>
+> **Unset by default, opt in per campaign**: the validation-protocol block `EVAL_STEPS` /
+> `EVAL_NUM_SAMPLES` / `EVAL_MAX_BATCHES` / `EVAL_SUBSET_MODE` / `EVAL_SEED` and
+> `VAL_DIAG_EVERY` (§7.6). These move checkpoint **selection**, so they are not global
+> defaults — `finetune_noaa_uk.sh` exports `LLAPDIFF_EVAL_*` instead. For the `EVAL_*`
+> keys, **`None` means "unset"** — `_sampling_kwargs` skips them and falls back to the
+> reported protocol.
+
 ### 🔴 Footgun #1: the preset is applied **twice**, and resets your edits
 
 `apply_dataset_preset` runs once in `main()` **and again inside
@@ -537,6 +555,56 @@ path, and the residues `theta [B,2K,D]` (the constant cₖ/bₖ) are reused unch
   (both cores, final-step semantics, no-op when absent) and
   `modal_contributions` (analytic E_k, lti expansion, junk-mode ranking guard).
 
+### 7.6 Validation protocol vs reported protocol (the campaign's cost)
+
+`_sampling_kwargs(config_obj, prefix=...)` (`train_val_llapdiff.py`) resolves
+`{prefix}_{NAME}` first and falls back to the global key. Two roles use it:
+
+- `prefix="EVAL"` — **exactly two call sites**, both the trainer's in-training val CRPS.
+  Their only jobs are picking the best epoch and driving early stopping.
+- `prefix="TEST"` — everything that produces a **reported** number: the trainer's final
+  test read, `llapdiff-checkpoint-eval`, `llapdiff-u1-sweep`, and the tuning harness's
+  `finetuning/eval_sampling.py` / `final_eval.py`.
+
+So the validation protocol only has to **rank** checkpoints the same way; it does not have
+to reproduce the reported values. That matters because it dominates wall-clock: on
+`noaa_uk` h=168 one full val CRPS eval is 146 batches × 25 samples × 64 DDIM steps × **2**
+forwards (CFG runs conditional + unconditional) ≈ 110 min, every 5 epochs — ~94 % of a
+trial. Setting `EVAL_STEPS=16`, `EVAL_NUM_SAMPLES=5`, `EVAL_MAX_BATCHES=48`,
+`EVAL_SEED=4242` cuts that ~61× and leaves every reported number untouched.
+
+**These are opt-in per campaign, not `config.py` defaults.** They change which epoch the
+trainer selects — and that is the epoch `finetuning/` then scores — so switching them on
+globally would silently move checkpoint selection on every dataset, including
+PhysioNet h=12, whose val split is **five windows** (B19) and cannot afford a 25 → 5
+ensemble. `config.py` therefore ships them unset (`None` / `0`, `VAL_DIAG_EVERY = 1`), and
+`finetune_noaa_uk.sh` exports the campaign profile:
+
+```bash
+export LLAPDIFF_EVAL_STEPS=16 LLAPDIFF_EVAL_NUM_SAMPLES=5 \
+       LLAPDIFF_EVAL_MAX_BATCHES=48 LLAPDIFF_EVAL_SUBSET_MODE=stride \
+       LLAPDIFF_EVAL_SEED=4242 LLAPDIFF_VAL_DIAG_EVERY=5
+```
+
+`finetuning/run_trial.py::_apply_eval_profile_env` stamps them onto the config (base-config
+keys, so a plain `setattr` survives both preset applications — §3). Precedence is
+**env profile < `--smoke` < per-trial `--overrides-json`**.
+
+🔴 **Before trusting a cheap protocol on a new setting, check it still ranks.** Score ≥8
+checkpoints under both protocols on val and require Spearman ρ ≥ 0.9. Otherwise you have
+made the campaign select the wrong hyperparameters, faster.
+
+Two traps:
+
+- `EARLY_STOP` counts **evals**, not epochs. At `DOWNSTREAM_EVAL_EVERY=5` and
+  `EARLY_STOP=20` the patience is 100 epochs. Raising the interval without lowering
+  `EARLY_STOP` makes runs **longer**.
+- `EVAL_MAX_BATCHES` uses a **strided** subset (`EVAL_SUBSET_MODE`, `llapdiffusion/eval_subsets.py`)
+  because splits are chronological — a prefix of a weather series is one season. It is
+  wired only into `evaluate_regression`; **`evaluate_val_diagnostics` must keep the full
+  loader**, because it consumes the sequential `DiffusionSplitCache`, whose `_claim` walks a
+  monotone cursor and tolerates stopping early but not skipping.
+
 > **Output routing.** A chirp run is nested under a `modal-chirp/` segment by
 > `_apply_modal_type_output_routing` (`pipeline.py`), composing with any
 > `predict-<type>/` segment (`predict-x0/modal-chirp/`), so chirp and lti never
@@ -601,6 +669,7 @@ checkpoint metadata. If the checkpoint records it, you don't pass `--predict-typ
 | Change which stages run / the skip logic                                      | `pipeline.py:run_single_pred` (281)                                                                         |
 | Change CLI flags                                                              | `pipeline.py:_parse_args` (475) and `tools/llapdiff_checkpoint_eval.py`                                     |
 | Change evaluation cases / sample counts                                       | `tools/llapdiff_checkpoint_eval.py:evaluate_checkpoint` (610)                                               |
+| Make a run faster (eval protocol, TF32, dataloader workers, device syncs)     | §7.6; keys in `configs/config.py`; subsetting in `llapdiffusion/eval_subsets.py` (the tool's `_limit_batches` is a `prefix`-mode shim over it); loader workers via `configs/config_utils.py:dataloader_kwargs` |
 | Change where artifacts land                                                   | `ARTIFACT_ROOT` in `config.py`; path assembly in `apply_dataset_preset`                                     |
 
 

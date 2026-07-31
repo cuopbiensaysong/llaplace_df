@@ -15,7 +15,9 @@ from torch.nn import functional as F
 from torch.utils.data import DataLoader
 
 from llapdiffusion.benchmark_protocol import llapdiff_protocol_metadata, split_protocol_metadata
+from llapdiffusion.configs.config_utils import dataloader_kwargs
 from llapdiffusion.configs.dataset_registry import resolve_run_experiment
+from llapdiffusion.eval_subsets import limit_batches
 from llapdiffusion.logging_utils import is_debug, is_verbose, progress_iter, progress_task
 from llapdiffusion.diffusion_cache import (
     DiffusionSplitCache,
@@ -89,12 +91,22 @@ def _release_cuda_allocator(device: torch.device) -> None:
         torch.cuda.empty_cache()
 
 
+def _grads_finite_flag(params) -> Optional[torch.Tensor]:
+    """0-dim bool tensor: are all gradients finite? ``None`` when there are no gradients.
+
+    Deliberately returns a tensor rather than a bool: evaluating one per parameter forces a
+    device sync each time, and this model has 168 parameter tensors. Callers stack the flags
+    and sync once.
+    """
+    grads = [p.grad for p in params if p.grad is not None]
+    if not grads:
+        return None
+    return torch.stack([torch.isfinite(g).all() for g in grads]).all()
+
+
 def _grads_are_finite_params(params) -> bool:
-    for param in params:
-        grad = param.grad
-        if grad is not None and not torch.isfinite(grad).all():
-            return False
-    return True
+    flag = _grads_finite_flag(params)
+    return True if flag is None else bool(flag)
 
 
 def _should_skip_nonfinite_summary_ft_gradients(
@@ -266,20 +278,24 @@ def _flatten_dt(
     if m.shape != (B, N):
         raise ValueError(f"{key} batch/entity shape {tuple(dt.shape[:2])} does not match mask shape {tuple(m.shape)}")
 
-    valid_dt = dt[m]
-    if valid_dt.numel() and not torch.isfinite(valid_dt).all():
+    m3 = m.unsqueeze(-1)
+    # Boolean-mask indexing (dt[m]) forces a device sync to size the result; masking with
+    # `where` keeps the check on-device and costs one sync for the final bool.
+    if not torch.isfinite(torch.where(m3, dt, torch.zeros_like(dt))).all():
         raise ValueError(f"{key} contains non-finite values for valid entities")
-    if key == "delta_t_y":
-        for batch_idx in range(B):
-            valid = m[batch_idx]
-            if int(valid.sum().item()) <= 1:
-                continue
-            grids = dt[batch_idx, valid]
-            if not torch.allclose(grids, grids[:1], rtol=1e-5, atol=1e-6):
-                raise ValueError(
-                    "delta_t_y must use the same query grid for every valid entity in a batch; "
-                    "per-entity future query grids are not supported by the shared latent diffusion model"
-                )
+    if key == "delta_t_y" and bool(getattr(config, "DIFF_VALIDATE_DT_GRIDS", True)):
+        # Vectorised form of the old per-row `torch.allclose(grids, grids[:1])` loop, which
+        # cost ~2 device syncs per row (~30 per batch). Reference row = the first valid
+        # entity; rows with 0 or 1 valid entities pass trivially, as they did before.
+        # Encodes allclose's |a - b| <= atol + rtol*|b| with (rtol=1e-5, atol=1e-6).
+        first = m.to(torch.uint8).argmax(dim=1)                       # [B]
+        ref = dt[torch.arange(B, device=dt.device), first]            # [B,L]
+        tol = 1e-6 + 1e-5 * ref.abs().unsqueeze(1)                    # [B,1,L]
+        if bool((((dt - ref.unsqueeze(1)).abs() > tol) & m3).any()):
+            raise ValueError(
+                "delta_t_y must use the same query grid for every valid entity in a batch; "
+                "per-entity future query grids are not supported by the shared latent diffusion model"
+            )
     w = m.to(dtype=dt.dtype).unsqueeze(-1)
     dt = torch.where(m.unsqueeze(-1), dt, torch.zeros_like(dt))
     denom = w.sum(dim=1).clamp(min=1.0)
@@ -569,6 +585,7 @@ def _ensure_loaders(
             exact_timestamp_batches=bool(getattr(config, "exact_timestamp_batches", True)),
             target_col=target_col,
             target_cols=target_cols,
+            **dataloader_kwargs(config),
         )
     elif sizes is None:
         try:
@@ -1144,10 +1161,23 @@ def evaluate_irregular_time_checks(
 
 
 def _sampling_kwargs(config_obj: object, *, prefix: str = "EVAL") -> Dict[str, object]:
+    """Sampling protocol for one role: ``prefix="EVAL"`` is the in-training validation
+    protocol (selection only), ``prefix="TEST"`` is the reported one.
+
+    Every knob resolves ``{prefix}_{NAME}`` first and falls back to the global default, so
+    the two can be set independently. Note ``prefix="EVAL"`` is used at exactly two call
+    sites -- the trainer's val CRPS evals -- and everything that produces a reported number
+    uses ``prefix="TEST"``.
+    """
+
     def _read(name: str, *, default, aliases: Tuple[str, ...] = ()):
-        names = [f"{prefix}_{name}"]
-        names.extend(aliases)
-        return _cfg_value(config_obj, *names, default=default)
+        # A key that exists but is None counts as unset. The EVAL_* overrides are declared
+        # that way in config.py so that leaving them None keeps the reported protocol.
+        for candidate in (f"{prefix}_{name}", *aliases):
+            value = getattr(config_obj, candidate, None)
+            if value is not None:
+                return value
+        return default
 
     guidance_strength = _read(
         "GUIDANCE",
@@ -1157,6 +1187,7 @@ def _sampling_kwargs(config_obj: object, *, prefix: str = "EVAL") -> Dict[str, o
 
     return {
         "steps": int(_read("STEPS", default=64, aliases=("GEN_STEPS",))),
+        "num_samples": int(_read("NUM_SAMPLES", default=25, aliases=("NUM_EVAL_SAMPLES",))),
         "guidance_strength": guidance_strength,
         "guidance_power": float(_read("GUIDANCE_POWER", default=0.3, aliases=("GUIDANCE_POWER",))),
         "eta": float(_read("ETA", default=0.0, aliases=("GEN_ETA",))),
@@ -1214,6 +1245,7 @@ def evaluate_regression(
     self_cond: bool = False,
     disable_conditioning: bool = False,
     steps: int = 36,
+    num_samples: Optional[int] = None,
     guidance_strength: Union[float, Tuple[float, float]] = 2.0,
     guidance_power: float = 0.3,
     eta: float = 1.0,
@@ -1249,7 +1281,13 @@ def evaluate_regression(
     per_target_sq_sum = None
     per_target_elts = None
 
-    num_samples = int(getattr(config, "NUM_EVAL_SAMPLES", 16))
+    # None keeps the historical behaviour (the global NUM_EVAL_SAMPLES); _sampling_kwargs
+    # supplies a per-role value so validation and the reported protocol can differ.
+    if num_samples is None:
+        num_samples = int(getattr(config, "NUM_EVAL_SAMPLES", 16))
+    num_samples = int(num_samples)
+    if num_samples < 1:
+        raise ValueError(f"num_samples must be >= 1, got {num_samples}")
     generator = None
     if generator_seed is not None:
         generator = torch.Generator(device=device)
@@ -1967,6 +2005,7 @@ def run(
     device = set_torch(
         seed=int(getattr(config, "SEED", 42)),
         deterministic=bool(getattr(config, "DETERMINISTIC", False)),
+        allow_tf32=bool(getattr(config, "ALLOW_TF32", False)),
     )
     if verbose:
         print(f"Using device: {device}")
@@ -2352,10 +2391,18 @@ def run(
                 requires_grad=summary_ft_active,
                 summary_base_raw=(cached_batch.summary_raw if cached_batch is not None else None),
             )
-            if not _is_finite_tensor(cond_summary):
-                raise FloatingPointError("non-finite cond_summary detected")
-            if cond_summary_raw is not None and not _is_finite_tensor(cond_summary_raw):
-                raise FloatingPointError("non-finite raw conditioning summary detected")
+            # These guards exist for error ATTRIBUTION -- any non-finite input propagates to
+            # the loss, which is checked below and syncs anyway. Evaluating them eagerly costs
+            # a device sync each; instead record the flags as kernels and only read them (on
+            # the failure path) if the loss actually comes out non-finite.
+            finite_flags: List[Tuple[str, torch.Tensor]] = []
+
+            def _defer_finite(name: str, tensor: Optional[torch.Tensor]) -> None:
+                if tensor is not None:
+                    finite_flags.append((name, torch.isfinite(tensor).all()))
+
+            _defer_finite("cond_summary", cond_summary)
+            _defer_finite("raw conditioning summary", cond_summary_raw)
 
             dt_flat = _flatten_dt(
                 meta,
@@ -2363,8 +2410,7 @@ def run(
                 device,
                 key="delta_t_y",
             )
-            if not _is_finite_tensor(dt_flat):
-                raise FloatingPointError("non-finite delta_t_y detected")
+            _defer_finite("delta_t_y", dt_flat)
 
             mu_norm, obs_any = _latent_targets_for_batch(
                 vae,
@@ -2406,8 +2452,8 @@ def run(
             )
             noise = torch.randn_like(mu_norm)
             x_t, eps_true = scheduler.q_sample(mu_norm, t, noise)
-            if (not _is_finite_tensor(x_t)) or (not _is_finite_tensor(eps_true)):
-                raise FloatingPointError("non-finite noisy latent sample detected")
+            _defer_finite("noisy latent sample", x_t)
+            _defer_finite("noisy latent sample", eps_true)
 
             x_t_c = x_t[idx_c] if idx_c.numel() > 0 else None
             eps_true_c = eps_true[idx_c] if idx_c.numel() > 0 else None
@@ -2545,6 +2591,11 @@ def run(
 
             if not torch.isfinite(loss):
                 optimizer.zero_grad(set_to_none=True)
+                # Attribute the failure to the first non-finite input, if any (this is the
+                # only path that reads the deferred flags, so it is the only one that syncs).
+                for _name, _flag in finite_flags:
+                    if not bool(_flag):
+                        raise FloatingPointError(f"non-finite {_name} detected")
                 raise FloatingPointError("non-finite loss detected")
 
             scaler.scale(loss).backward()
@@ -2556,8 +2607,19 @@ def run(
                 else []
             )
             grad_params = [*diffusion_grad_params, *summary_grad_params]
-            diffusion_grads_finite = _grads_are_finite_params(diffusion_grad_params)
-            summary_grads_finite = _grads_are_finite_params(summary_grad_params)
+            # Resolve both finiteness flags with a single device sync instead of one per
+            # parameter tensor (168 of them, twice per step).
+            _diff_flag = _grads_finite_flag(diffusion_grad_params)
+            _summ_flag = _grads_finite_flag(summary_grad_params)
+            if _diff_flag is None and _summ_flag is None:
+                diffusion_grads_finite = summary_grads_finite = True
+            else:
+                _true = torch.ones((), dtype=torch.bool, device=device)
+                _both = torch.stack([
+                    _true if _diff_flag is None else _diff_flag,
+                    _true if _summ_flag is None else _summ_flag,
+                ]).tolist()
+                diffusion_grads_finite, summary_grads_finite = bool(_both[0]), bool(_both[1])
             if not (diffusion_grads_finite and summary_grads_finite):
                 skip_summary_ft = _should_skip_nonfinite_summary_ft_gradients(
                     diffusion_params=diffusion_grad_params,
@@ -2731,6 +2793,29 @@ def run(
         raise ValueError(f"Unsupported PRIMARY_EVAL_METRIC: {primary_eval_metric}")
     best_primary_metric = float("inf")
 
+    # The in-training val CRPS only has to rank epochs, so it may run on a subset. Built ONCE
+    # here, not per epoch, so every epoch is scored on exactly the same batches (a paired
+    # comparison). NOTE this deliberately does not touch evaluate_val_diagnostics, which
+    # consumes the sequential DiffusionSplitCache and would desynchronise under a stride.
+    val_eval_dl = limit_batches(
+        val_dl,
+        getattr(config, "EVAL_MAX_BATCHES", 0),
+        mode=str(getattr(config, "EVAL_SUBSET_MODE", "stride")),
+    )
+    # Without a seed the val sampler draws from the global RNG, which leaves the val CRPS
+    # unpaired across epochs and lets evaluation perturb the training stream.
+    eval_generator_seed = getattr(config, "EVAL_SEED", None)
+    eval_generator_seed = None if eval_generator_seed is None else int(eval_generator_seed)
+    if verbose:
+        try:
+            print(
+                f"[val protocol] batches={len(val_eval_dl)}/{len(val_dl)} "
+                f"seed={eval_generator_seed} "
+                f"{ {k: v for k, v in _sampling_kwargs(config, prefix='EVAL').items() if k in ('steps', 'num_samples')} }"
+            )
+        except TypeError:
+            pass
+
     for epoch in range(epochs):
         epoch_stats = train_one_epoch(epoch)
         train_loss = float(epoch_stats["loss"])
@@ -2835,13 +2920,14 @@ def run(
                 diff_model,
                 vae,
                 laplace_summarizer,
-                val_dl,
+                val_eval_dl,
                 device,
                 mu_mean,
                 mu_std,
                 config,
                 ema=_maybe_metric_ema(val_metric_source, ema),
                 self_cond=bool(getattr(config, "SELF_COND", False)),
+                generator_seed=eval_generator_seed,
                 verbose=debug,
                 progress_enabled=verbose,
                 progress_label=f"llapdiff val e{epoch + 1:03d}/{epochs:03d}",
@@ -2912,13 +2998,14 @@ def run(
                     diff_model,
                     vae,
                     laplace_summarizer,
-                    val_dl,
+                    val_eval_dl,
                     device,
                     mu_mean,
                     mu_std,
                     config,
                     ema=_maybe_metric_ema(compare_source, ema),
                     self_cond=bool(getattr(config, "SELF_COND", False)),
+                    generator_seed=eval_generator_seed,
                     verbose=debug,
                     progress_enabled=verbose,
                     progress_label=f"llapdiff val-compare e{epoch + 1:03d}/{epochs:03d}",

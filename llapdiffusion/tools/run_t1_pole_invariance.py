@@ -145,7 +145,11 @@ def main() -> None:
     regimes: Dict[float, Dict[str, np.ndarray]] = {}
     for coverage in coverages:
         cfg = build_eval_config(args.dataset_key, int(args.pred), coverage=coverage)
-        device = set_torch(seed=int(getattr(cfg, "SEED", 42)), deterministic=False)
+        device = set_torch(
+            seed=int(getattr(cfg, "SEED", 42)),
+            deterministic=False,
+            allow_tf32=bool(getattr(cfg, "ALLOW_TF32", False)),
+        )
         regimes[coverage] = _collect_regime(cfg, args.checkpoint, args, device=device)
         print(f"coverage={coverage}: {regimes[coverage]['rho'].shape[0]} windows, "
               f"{regimes[coverage]['gaps'].size} observed gaps")

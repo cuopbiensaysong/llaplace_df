@@ -10,7 +10,7 @@ Those three originals are kept verbatim in **`archive/`** (see `archive/README.m
 raw record; the phase-by-phase implementation history survives only there. This document is
 the one to read and maintain.
 
-**Last updated:** 2026-07-27 · **Branch:** `fixed_bugs` (commit `84b92e1`) · **Tests:** 378 passing
+**Last updated:** 2026-07-31 · **Branch:** `main` (after the `speed_up` merge) · **Tests:** 403 passing
 **Status of the code:** all fixes below are **landed and committed** except where marked OPEN.
 `update_method` is deliberately left at `347cd8a` (pre-fix) as the reference point.
 

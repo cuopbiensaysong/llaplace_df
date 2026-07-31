@@ -55,7 +55,11 @@ def main() -> None:
     cfg = build_eval_config(args.dataset_key, int(args.pred))
     if args.num_samples is not None:
         cfg.NUM_EVAL_SAMPLES = int(args.num_samples)
-    device = set_torch(seed=int(getattr(cfg, "SEED", 42)), deterministic=False)
+    device = set_torch(
+        seed=int(getattr(cfg, "SEED", 42)),
+        deterministic=False,
+        allow_tf32=bool(getattr(cfg, "ALLOW_TF32", False)),
+    )
 
     loaders, stack = prepare_eval_stack(cfg, args.checkpoint, device=device)
     _, val_dl, test_dl, _ = loaders

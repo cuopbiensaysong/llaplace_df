@@ -525,7 +525,44 @@ so an edit holds for every subsequent run** (record the value per run in your lo
 | `CHIRP_COEFF_L2` | 0.0 | Tier-2 L2 on the pole-variation coefficients (shrinks toward LTI); training-only, chirp-only, all three parameterizations; growth head excluded (c_g governs it) |
 | `DIFF_LOSS_MODE` | "mse" | "gaussian_nll" trains mean+variance jointly (needs `CHIRP_UQ_HEAD`) |
 | `TRAIN_T_SAMPLER` | "uniform" | "max_only" = the U3 one-shot (no-diffusion) regression arm |
-| `DETERMINISTIC` | False | set True for bit-exact reruns (slower) |
+| `DETERMINISTIC` | False | set True for bit-exact reruns (slower). Also forces `ALLOW_TF32` off |
+| `ALLOW_TF32` | True | TF32 tensor cores for fp32 matmuls (~1.3x on the denoiser; 10-bit mantissa on the multiply, fp32 accumulate). Was effectively False everywhere before 2026-07-28 |
+| `DATALOADER_NUM_WORKERS` | 8 | loader workers (+ `_PERSISTENT_WORKERS`, `_PREFETCH_FACTOR`). Was 0: nothing passed it, so loaders ran in the training process (16.4 -> 7.6 ms/batch on noaa_uk) |
+| `EVAL_STEPS` / `EVAL_NUM_SAMPLES` / `EVAL_MAX_BATCHES` / `EVAL_SEED` | **unset** / unset / 0 / 4242 | **in-training validation only** — see the cost box below. Left unset in `config.py` on purpose: they move checkpoint *selection*, and were validated on noaa_uk h=168 only. `finetune_noaa_uk.sh` exports `LLAPDIFF_EVAL_*` (16 / 5 / 48 / 4242, `VAL_DIAG_EVERY=5`) and `run_trial.py` applies them, so the campaign gets the 61× and every other dataset keeps the full protocol |
+| `DIFF_PRECOMPUTE_VERIFY_PLAN` | False | skip the 3-split rescan at trial startup on a cache hit (~25 s/trial) |
+
+> 🟢 **THE VALIDATION PROTOCOL IS NOT THE REPORTED PROTOCOL (2026-07-28).** A full
+> noaa_uk h=168 val CRPS eval is `146 batches x 25 samples x 64 DDIM steps x 2 forwards`
+> (CFG runs conditional **and** unconditional) = **110 min**, every 5 epochs — **>90% of a
+> trial**, which is why the campaign was a ~60-day job, not the 29 days this file used to
+> claim (that estimate charged one forward per step).
+>
+> But the trainer's val CRPS only picks the best epoch and drives early stopping.
+> `_sampling_kwargs` resolves `EVAL_*` for exactly those two call sites and `TEST_*` for
+> everything that produces a **reported** number (the final test read,
+> `llapdiff-checkpoint-eval`, `finetuning/eval_sampling.py`, `--phase final`). So the
+> `EVAL_*` values above cut it **61x** and change nothing you publish; `final_eval.py`
+> refuses to spend the test split if the TEST protocol ever disagrees with the requested
+> sampling. Details in `DEVELOPER_GUIDE.md` §7.6.
+>
+> ⚠️ Before trusting a cheap protocol on a NEW setting, check it still **ranks** the same:
+> score >=8 checkpoints under both protocols on val and require Spearman rho >= 0.9.
+> Otherwise it selects the wrong hyperparameters, faster.
+>
+> ⚠️ Do **not** raise `DOWNSTREAM_EVAL_EVERY` without lowering `EARLY_STOP`: early stopping
+> counts **evals**, so at every=10 the patience becomes 200 epochs and trials get LONGER.
+
+**Launch order for a noaa_uk campaign.** `LAPLACE_K=256` means 512 modal tokens and is
+essentially the whole forward cost (K=128 is 1.84x faster, K=64 is 3.1x), and the project's
+own analysis says ~8 modes carry 99% of output energy. Probe it FIRST, because a smaller K
+makes every later trial cheaper:
+
+```bash
+RUN_TAG=k_probe STAGES="laplace_k" EXTRA_ARGS="--include-tier3" bash finetune_noaa_uk.sh
+# 2 trials: baseline K=256 vs K=128. If they tie on val CRPS, set LAPLACE_K in the noaa_uk
+# preset's model_overrides (dataset_defaults.py -- it is preset-stamped) before the main run.
+bash finetune_noaa_uk.sh        # 23 trials, selection on val
+```
 
 **(3) Preset-stamped — edit the preset row in
 `llapdiffusion/configs/dataset_defaults.py` (or wrap `apply_dataset_preset`);

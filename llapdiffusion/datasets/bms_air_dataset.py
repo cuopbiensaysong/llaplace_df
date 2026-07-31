@@ -525,6 +525,8 @@ def run_experiment(
     shuffle_train: bool = True,
     num_workers: int = 0,
     pin_memory: Optional[bool] = None,
+    persistent_workers: bool = False,
+    prefetch_factor: Optional[int] = None,
     split_policy: str = "global_purged_horizon",
     exact_timestamp_batches: bool = True,
     target_col: Optional[str] = None,
@@ -600,6 +602,8 @@ def run_experiment(
         shuffle_train=shuffle_train,
         num_workers=num_workers,
         pin_memory=pin_memory,
+        persistent_workers=persistent_workers,
+        prefetch_factor=prefetch_factor,
         coverage=coverage,
     )
 

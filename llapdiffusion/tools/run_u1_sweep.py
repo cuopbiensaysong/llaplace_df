@@ -62,7 +62,11 @@ def _metric(payload: Dict[str, object], name: str) -> Optional[float]:
 def main() -> None:
     args = _parse_args()
     cfg = build_eval_config(args.dataset_key, int(args.pred))
-    device = set_torch(seed=int(getattr(cfg, "SEED", 42)), deterministic=False)
+    device = set_torch(
+        seed=int(getattr(cfg, "SEED", 42)),
+        deterministic=False,
+        allow_tf32=bool(getattr(cfg, "ALLOW_TF32", False)),
+    )
 
     loaders, stack = prepare_eval_stack(cfg, args.checkpoint, device=device)
     _, val_dl, test_dl, _ = loaders

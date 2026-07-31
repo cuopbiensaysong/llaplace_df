@@ -39,6 +39,7 @@ from typing import Dict, List, Optional
 
 import torch
 
+from llapdiffusion.configs.config_utils import dataloader_kwargs
 from llapdiffusion.models.llapdiff_utils import set_torch
 from llapdiffusion.models.uq_metrics import (
     gaussian_nll,
@@ -78,6 +79,7 @@ def prepare_eval_stack(cfg, ckpt_path, *, device: torch.device):
         exact_timestamp_batches=bool(getattr(cfg, "exact_timestamp_batches", True)),
         target_col=None if getattr(cfg, "TARGET_COLS", None) else getattr(cfg, "TARGET_COL", None),
         target_cols=getattr(cfg, "TARGET_COLS", None),
+        **dataloader_kwargs(cfg),
     )
     ce.sync_target_artifact_config(cfg, ce._target_policy(cfg), update_output_dirs=False)
     stack = ce._load_stack(cfg, ckpt_path, device, loaders[0])
@@ -228,7 +230,11 @@ def _predict_mean_var(
 def main() -> None:
     args = _parse_args()
     cfg = build_eval_config(args.dataset_key, int(args.pred))
-    device = set_torch(seed=int(getattr(cfg, "SEED", 42)), deterministic=False)
+    device = set_torch(
+        seed=int(getattr(cfg, "SEED", 42)),
+        deterministic=False,
+        allow_tf32=bool(getattr(cfg, "ALLOW_TF32", False)),
+    )
 
     loaders, stack = prepare_eval_stack(cfg, args.checkpoint, device=device)
     _, val_dl, test_dl, _ = loaders

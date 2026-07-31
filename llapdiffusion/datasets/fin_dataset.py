@@ -1925,6 +1925,8 @@ def load_dataloaders_with_ratio_split(
     shuffle_train: bool = True,
     num_workers: int = 0,
     pin_memory: Optional[bool] = None,
+    persistent_workers: bool = False,
+    prefetch_factor: Optional[int] = None,
     seed: int = 1337,
     n_entities: int = 8,
     pad_incomplete: str = 'zeros',
@@ -2085,6 +2087,19 @@ def load_dataloaders_with_ratio_split(
     gen = torch.Generator()
     gen.manual_seed(seed)
 
+    # Worker options are only legal when workers actually exist: PyTorch rejects
+    # persistent_workers=True and any prefetch_factor at num_workers=0.
+    loader_kwargs = {
+        "num_workers": int(num_workers),
+        "pin_memory": pin_memory,
+        "generator": gen,
+        "collate_fn": collate_fn,
+    }
+    if int(num_workers) > 0:
+        loader_kwargs["persistent_workers"] = bool(persistent_workers)
+        if prefetch_factor is not None:
+            loader_kwargs["prefetch_factor"] = int(prefetch_factor)
+
     # Optional date-aware batching (uses end_times filtered by split)
     if date_batching is None:
         date_batching = (coverage_per_window > 0.0)
@@ -2135,21 +2150,14 @@ def load_dataloaders_with_ratio_split(
                 query_grid_signatures[te_mask] if query_grid_signatures is not None else None
             ),
         )
-        train_dl = DataLoader(ds_tr, batch_sampler=_ListBatchSampler(batches_tr), pin_memory=pin_memory,
-                              num_workers=num_workers, persistent_workers=False, generator=gen,
-                              collate_fn=collate_fn)
-        val_dl   = DataLoader(ds_va, batch_sampler=_ListBatchSampler(batches_va), pin_memory=pin_memory,
-                              num_workers=num_workers, persistent_workers=False, generator=gen,
-                              collate_fn=collate_fn)
-        test_dl  = DataLoader(ds_te, batch_sampler=_ListBatchSampler(batches_te), pin_memory=pin_memory,
-                              num_workers=num_workers, persistent_workers=False, generator=gen,
-                              collate_fn=collate_fn)
+        train_dl = DataLoader(ds_tr, batch_sampler=_ListBatchSampler(batches_tr), **loader_kwargs)
+        val_dl   = DataLoader(ds_va, batch_sampler=_ListBatchSampler(batches_va), **loader_kwargs)
+        test_dl  = DataLoader(ds_te, batch_sampler=_ListBatchSampler(batches_te), **loader_kwargs)
     else:
         def _mk(ds, split):
             return DataLoader(
                 ds, batch_size=batch_size, shuffle=(split == 'train' and shuffle_train),
-                pin_memory=pin_memory, num_workers=num_workers, persistent_workers=False,
-                generator=gen, collate_fn=collate_fn,
+                **loader_kwargs,
             )
         train_dl = _mk(ds_tr, 'train')
         val_dl   = _mk(ds_va, 'val')
@@ -2201,6 +2209,9 @@ def run_experiment(
     exact_timestamp_batches: bool = True,
     target_col: Optional[str] = None,
     target_cols: Optional[Sequence[str]] = None,
+    num_workers: int = 0,
+    persistent_workers: bool = False,
+    prefetch_factor: Optional[int] = None,
 ):
     """
     Builds loaders for a given (K, H) using the already-downloaded cache.
@@ -2238,6 +2249,9 @@ def run_experiment(
         target_col=target_col,
         target_cols=target_cols,
         coverage=coverage,
+        num_workers=num_workers,
+        persistent_workers=persistent_workers,
+        prefetch_factor=prefetch_factor,
     )
 
     return train_dl, val_dl, test_dl, lengths

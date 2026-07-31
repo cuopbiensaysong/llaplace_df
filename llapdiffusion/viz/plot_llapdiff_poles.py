@@ -627,7 +627,11 @@ def main() -> None:
         checkpoint_kind=str(args.checkpoint_kind),
     )
 
-    device = set_torch(seed=int(getattr(cfg, "SEED", 42)), deterministic=bool(getattr(cfg, "DETERMINISTIC", False)))
+    device = set_torch(
+        seed=int(getattr(cfg, "SEED", 42)),
+        deterministic=bool(getattr(cfg, "DETERMINISTIC", False)),
+        allow_tf32=bool(getattr(cfg, "ALLOW_TF32", False)),
+    )
     model, model_kwargs = _load_model_from_checkpoint(
         cfg,
         checkpoint,
