@@ -799,12 +799,28 @@ path is required — the model refuses otherwise). Setting
 `TRAIN_T_SAMPLER = "max_only"` additionally turns the arm into a **one-shot
 conditional regression** (no informative diffusion input).
 
+⚠️ **`CHIRP_UQ_INIT_VAR` (default `1e-2`) must be set near the residual scale** whenever
+`DIFF_LOSS_MODE = "gaussian_nll"`. The NLL mean gradient is `(pred − target)/σ²`, so an
+initial variance far below the squared error blows the mean up before the variance can
+adapt — on physionet h=12 the default gives σ² = 0.0011 against err² = 2.675, a ~2415×
+gradient inflation that pushed the latent `val_diag_mse_raw` from 2.8 to 93+ **even from a
+correct `DIFF_INIT_CKPT` warm start**. Data-space CRPS barely moves, so it will not warn
+you; read `val_diag_mse_raw` from the trainer summary. Too large is the safe direction.
+The whole U2/U3 campaign is automated in `finetuning/run_u3_uq.py`, which sets this.
+
 Evaluate calibration with:
 
 ```bash
 llapdiff-uq-eval --dataset-key physionet --pred 12 \
-  --checkpoint <chirp-uq ckpt> --out-json ldt/results/uq_eval.json
+  --checkpoint <chirp-uq ckpt> --weights ema --out-json ldt/results/uq_eval.json
 ```
+
+`--weights {raw,ema}` selects which weights are scored. The default `raw` preserves the
+tool's historical behaviour, but it is almost never what you want: this tool loads through
+`_load_stack`, which reads `payload["model"]` — and that holds **raw** weights even inside
+`llapdiff_*_best_ema.pt` (bug B16; the `_best_ema` file differs only in which validation
+metric selected the epoch). Pass `--weights ema` to match the training/finetuning protocol.
+The choice is recorded in the report JSON.
 
 which reports latent PIT calibration error, a reliability (coverage) curve,
 Gaussian NLL, and mean RMSE, using either a single one-shot forward

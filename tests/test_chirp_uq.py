@@ -76,6 +76,43 @@ def test_uq_params_init_uniform():
         bare.uq_params(cond)
 
 
+def test_uq_init_var_knob_scales_the_initial_variance():
+    """CHIRP_UQ_INIT_VAR sets the initial per-mode variance.
+
+    At the legacy 1e-2 the initial variance sits ~2400x below the squared error on
+    physionet h=12, so the NLL mean gradient (pred-target)/sigma^2 destroys a
+    correctly warm-started mean. The knob must move the init and default to 1e-2.
+    """
+    torch.manual_seed(0)
+    cond = torch.randn(3, 16)
+    for target in (1e-2, 1.0, 25.0):
+        field = ChirpModalField(k=4, cond_dim=16, num_basis=6, uq_head=True,
+                                uq_init_var=target)
+        p0, q = field.uq_params(cond)
+        torch.testing.assert_close(p0, torch.full_like(p0, target))
+        torch.testing.assert_close(q, torch.full_like(q, target))
+
+    # Default is unchanged, so existing checkpoints/numerics are untouched.
+    torch.testing.assert_close(
+        ChirpModalField(k=4, cond_dim=16, num_basis=6, uq_head=True).uq_params(cond)[0],
+        torch.full((3, 4), 1e-2),
+    )
+    with pytest.raises(ValueError, match="uq_init_var"):
+        ChirpModalField(k=4, cond_dim=16, num_basis=6, uq_head=True, uq_init_var=0.0)
+
+    # The knob reaches the model output: a larger init gives a larger predicted variance.
+    def predicted_var(v):
+        torch.manual_seed(0)
+        model = _uq_model(chirp_uq_init_var=v).eval()
+        x = torch.randn(2, 6, 8)
+        ts = torch.randint(0, 50, (2,))
+        dt = torch.sort(torch.rand(2, 6), dim=1).values
+        with torch.no_grad():
+            return model(x, ts, dt=dt, return_variance=True)[1].mean().item()
+
+    assert predicted_var(1.0) > 50 * predicted_var(1e-2)
+
+
 def test_forward_return_variance_shapes_and_scaling():
     torch.manual_seed(0)
     B, T, D = 2, 6, 8
@@ -261,6 +298,76 @@ def test_analytic_law_sampler_draws_caching_and_delegation(monkeypatch):
     d1 = sampler.generate((B, T, D), cond_summary=cond2, cond_summary_raw=cond2, dt=dt, generator=g1)
     d2 = sampler.generate((B, T, D), cond_summary=cond2, cond_summary_raw=cond2, dt=dt, generator=g2)
     torch.testing.assert_close(d1, d2)
+
+
+def test_analytic_law_sampler_cache_survives_freed_batches():
+    """Regression: the law cache is keyed on id(), so the keyed tensors must be pinned.
+
+    Without `_key_refs`, a freed batch's cond/dt ids can be recycled by the next
+    batch's tensors, producing a false cache hit that silently scores a stale
+    Gaussian law. Here the previous batch's tensors are dropped and gc forced
+    between batches; the law must still be recomputed.
+    """
+    import gc
+    from types import SimpleNamespace
+
+    from llapdiffusion.tools import run_analytic_uq_eval as uq
+
+    torch.manual_seed(0)
+    model = _uq_model().eval()
+    sampler = uq.AnalyticLawSampler(
+        model, SimpleNamespace(), mean_source="oneshot", device=torch.device("cpu")
+    )
+
+    B, T, D = 2, 5, 8
+    means = []
+    for _ in range(6):
+        cond = torch.randn(B, 4, 32)
+        dt = torch.sort(torch.rand(B, T), dim=1).values
+        sampler.generate((B, T, D), cond_summary=cond, cond_summary_raw=cond, dt=dt)
+        means.append(sampler._mean.clone())
+        del cond, dt  # drop the only other references, then invite id reuse
+        gc.collect()
+
+    # The pinned refs keep each cached key alive, so every batch got its own law.
+    assert len(sampler._key_refs) == 3
+    for i in range(1, len(means)):
+        assert not torch.equal(means[i], means[i - 1]), (
+            f"batch {i} reused batch {i-1}'s cached law -- stale-cache regression"
+        )
+
+
+def test_uq_eval_weights_flag_applies_ema_shadow():
+    """`--weights ema` must actually transplant payload['ema'] onto the parameters.
+
+    Guards bug B16: `_load_stack` loads payload['model'] (RAW weights) even from
+    `*_best_ema.pt`, so without this the tool reports a raw-weight number labelled
+    EMA. Also checks the alias-proof path: LapFormer aliases `analysis.*` as
+    `synthesis.encoder.*`, so a key-wise state_dict merge would leave the alias raw.
+    """
+    from llapdiffusion.tools.llapdiff_checkpoint_eval import _apply_ema_weights
+
+    torch.manual_seed(0)
+    model = _uq_model()
+    # A checkpoint-shaped payload whose EMA shadow differs from the live weights.
+    shadow = {n: p.detach().clone() + 1.0 for n, p in model.named_parameters()}
+    payload = {"model": model.state_dict(), "ema": shadow}
+
+    # The alias is real: state_dict lists both names, named_parameters de-duplicates.
+    assert len(model.state_dict()) > len(list(model.named_parameters()))
+
+    replaced = _apply_ema_weights(model, payload)
+    assert replaced == len(shadow)
+    for name, param in model.named_parameters():
+        torch.testing.assert_close(param.data, shadow[name])
+
+    # The aliased tensor must carry the EMA values under BOTH names.
+    sd = model.state_dict()
+    torch.testing.assert_close(sd["model.analysis._rho_raw"], sd["model.synthesis.encoder._rho_raw"])
+
+    # A checkpoint without a shadow fails loudly rather than silently scoring raw.
+    with pytest.raises(ValueError, match="no EMA state"):
+        _apply_ema_weights(model, {"model": model.state_dict()})
 
 
 def test_pit_metrics_calibrated_vs_overconfident():

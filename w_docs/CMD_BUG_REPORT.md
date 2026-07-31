@@ -427,6 +427,70 @@ by the sign of the basis. *(B10 is this same fix for ω, applied two days later.
 
 ## 3. Open issues
 
+### B19 — PhysioNet h=12 gives the diffusion stage **13 training windows** 🔴 **OPEN — invalidates every PhysioNet statistical claim**
+
+*Found 2026-07-30 while diagnosing why the U3 latent correlation was ~0 in every arm.*
+
+Measured directly on the loaders the trainer builds (`prepare_eval_stack`, physionet,
+h=12, `WINDOW=24`, `PRED=12`, `split_policy="contiguous"`, ratios 0.7/0.1/0.2):
+
+| split | batches | **windows** | entities per window |
+|---|---|---|---|
+| train | 3 | **13** | 445 |
+| val | 1 | **5** | 445 |
+| test | 1 | **5** | 445 |
+
+Compare the headline dataset, noaa_uk h=168: **16 286 / 2 183 / 4 702** windows. PhysioNet
+h=12 has a **~1250× smaller** training set.
+
+**The 445 entities do not help.** The set-VAE is permutation-invariant over entities and
+pools them into one latent per window, so the denoiser's input/output space is
+`mu_norm` of shape `[13, 12, 16]` — **2 496 training scalars against 11.5 M parameters
+(≈4 600× over-parameterized)**. The loader yields the *identical* 13 windows every epoch
+(verified: batch checksums are bit-identical across two passes), so there is no
+re-sampling to compensate.
+
+**Root cause, not a code defect.** PhysioNet is split over *patient-relative* time
+(`split_scope="physionet_patient_relative_time"`); records span ~48 h, and `WINDOW + PRED
+= 36` leaves only ~23 valid start offsets in total. This is a property of the dataset
+geometry at this horizon, but it is documented nowhere and the runbook uses PhysioNet
+h=12 for load-bearing decisions.
+
+**Observed consequences (seed 0, x0, arm d):**
+- train loss **8.23 → 0.075** (memorized) while the val latent x0 MSE never beats the
+  trivial baseline: **2.76 vs 2.16 predict-zero**; like-for-like latent x0 MSE is
+  **4.3–5.7** across all U2/U3 arms with correlation ≈ **−0.05**.
+- Data-space CRPS nevertheless looks healthy (~0.25 val) because the set-VAE decoder
+  reconstructs each of the 445 entities largely from its own embedding — CRPS is
+  dominated by a per-entity prior, not by the forecast. Disabling conditioning entirely
+  costs only 0.2606 → 0.2990.
+
+**What this invalidates.** Every PhysioNet h=12 number is a **5-window** estimate:
+- the G2/G3 2×2 factorial (§1 of the runbook) — cells (a)–(d) at 0.3706–0.3719, i.e.
+  deltas of 0.0001–0.001, and the "(c) ≈ (d) kill-shot" read;
+- the §8 branch decision, which was taken on cell (a) = 0.3710;
+- the 22-trial `fixed_bugs` tuning campaign, whose incumbent was chosen on a 0.0014 gap,
+  and the `seed8` campaign;
+- the "chirp arms show ~6× lower seed variance" unplanned finding;
+- the U2/U3 gates and any U3 table computed on PhysioNet.
+
+**Recommendation.** Treat PhysioNet h=12 as a **plumbing smoke test only** — it is
+genuinely useful for that (a full 3-stage U3 seed costs ~20 min). Move every statistical
+claim, the G3 factorial, and the §8 branch decision to noaa_uk h=168, which the plan
+already designates as the headline. If PhysioNet must carry a claim, the window count has
+to be raised first (shorter `WINDOW`/`PRED`, or a split that treats patients rather than
+relative-time offsets as the sampling unit — the latter is a design change to the
+set-VAE's entity pooling, not a config tweak).
+
+*Relationship to the "denoiser barely uses its conditioning" issue below: on PhysioNet
+those observations are fully explained by 13-window memorization. A conditioning-shuffle
+probe shows the denoiser **does** respond to its conditioning (39 % output change under a
+shuffled summary, 67 % with none), so it is not ignoring the input — it simply cannot
+generalize from 13 examples. The conditioning issue should be re-measured on noaa_uk
+before being treated as a modelling defect.*
+
+---
+
 ### B16 — EMA checkpoints are identical to raw; EMA is never applied at eval 🔴 **OPEN**
 
 `llapdiff_pred-*_best.pt` and `_best_ema.pt` contain **identical model weights** — verified:

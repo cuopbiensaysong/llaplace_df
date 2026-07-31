@@ -463,6 +463,7 @@ class ChirpModalField(nn.Module):
         omega_max: float = math.pi,
         time_scale: Optional[float] = None,
         uq_head: bool = False,
+        uq_init_var: float = 1e-2,
         growth_budget: float = 0.0,
         parameterization: str = "p_exact",
         rho_init_horizon: Optional[float] = None,
@@ -625,7 +626,19 @@ class ChirpModalField(nn.Module):
 
         self.uq_head = bool(uq_head)
         if self.uq_head:
-            init_raw = math.log(math.expm1(1e-2))  # softplus(base) = 0.01
+            # Initial per-mode variance scale. The Gaussian-NLL mean gradient is
+            # (pred - target)/sigma^2, so if the initial variance sits far below the
+            # squared error the mean is destroyed before the variance can adapt --
+            # measured at 2415x inflation on physionet h=12 with the legacy 1e-2
+            # (predicted sigma^2 = 0.0011 vs err^2 = 2.675), which wrecked the latent
+            # mean (val_diag_mse_raw 2.8 -> 93+) even from a correct warm start.
+            # Warm-starting the MEAN is necessary but NOT sufficient; the variance init
+            # must also be on the scale of the residual. Too large is the safe
+            # direction: it damps the mean gradient and the head shrinks it back down.
+            # Default 1e-2 preserves the historical numerics exactly.
+            if float(uq_init_var) <= 0:
+                raise ValueError(f"uq_init_var must be > 0, got {uq_init_var}")
+            init_raw = math.log(math.expm1(float(uq_init_var)))
             self._p0_base = nn.Parameter(torch.full((self.k,), init_raw))
             self._q_base = nn.Parameter(torch.full((self.k,), init_raw))
             self.to_uq = nn.Sequential(

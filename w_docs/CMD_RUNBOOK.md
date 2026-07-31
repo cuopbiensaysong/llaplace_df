@@ -561,8 +561,8 @@ Tier-2 (`CHIRP_*`, K, time constant) applies to CMD only. Selection on val only.
 | Item | Status | How to run / what's missing |
 |---|---|---|
 | U1 guidance/DDIM calibration sweep | **runnable** | `llapdiff-u1-sweep --dataset-key <ds> --pred <H> --checkpoint <ckpt> --guidance 1.0 1.25 1.5 2.0 --steps 16 32 64` — evaluates on **val** (pre-registration rule) and logs the dynamic-threshold clip fraction per cell. The plan's specific clip check: add `--dynamic-thresh-p 0.995` and read `clip_fraction_mean` (recorded per row together with the effective p). First data point (G3 cell-(d) ckpt, physionet h=12, val): clip fraction **0.23%** at p=0.995 — ẑ₀ barely brushes the threshold after the head removal |
-| U2 Theorem-C analytic UQ (q_k, p_k⁰, Gaussian NLL, PIT) | **runnable** | train with `CHIRP_UQ_HEAD=True`, `DIFF_LOSS_MODE="gaussian_nll"` (config.py; both base-config, survive presets) + `--modal-type chirp --predict-type x0`; then `llapdiff-uq-eval --dataset-key <ds> --pred <H> --checkpoint <ckpt>` reports **latent** PIT calibration error/reliability/NLL/RMSE **and, by default, the data-space comparison**: the analytic law propagated through the decoder (latent Gaussian draws → decode, scored by the *unchanged* `evaluate_regression` — same masking/CRPS estimator/ensemble size) vs the sampled-diffusion baseline, with wall-clock for both (`analytic_speedup_x`; ~8× at 5 samples on the smoke, grows with DDIM steps). Flags: `--num-samples` (ensemble for BOTH arms; default 25), `--skip-sampled`, `--latent-only`. ⚠️ **Read the NLL warm-start warning below before launching.** |
-| U3 one-shot NLL (no diffusion) arm | **runnable** | same as U2 plus `TRAIN_T_SAMPLER="max_only"` in config.py (trains at the pure-noise step ⇒ conditional regression); the pre-registered three-way comparison is now one tool on the same split/ensemble/seed: sampled-diffusion (`data_space_sampled`), diffusion + analytic UQ (`--mean-source ddim` → `data_space_analytic`), one-shot NLL (`--mean-source oneshot` → `data_space_analytic`) |
+| U2 Theorem-C analytic UQ (q_k, p_k⁰, Gaussian NLL, PIT) | **runnable** | train with `CHIRP_UQ_HEAD=True`, `DIFF_LOSS_MODE="gaussian_nll"` (config.py; both base-config, survive presets) + `--modal-type chirp --predict-type x0`; then `llapdiff-uq-eval --dataset-key <ds> --pred <H> --checkpoint <ckpt>` reports **latent** PIT calibration error/reliability/NLL/RMSE **and, by default, the data-space comparison**: the analytic law propagated through the decoder (latent Gaussian draws → decode, scored by the *unchanged* `evaluate_regression` — same masking/CRPS estimator/ensemble size) vs the sampled-diffusion baseline, with wall-clock for both (`analytic_speedup_x`; ~8× at 5 samples on the smoke, grows with DDIM steps). Flags: `--num-samples` (ensemble for BOTH arms; default 25), `--skip-sampled`, `--latent-only`, **`--weights {raw,ema}`**. ⚠️ **Pass `--weights ema`**: the tool goes through `_load_stack`, which reads `payload["model"]` — RAW weights even in `*_best_ema.pt` (bug B16) — so the default `raw` reports a raw-weight number while every other phase of this project uses EMA. Measured on an existing checkpoint: summed per-tensor `max\|raw − ema\|` = 0.696, i.e. the flag is not cosmetic. ⚠️ **Read the NLL warm-start warning below before launching.** |
+| U3 one-shot NLL (no diffusion) arm | **runnable — use the driver** | The three arms are **two checkpoints**, not one: A1 (`data_space_sampled`) and A2 (`--mean-source ddim`) come from the diffusion-trained UQ model; A3 (`--mean-source oneshot`) needs its **own** training run with `TRAIN_T_SAMPLER="max_only"`. ⚠️ On that A3 checkpoint the sampled baseline is **invalid** (reverse DDIM walks timesteps the model never trained on) — pass `--skip-sampled`. Rather than hand-editing config.py per arm, use **`python finetuning/run_u3_uq.py {plan,train,gates,eval,report}`**, which drives all three stages through `run_trial.py` config overrides (no config.py edit), threads each seed's `DIFF_INIT_CKPT` warm start, enforces `--skip-sampled`/`--weights ema`, and aggregates to `finetuning/results/uq_u3/RESULTS.md`. Pre-registration: `w_docs/PREREG_U3.md` |
 | T1 pole-invariance across gap regimes | **runnable** | `llapdiff-t1-poles --dataset-key <ds> --pred <H> --checkpoint <chirp ckpt> --coverages 0.0 0.2 0.4 0.6 0.8` — per-regime trajectory distance vs baseline + observed gap moments + Eq.-(8) implied multipliers, CSV/JSON + overlay figure. Read: distances ~flat, multipliers shift |
 | T2 growth budget c_g ∈ {0, log2, log5} | **runnable** | set `CHIRP_GROWTH_BUDGET` in config.py per arm (base-config; e.g. `math.log(2)`), train chirp as usual; c_g=0 is exactly Theorem B (no γ-head built). Bound becomes `e^{c_g}·e^{-ρ_min t̃}·Σ√(…)`. The synthetic `synthetic_growth_decay` task (budget log 2) is the matched benchmark case |
 | T3 imputation vs CSDI | **runnable** | `--imputation-random-mask-ratio 0.30` at eval; CSDI side via `llapdiff-baselines csdi-imputation` |
@@ -595,6 +595,39 @@ Tier-2 (`CHIRP_*`, K, time constant) applies to CMD only. Selection on val only.
 > Confirm in the log: `[init] DIFF_INIT_CKPT lacks the UQ head; kept fresh init
 > for: […]` (run with `--verbose`). Then check `llapdiff-uq-eval`: predicted std
 > should be O(target std), coverage near nominal — not the ≈0 signature above.
+>
+> ### 🔴 The warm start is NOT sufficient on its own — also set `CHIRP_UQ_INIT_VAR` (2026-07-30)
+>
+> The recipe above fixes the **mean** init and leaves the **variance** init at the
+> library default `CHIRP_UQ_INIT_VAR = 1e-2`. On physionet h=12 that puts the initial
+> predicted variance at **0.0011** against a squared error of **2.675** — a **≈2415×**
+> mismatch. The variance head cannot climb from 0.01 to the residual scale during
+> training, so the arm ends up catastrophically **overconfident** (seed 0, val, EMA):
+>
+> | `CHIRP_UQ_INIT_VAR` | PIT cal. error | coverage @ 0.9 | mean predicted std | data CRPS |
+> |---|---|---|---|---|
+> | 1e-2 (library default) | 0.2210 | **0.034** | 0.096 | 0.2552 |
+> | **25.0** (calibrated) | **0.0389** | **0.872** | 4.09 | 0.2543 |
+>
+> (target std 1.46.) ⚠️ **CRPS does not reveal this** — it moved by <0.001 while coverage
+> went from 3% to 87%. Never accept an NLL arm on CRPS alone; read the PIT/coverage numbers
+> from `llapdiff-uq-eval`. Set `CHIRP_UQ_INIT_VAR` near the residual scale (25.0 for
+> physionet h=12; re-measure per dataset/horizon). Default stays 1e-2, so nothing
+> pre-existing moves. The warm start itself was verified fine — a control without
+> `DIFF_INIT_CKPT` sits **51×** further from S1.
+>
+> **Two measurement traps found while establishing the above — read before diagnosing:**
+>
+> 1. **`val_diag_mse_raw` is not always an MSE.** `evaluate_val_diagnostics` reports
+>    `stats["raw_loss"]`, which is the MSE under `DIFF_LOSS_MODE="mse"` but the **NLL**
+>    under `"gaussian_nll"`. Comparing the two across modes is meaningless (it briefly
+>    suggested a 340× mean degradation that does not exist). Compare within a mode only.
+> 2. **The latent mean is uninformative in *every* arm, including plain MSE.** Like-for-like
+>    (t = T/2, identical noise, EMA): latent x0 MSE **5.72** (S1 chirp-MSE), **5.48**
+>    (NLL @1e-2), **4.28** (NLL @25), **5.25** (one-shot @25) against a predict-zero
+>    baseline of **2.16**, with correlation ≈ **−0.05** throughout. So the NLL does not
+>    damage the mean — the mean was never informative. This is the open
+>    "denoiser barely uses its conditioning" issue (§3), and it sits upstream of U2/U3.
 
 Every experiment in the plan (Phases 0–4) is now runnable from this branch —
 no [needs implementation] items remain. Bring the G2/G3 CRPS table back to

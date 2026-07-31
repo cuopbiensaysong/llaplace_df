@@ -20,7 +20,13 @@ Two mean sources:
 - ``ddim``: the deterministic DDIM x0 as the mean, with the variance read from a
   forward at t=1 around that mean.
 
-Run:  llapdiff-uq-eval --dataset-key physionet --pred 12 --checkpoint <chirp-uq ckpt>
+⚠️ On a checkpoint trained with ``TRAIN_T_SAMPLER="max_only"`` (the U3 one-shot
+arm), the sampled-diffusion baseline is meaningless — reverse DDIM would walk
+timesteps the model never trained on. Pass ``--skip-sampled`` for that arm and
+take ``data_space_sampled`` from the diffusion-trained checkpoint instead.
+
+Run:  llapdiff-uq-eval --dataset-key physionet --pred 12 --checkpoint <chirp-uq ckpt> \
+        --weights ema
 """
 
 from __future__ import annotations
@@ -85,13 +91,26 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint", type=str, required=True)
     parser.add_argument("--split", choices=("val", "test"), default="test")
     parser.add_argument("--mean-source", choices=("oneshot", "ddim"), default="oneshot")
+    parser.add_argument(
+        "--weights", choices=("raw", "ema"), default="raw",
+        help=(
+            "Which weights to score. 'raw' (default) keeps the historical behaviour: "
+            "_load_stack reads payload['model'], which holds RAW weights even in "
+            "llapdiff_*_best_ema.pt (that file differs only in which val metric selected "
+            "the epoch — bug B16). 'ema' transplants payload['ema'] onto the live "
+            "parameters, matching the training/finetuning protocol (EMA decay 0.999) and "
+            "the plan's parity checklist. Recorded in the report JSON."
+        ),
+    )
     parser.add_argument("--max-batches", type=int, default=None,
                         help="Cap for the latent-space pass only; data space runs the full split.")
     parser.add_argument("--num-bins", type=int, default=20)
     parser.add_argument("--latent-only", action="store_true",
                         help="Skip the data-space (decoder-propagated) evaluation.")
     parser.add_argument("--skip-sampled", action="store_true",
-                        help="Data space: skip the (expensive) sampled-diffusion baseline.")
+                        help="Data space: skip the (expensive) sampled-diffusion baseline. "
+                             "REQUIRED for a TRAIN_T_SAMPLER='max_only' checkpoint, where "
+                             "reverse DDIM walks timesteps the model never trained on.")
     parser.add_argument("--num-samples", type=int, default=None,
                         help="Ensemble size for BOTH data-space arms (default config NUM_EVAL_SAMPLES=25).")
     parser.add_argument("--out-json", type=str, default=None)
@@ -117,6 +136,7 @@ class AnalyticLawSampler:
         self._mean_source = str(mean_source)
         self._device = device
         self._cache_key = None
+        self._key_refs: tuple = ()
         self._mean: Optional[torch.Tensor] = None
         self._std: Optional[torch.Tensor] = None
 
@@ -134,6 +154,9 @@ class AnalyticLawSampler:
         generator: Optional[torch.Generator] = None,
         **_ignored,
     ) -> torch.Tensor:
+        # The key is identity-based, so the keyed tensors must be kept alive: once a
+        # batch's cond/dt are freed, CPython can hand their id()s to the next batch's
+        # tensors and a stale law would be scored with no error. self._key_refs pins them.
         key = (id(cond_summary), id(cond_summary_raw), id(dt), tuple(shape))
         if key != self._cache_key:
             mean, var = _predict_mean_var(
@@ -147,6 +170,7 @@ class AnalyticLawSampler:
                 device=self._device,
             )
             self._cache_key = key
+            self._key_refs = (cond_summary, cond_summary_raw, dt)
             self._mean = mean
             self._std = var.clamp_min(1e-6).sqrt()
         if generator is not None:
@@ -216,6 +240,14 @@ def main() -> None:
             "Gaussian law is unavailable."
         )
 
+    # _load_stack (shared with u1/t1/t4/eval_sampling) deliberately loads payload["model"],
+    # i.e. RAW weights. Apply the EMA shadow here, in this tool only, reusing the
+    # alias-proof named_parameters() transplant -- LapFormer aliases analysis.* as
+    # synthesis.encoder.*, so a key-wise state_dict merge would leave the alias raw.
+    if args.weights == "ema":
+        replaced = ce._apply_ema_weights(diff_model, torch.load(args.checkpoint, map_location="cpu"))
+        print(f"[uq-eval] applied the EMA shadow to {replaced} parameters")
+
     ys: List[torch.Tensor] = []
     means: List[torch.Tensor] = []
     variances: List[torch.Tensor] = []
@@ -271,8 +303,18 @@ def main() -> None:
         "checkpoint": str(args.checkpoint),
         "split": args.split,
         "mean_source": args.mean_source,
+        "weights": args.weights,
         "num_elements": int(y.numel()),
+        # Trivial-predictor baselines, so latent_rmse is interpretable without assuming
+        # the latents are unit-scale (they are not: std ~1.46 on physionet h=12).
+        "latent_target_std": float(y.std().item()),
+        "baseline_rmse_predict_zero": float(y.pow(2).mean().sqrt().item()),
+        "baseline_rmse_predict_mean": float((y - y.mean()).pow(2).mean().sqrt().item()),
         "latent_rmse": float((mean - y).pow(2).mean().sqrt().item()),
+        "latent_corr": (
+            float(torch.corrcoef(torch.stack([mean.reshape(-1), y.reshape(-1)]))[0, 1].item())
+            if y.numel() > 1 else None
+        ),
         "latent_gaussian_nll": gaussian_nll(y, mean, var),
         "pit_calibration_error": pit_calibration_error(u, num_bins=int(args.num_bins)),
         "reliability": reliability_curve(u),

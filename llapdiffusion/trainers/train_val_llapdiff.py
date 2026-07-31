@@ -1506,6 +1506,7 @@ def _llapdiff_model_kwargs(config_obj: object) -> Dict[str, object]:
         "chirp_time_scale": _resolve_chirp_time_scale(config_obj),
         "output_head": str(getattr(config_obj, "DENOISER_OUTPUT_HEAD", "auto")),
         "chirp_uq_head": bool(getattr(config_obj, "CHIRP_UQ_HEAD", False)),
+        "chirp_uq_init_var": float(getattr(config_obj, "CHIRP_UQ_INIT_VAR", 1e-2)),
         "chirp_growth_budget": float(getattr(config_obj, "CHIRP_GROWTH_BUDGET", 0.0)),
         "chirp_parameterization": str(getattr(config_obj, "CHIRP_PARAMETERIZATION", "p_exact")),
         # Anchor the pole rho init to the forecast horizon for BOTH cores: a
@@ -1591,6 +1592,7 @@ def _llapdiff_config_from_checkpoint(payload: object) -> Dict[str, object]:
     # Checkpoints predating the decoupled head flag used the modal-type-dependent head.
     config.setdefault("output_head", "auto")
     config.setdefault("chirp_uq_head", False)
+    config.setdefault("chirp_uq_init_var", 1e-2)  # pre-knob ckpts used the 1e-2 init
     config.setdefault("chirp_growth_budget", 0.0)
     config.setdefault("chirp_parameterization", "p_exact")
     config.setdefault("pole_init_horizon", None)  # pre-fix ckpts keep legacy rho init

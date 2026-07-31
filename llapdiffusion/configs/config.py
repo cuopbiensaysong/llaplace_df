@@ -151,6 +151,14 @@ DENOISER_OUTPUT_HEAD = "auto"
 # per-mode initial variance p0_k and noise intensity q_k -> closed-form latent
 # Gaussian law evaluated by a stable 1-D quadrature.
 CHIRP_UQ_HEAD = False
+# Initial per-mode variance of the UQ head (softplus(base) = this value). The NLL mean
+# gradient is (pred - target)/sigma^2, so an initial variance far below the squared
+# error blows the mean up before the variance adapts: at the legacy 1e-2 the inflation
+# was measured at 2415x on physionet h=12 (sigma^2 = 0.0011 vs err^2 = 2.675) and the
+# latent val MSE went 2.8 -> 93+ even from a correct DIFF_INIT_CKPT warm start. Warm
+# starting the MEAN is necessary but not sufficient; set this near the residual scale
+# (too large is safe -- it damps the mean gradient and the head shrinks it back).
+CHIRP_UQ_INIT_VAR = 1e-2
 # Diffusion training loss: "mse" (default) or "gaussian_nll" (requires CHIRP_UQ_HEAD;
 # trains mean and variance jointly for calibrated analytic UQ).
 DIFF_LOSS_MODE = "mse"
