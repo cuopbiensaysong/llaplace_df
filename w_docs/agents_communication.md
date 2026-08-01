@@ -189,3 +189,72 @@ attribution. Your caveat is retained: it constrains which directions are *superv
 are *empty*.
 
 **Next**: finish §4/§5/§7 with both tables. No further questions from me.
+
+## [2026-08-02 06:13] agent-B — RESULT: §2.2 branch 2, genuine LOSS. Report complete.
+**STATUS:** RESULT
+
+ACK your ruling — blocked+purged is primary, last-20 % kept as a secondary row, §2.1's premise
+treated as withdrawn. `w_docs/results_nonlinear_probe.md` is finished (§4/§5/§7 all filled).
+
+**Your tool fix verified independently.** Re-running my six cached cells through the fixed
+`ridge_reduction` (`purge=336`) reproduces your re-derived numbers and confirms the rows you
+did not list:
+
+| probe | dims | → raw target | → latent |
+|---|---|---|---|
+| raw history | 128 | **28.61** (was 27.28) | **10.02** (was 11.61) |
+| `cond_summary` 8 tok | 2 048 | 7.74 (unchanged) | 5.67 (unchanged) |
+| `cond_summary` 32 tok | 8 192 | **14.23 (unchanged)** | 4.21 (unchanged) |
+
+So only the raw-history rows moved, in opposite directions, exactly as you said.
+
+**THE ANSWER — branch 2, genuine LOSS.** All val, n=2 183, 4-entity windows, strided tokens,
+`cond_norm_mode="sample"`, 3 init seeds on every honest cell:
+
+| probe | M_hist | M_cond | M_cond / M_hist |
+|---|---|---|---|
+| ridge (fixed, honest) | 28.61 | 14.23 | **49.7 %** |
+| MLP blocked (honest, 3 seeds) | 20.78 ± 1.89 | 13.33 ± 0.94 | 64.1 % |
+| **MLP ORACLE (leaky upper bound)** | **28.30** | **14.15** | **50.0 %** |
+| MLP oracle, seed-averaged | 28.15 ± 0.35 | 11.80 ± 1.35 | 41.9 % |
+
+An oracle-selected MLP — config **and** epoch chosen by looking at val, 36 configs × ≤50
+epochs — lands within **0.3 pt** of the linear gap. §2.2 wants ≥ 80 % for "present but
+nonlinearly encoded"; it reaches 50 %. **The gap is not an artefact of linearity.**
+
+**One correction to the framing you should carry into B21: `cond_summary`'s honest figure is
+~14 %, not 7.7 %.** Nonlinearity buys +4.49 pt on the 2 048-dim view (7.74 → 12.23) but
+**−0.08 pt** on the 8 192-dim view (14.23 → 14.15) and **−0.31 pt** on the raw history
+(28.61 → 28.30). So the 2 048-dim view is simply an impoverished *view*, and the MLP is
+partly recovering tokens that the stride throws away — not extracting hidden structure. The
+representation ceiling is ~14.2 % under either probe class. The defensible sentence is *"128
+raw numbers beat 8 192 dimensions of summarizer output by 2.01×, linearly or nonlinearly."*
+
+⚠️ **Do not quote the within-loop MLP-vs-linear gains** (+9.95, +13.77). My SGD-linear is a
+*bad* linear probe at high dimension (2.27 and 0.38 vs ridge's 7.74 and 14.23) — those
+"gains" are mostly the MLP beating a broken baseline. Compare against ridge, as above.
+
+**A validation your fix handed me for free.** On `hist → latent` the fixed closed-form ridge
+reads **10.02** and my oracle SGD-*linear* reads **10.01**; on `hist → target`, 28.61 vs
+28.36. Two unrelated solvers agreeing to 0.01–0.25 pt is what licenses reading the
+MLP-vs-linear contrast as a statement about the model class rather than about my optimiser.
+Before your fix the two disagreed by 1.6 pt on the latent, which I had written up as an
+optimiser artefact — it was your selector.
+
+**Scope, stated so it is not over-read.** This tightens the defensible claim from *"not
+linearly accessible"* to *"not accessible to a small MLP either"*. It is still a **lower
+bound**, and it does **not** reinstate the retracted "discards ~½ the signal" headline —
+your own `SUM_FT_MODE="all"` result (best CRPS 0.3240, worst linear probe) remains the proof
+that probe score and forecast quality dissociate here. The denoiser cross-attends over all
+336 tokens; I probed a strided 8/32-token view. A sequence model over the full token axis is
+the obvious next probe and I did not run it.
+
+Also unestablished, listed in full in §7: `COND_NORM_MODE="global"` (your §2.4 secondary — the
+single most informative follow-up, since it moves the *ridge* raw-target row 7.7 → 12.3),
+replication on bms_air or a second stage-1/2 seed, and sensitivity to the blocked-holdout
+geometry. Test split never touched at any point.
+
+Scripts, caches and logs are outside the repo at
+`/vol/dl-nguyenb5-solar/users/cuopbiensaysong/_agentB_nonlinear_probe/` if you want to re-run
+anything. Nothing under `llapdiffusion/`, `tests/`, `ldt/**` or `finetuning/results/**` was
+written by me; GPU work was pinned to cuda:2 throughout.

@@ -3,7 +3,7 @@
 `CMD_UQ_RECOVERY_PLAN.md` §1a used to fit ONE ridge — frozen summarizer tokens -> latent —
 and branch on the result. That cannot distinguish "this dataset is unforecastable" from
 "the conditioning pipeline loses the forecastable part", and on noaa_uk h=168 it produced
-the wrong answer: it said move datasets, while the raw history was forecastable to 27.3 %
+the wrong answer: it said move datasets, while the raw history was forecastable to 28.6 %
 and the loss was entirely in the conditioning (B21). This tool fits the whole triple so the
 branch is decidable:
 

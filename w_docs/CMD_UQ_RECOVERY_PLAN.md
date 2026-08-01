@@ -222,7 +222,7 @@ on this dataset.
 summarizer tokens → latent) and branched on it. That cannot tell "this dataset is
 unforecastable" from "the conditioning loses the forecastable part", and on noaa_uk h=168 it
 gave the wrong answer: it said *move datasets*, while the raw history was forecastable to
-27.3 % and the entire loss was in the conditioning (**B21**). Fit all three:
+28.6 % and the entire loss was in the conditioning (**B21**). Fit all three:
 
 | | probe | question it answers |
 |---|---|---|
@@ -273,14 +273,14 @@ never touched), baseline exactly as `llapdiff-uq-eval` computes it.
 | `cond_summary`, `"sample"` | 8 192 | 4.2 % | 14.2 % |
 | `cond_summary`, `"global"` (new, B21) | 2 048 | 4.9 % | 12.3 % |
 | `cond_summary`, `"global"` | 8 192 | **6.8 %** | 16.4 % |
-| **raw history, temperature channel only** | **128** | **11.6 %** | **27.3 %** |
+| **raw history, temperature channel only** | **128** | **10.0 %** | **28.6 %** |
 
-**A = 27.3 %** (dataset is forecastable, comfortably) · **B = 7.7–16.4 %** (roughly half of A
+**A = 28.6 %** (dataset is forecastable, comfortably) · **B = 7.7–16.4 %** (roughly half of A
 survives the conditioning) · **C = 4.9–6.8 %** (never clears 10 %).
 
 ⇒ **Verdict: FIX THE CONDITIONING (B21).** Under the *old* single-probe rule this cell read
 as "move datasets"; under the paired rule it reads correctly, because the raw history clears
-the threshold on 1a's own target (11.6 %) from 64× fewer features while no conditioning
+the threshold on 1a's own target (10.0 %, marginally) from 64× fewer features while no conditioning
 variant does.
 
 **Status: Phase 1 is blocked on B21, not on the dataset choice.** noaa_uk remains the right
@@ -289,7 +289,7 @@ before 1b can discriminate anything, and moving to bms_air would carry the same 
 along and reproduce this result.
 
 Verified: `llapdiff-ridge-probe --dataset-key noaa_uk --pred 168 --tokens 8` reproduces the
-scratch measurements (A 27.3 %/11.6 %, B 7.7 %, C 5.7 %) and returns
+scratch measurements (A 28.6 %/10.0 %, B 7.7 %, C 5.7 %) and returns
 `FIX THE CONDITIONING (B21)`.
 
 ### 1b. The gate — two S1 seeds, trained to convergence

@@ -683,10 +683,27 @@ linear probes only.*
 >
 > **What does not survive as stated:** "the summarizer discards ~½ the forecastable signal".
 > The summarizer is a deterministic function of the history, so it can only lose or *reformat*
-> — and the `SUM_FT_MODE="all"` result is direct evidence that reformatting is happening. The
-> gap is consistent with loss, with nonlinear re-encoding, or with both, and this entry cannot
-> separate them. Treat the headline as **"the conditioning is much less linearly decodable
-> than the raw history"**, which is what was actually measured.
+> — and the `SUM_FT_MODE="all"` result is direct evidence that reformatting is happening.
+>
+> **Resolved 2026-08-02 (agent-B, `w_docs/results_nonlinear_probe.md`): the gap is NOT an
+> artefact of linearity.** An **oracle**-selected MLP — 36 configs × ≤50 epochs, config *and*
+> epoch chosen by looking at val, i.e. a deliberate upper bound — reproduces the linear gap to
+> within 0.3 pt (50.0 % vs ridge's 49.7 % of the raw-history score). The pre-registered bar for
+> "present but nonlinearly encoded" was ≥ 80 %.
+>
+> So the defensible claim tightens from *"not linearly accessible"* to **"not accessible to a
+> small MLP either"** — a tighter lower bound, still a lower bound. It does **not** reinstate
+> the "discards" headline: `SUM_FT_MODE="all"` (best CRPS of any run, *worst* probe) remains
+> the standing proof that probe score and forecast quality dissociate on this pipeline. And
+> the denoiser cross-attends over all 336 tokens while every probe here reads a strided 8/32
+> view; a sequence model over the full token axis is the obvious next probe and has not been run.
+>
+> 🔴 **Two numbers in this entry are superseded.** (i) `cond_summary`'s honest figure is
+> **~14 %, not 7.7 %** — the 2 048-dim view is an impoverished *view*, and an MLP on it
+> recovers +4.5 pt (7.7 → 12.2) while gaining **−0.08 pt** at 8 192 dims. The representation
+> ceiling is ~14.2 % under either probe class. (ii) The raw-history rows moved when the
+> selection holdout was fixed (below). The defensible one-liner is: **128 raw history numbers
+> beat 8 192 dimensions of summarizer output by ~2×, linearly or nonlinearly.**
 
 #### The measurement
 
@@ -698,9 +715,19 @@ every feature set**; the target is the per-entity raw temperature trajectory:
 
 | input to ridge | dim | relative RMSE reduction |
 |---|---|---|
-| **raw history, temperature channel only** | **128** | **27.3 %** |
+| **raw history, temperature channel only** | **128** | **28.6 %** (27.3 % before the selector fix) |
 | `cond_summary` (the denoiser's conditioning) | 8 192 | 14.2 % |
 | `cond_summary_raw` | 8 192 | 13.5 % |
+
+> **Selector fix, 2026-08-02.** `ridge_reduction` originally chose alpha on the trailing 20 % of
+> train. On a seasonal, chronologically split series that band is a **different regime** — grand
+> mean −0.911 against the fit portion's +0.183 — and **ridge scores −8.3 % there while scoring
+> +28.8 % on val from the same fit**. A selector that anti-correlates with the target metric is
+> not a selector. It cost ~1.3 pt: it picked α=1e4 (val 27.28 %) over α=1e3 (val 28.61 %).
+> Replaced with `blocked_purged_split` — 3 holdout blocks spread across the train span, purged
+> by `WINDOW` either side, the same idea as the loaders' `global_purged_horizon`. Re-measured:
+> raw history → raw target **27.3 → 28.6 %**, → latent **11.6 → 10.0 %**; **every `cond_summary`
+> row is unchanged**, so no conclusion in this entry or in Phase 1a moves. Diagnosed by agent-B.
 
 **128 raw numbers beat 8 192 dimensions of summarizer output by ~2×.** Giving the summarizer
 64× more dimensions at the same temporal resolution recovers only about half the signal that
@@ -710,7 +737,7 @@ Signal remaining after each stage of the pipeline:
 
 | stage | linear headroom |
 |---|---|
-| raw data (history → target) | **27.3 %** |
+| raw data (history → target) | **28.6 %** |
 | after the summarizer (stage 2) | ~14 % |
 | after the VAE, i.e. the latent the denoiser must predict (stage 1) | **5.6 %** |
 
@@ -725,6 +752,44 @@ raw 7.7 % → latent 5.6 %.
    to preserve the component that predicts the *future*. It is not broken; it is solving a
    different problem, and the pipeline then treats its output as if it were a sufficient
    statistic for forecasting.
+
+   🔴 **And it is far narrower than that. The objective can only constrain 1 of 336 token
+   directions — and the default normalisation deletes exactly that one.**
+   *(Found by agent-B, 2026-08-02, §6 of `w_docs/results_nonlinear_probe.md`; verified
+   independently here by reading the source.)*
+
+   `LaplaceAE.forward` returns `context` of shape `[B, S=336, Hc=256]` — **86 016 numbers per
+   window**, and that is what the denoiser consumes. But every pretraining head reads
+   `ctx_mean = context.mean(dim=1)` (`summarizer.py:637`) — **256 numbers**:
+
+   ```python
+   ctx_mean = context.mean(dim=1)                     # [B, Hc]
+   x_hat  = self.decoder_net(ctx_mean).view(B, K, N, D)
+   v_hat  = self.v_decoder(ctx_mean)  ; t_hat  = self.t_decoder(ctx_mean)
+   dt_hat = self.dt_decoder(ctx_mean) ; obs_hat = torch.sigmoid(self.obs_decoder(ctx_mean))
+   ```
+
+   Confirmed by perturbation: a delta of norm 38.35 constructed to have exactly zero
+   token-mean moves every head by ~1e-8 — float32 noise. **335 of 336 token directions lie in
+   the null space of stage-2's objective**; nothing in stage-2 training shapes them for any
+   purpose.
+
+   And `normalize_cond_per_batch(mode="sample")` — the default — reduces over `dims=(1,)`, the
+   same token axis, subtracting exactly that mean (verified: max |token-mean of `cond_summary`|
+   = 1.2e-06).
+
+   ⇒ **The one component stage-2's objective ever supervised is exactly the component the
+   default normalisation removes before the denoiser sees it.**
+
+   This is the unifying mechanism for nearly everything else in this entry: why the erased
+   256-dim mean (12.4 %) outscores the entire kept 2 048-dim summary (7.7 %); why
+   `COND_NORM_MODE="global"`, which preserves it, improves both the probe and CRPS; why
+   `COND_POOL_USE_RAW` had the right idea and failed only on scale; and why `SUM_FT_MODE`
+   helps at all — it lets the diffusion loss shape the 335 directions stage 2 never touched.
+
+   ⚠️ **Scope, retained from agent-B:** this constrains which directions are *supervised*, not
+   which are *empty*. The other 335 are a deterministic function of the history and the strided
+   view scores 14.2 %, so they demonstrably carry signal — what they lack is training pressure.
 2. **Per-window z-scoring erases the level — and the erased part is the more informative
    half.** `normalize_cond_per_batch(mode="sample")` reduces over `dims=(1,)`, so per window
    and per feature dim it subtracts the mean over tokens and divides by the std over tokens.
