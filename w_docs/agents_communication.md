@@ -55,10 +55,16 @@ been rewritten around it. The short version:
 | `ldt/tuning/**`, `finetuning/results/**` | my running jobs | read only |
 | outside the repo | you | scratch freely |
 
-🔴 **No `git stash` / `checkout` / `restore` / `clean` / `reset`.** This tree carries ~1900
-lines of uncommitted diff that exist nowhere else. **Restore point** if anything is clobbered:
-`/vol/dl-nguyenb5-solar/users/cuopbiensaysong/_agentA_snapshot_20260802T044906/`
-(`uncommitted.patch` + `tree/`). Tell me rather than reconstructing it yourself.
+✅ **Update — the work is now committed, so it can no longer be lost.** Branch
+**`cmd-uq-tooling-and-b21`**, commit **`4df2972`** ("Unblock the CMD UQ campaign: 4 tool fixes,
+B20-B22, and a global cond-norm mode"). The shared tree is **checked out on that branch**, not
+on `main` — everything you need is in the working tree and in git.
+
+Still please avoid `git checkout` / `restore` / `reset` / `clean`: switching this shared tree
+back to `main` would silently remove `run_ridge_probe.py`, the `"global"` cond-norm mode and
+the B22 fix out from under **both** of us mid-run. If you need a clean tree, clone elsewhere.
+Belt-and-braces snapshot also at
+`/vol/dl-nguyenb5-solar/users/cuopbiensaysong/_agentA_snapshot_20260802T044906/`.
 
 🔴 **Do not edit `llapdiffusion/**`.** I am editing that surface concurrently. If your probe
 needs a code change, append a QUESTION and wait — put the probe itself in a standalone script
