@@ -152,11 +152,51 @@ def _collect(dl, stack, device, *, history_steps: int, entities: Optional[int]):
     return keep, tuple(torch.stack(z) for z in bags[keep])
 
 
-def ridge_reduction(Xtr, ytr, Xva, yva) -> float:
-    """Percent RMSE reduction vs predict-the-mean, alpha chosen on a train holdout."""
+def blocked_purged_split(n: int, *, n_blocks: int = 15, holdout=(3, 8, 13), purge: int = 0):
+    """Fit/holdout indices for selection INSIDE train, without a regime confound.
+
+    The obvious choice — the chronological last 20 % of train — is pathological on a
+    seasonal, chronologically split series. Measured on noaa_uk h=168: that band has grand
+    mean −0.911 against the fit portion's +0.183, and **ridge scores −8.3 % there while
+    scoring +28.8 % on val from the same fit**. A selector that anti-correlates with the
+    target metric is not a selector. Ridge mostly survives it (a common offset cancels when
+    *ranking* alphas) but it still cost ~1.3 pt: it picked alpha=1e4 (val 27.28 %) over
+    alpha=1e3 (val 28.61 %).
+
+    Instead hold out several contiguous blocks spread across the whole train span, so the
+    selector sees the same mixture of regimes the fit does, and **purge** ``purge`` windows
+    either side so no fit window shares its context with a holdout window — the same idea as
+    the loaders' own ``global_purged_horizon`` policy. Pass ``purge=WINDOW``.
+
+    Credit: diagnosed by a second agent while probing B21 (`w_docs/results_nonlinear_probe.md` §2).
+    """
+    edges = np.linspace(0, n, n_blocks + 1).astype(int)
+    hold = np.zeros(n, dtype=bool)
+    for b in holdout:
+        if 0 <= b < n_blocks:
+            hold[edges[b]:edges[b + 1]] = True
+    fit = ~hold
+    if purge > 0:
+        banned = np.zeros(n, dtype=bool)
+        for b in holdout:
+            if not (0 <= b < n_blocks):
+                continue
+            lo, hi = edges[b], edges[b + 1]
+            banned[max(0, lo - purge):lo] = True
+            banned[hi:min(n, hi + purge)] = True
+        fit &= ~banned
+    return np.flatnonzero(fit), np.flatnonzero(hold)
+
+
+def ridge_reduction(Xtr, ytr, Xva, yva, *, purge: int = 0) -> float:
+    """Percent RMSE reduction vs predict-the-mean, alpha chosen on a train holdout.
+
+    The holdout is blocked-and-purged rather than the trailing 20 % — see
+    ``blocked_purged_split`` for why the obvious choice is unusable here.
+    """
     Xtr, Xva = np.asarray(Xtr, np.float64), np.asarray(Xva, np.float64)
     ytr, yva = np.asarray(ytr, np.float64), np.asarray(yva, np.float64)
-    cut = max(1, int(0.8 * len(Xtr)))
+    fit_idx, hold_idx = blocked_purged_split(len(Xtr), purge=purge)
     grid = (1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8)
 
     def fit(X, y):
@@ -165,11 +205,11 @@ def ridge_reduction(Xtr, ytr, Xva, yva) -> float:
         lam, V = np.linalg.eigh(Xc.T @ Xc)
         return xm, ym, lam, V, V.T @ (Xc.T @ (y - ym))
 
-    xm0, ym0, lam0, V0, RV0 = fit(Xtr[:cut], ytr[:cut])
+    xm0, ym0, lam0, V0, RV0 = fit(Xtr[fit_idx], ytr[fit_idx])
     best = (None, float("inf"))
     for a in grid:
         W = V0 @ (RV0 / (lam0 + a)[:, None])
-        r = float(np.sqrt((((Xtr[cut:] - xm0) @ W + ym0 - ytr[cut:]) ** 2).mean()))
+        r = float(np.sqrt((((Xtr[hold_idx] - xm0) @ W + ym0 - ytr[hold_idx]) ** 2).mean()))
         if r < best[1]:
             best = (a, r)
     xm, ym, lam, V, RV = fit(Xtr, ytr)
@@ -232,16 +272,18 @@ def main() -> None:
         step = max(1, cs.shape[1] // ntok)
         return cs[:, ::step][:, :ntok].reshape(cs.shape[0], -1).numpy()
 
-    a_raw = ridge_reduction(HTtr.numpy(), Rtr.numpy(), HTva.numpy(), Rva.numpy())
-    a_lat = ridge_reduction(HTtr.numpy(), Ltr.numpy(), HTva.numpy(), Lva.numpy())
+    # purge = WINDOW: no fitting window may share its context with a selection window.
+    purge = int(getattr(cfg, "WINDOW", 0))
+    a_raw = ridge_reduction(HTtr.numpy(), Rtr.numpy(), HTva.numpy(), Rva.numpy(), purge=purge)
+    a_lat = ridge_reduction(HTtr.numpy(), Ltr.numpy(), HTva.numpy(), Lva.numpy(), purge=purge)
     rows: List[Dict[str, object]] = []
     print(f"{'probe':<34}{'dims':>7}{'-> raw target':>15}{'-> latent':>11}")
     print(f"{'A  raw history':<34}{HTtr.shape[1]:>7}{a_raw:>14.1f}%{a_lat:>10.1f}%")
     best_b = best_c = -float("inf")
     for ntok in args.tokens:
         Xtr, Xva = summary_feats(RAWtr, ntok), summary_feats(RAWva, ntok)
-        b = ridge_reduction(Xtr, Rtr.numpy(), Xva, Rva.numpy())
-        c = ridge_reduction(Xtr, Ltr.numpy(), Xva, Lva.numpy())
+        b = ridge_reduction(Xtr, Rtr.numpy(), Xva, Rva.numpy(), purge=purge)
+        c = ridge_reduction(Xtr, Ltr.numpy(), Xva, Lva.numpy(), purge=purge)
         best_b, best_c = max(best_b, b), max(best_c, c)
         print(f"{'B/C cond_summary (' + str(ntok) + ' tokens)':<34}{Xtr.shape[1]:>7}"
               f"{b:>14.1f}%{c:>10.1f}%")
