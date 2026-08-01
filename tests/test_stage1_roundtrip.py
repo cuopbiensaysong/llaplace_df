@@ -53,3 +53,89 @@ def test_roundtrip_correlation_needs_windows(monkeypatch):
     loaders = ([], None, [], None)   # no test batches
     with pytest.raises(RuntimeError, match="No valid entity-windows"):
         rt.roundtrip_correlation(object(), loaders, __import__("torch").device("cpu"))
+
+
+def test_roundtrip_correlation_selects_the_requested_split(monkeypatch):
+    """`split` picks the loader; anything else fails loudly rather than defaulting."""
+    monkeypatch.setattr(rt, "_build_vae", lambda *a, **k: object())
+    loaders = ([], [], [], None)
+    torch = __import__("torch")
+    with pytest.raises(ValueError, match="split must be one of"):
+        rt.roundtrip_correlation(object(), loaders, torch.device("cpu"), split="valid")
+    # train/val/test all reach the empty-window guard, i.e. all three are wired.
+    for split in ("train", "val", "test"):
+        with pytest.raises(RuntimeError, match="No valid entity-windows"):
+            rt.roundtrip_correlation(object(), loaders, torch.device("cpu"), split=split)
+
+
+def _fake_roundtrip_batch(monkeypatch, y_true, recon):
+    """Wire roundtrip_correlation's helpers to serve one canned [B,H,N,1] batch."""
+    import torch
+
+    B, H, N = y_true.shape[0], y_true.shape[1], y_true.shape[2]
+    mask = torch.ones(B, N, dtype=torch.bool)
+    monkeypatch.setattr(rt, "_build_vae", lambda *a, **k: (lambda *_: (None, torch.zeros(B, H, 4), None)))
+    monkeypatch.setattr(rt, "pack_targets_tokens", lambda *a, **k: (object(), object(), None))
+    monkeypatch.setattr(rt, "decode_latents_with_vae", lambda *a, **k: recon)
+    monkeypatch.setattr(rt.tv, "_sanitize_batch", lambda *a, **k: (None, None, mask))
+    monkeypatch.setattr(rt.tv, "targets_to_bhnc", lambda *a, **k: y_true)
+    return ([], [], [(None, None, {})], None)
+
+
+def test_constant_windows_are_skipped_and_counted(monkeypatch):
+    """A window whose correlation is undefined must not poison the aggregate.
+
+    PhysioNet val is ~71% constant target windows (median true std exactly 0, sparse
+    clinical series carried forward). `np.corrcoef` on a constant series is nan, and a
+    single nan turned the whole mean into nan while inflating std_ratio to ~1e6 — the
+    gate reported `nan / FAIL` instead of a number. Synthetic targets are never
+    constant, which is why this only appeared once real datasets were admitted.
+    """
+    import torch
+
+    H = 8
+    ramp = torch.arange(H, dtype=torch.float32)
+    y_true = torch.zeros(1, H, 3, 1)
+    y_true[0, :, 0, 0] = ramp                 # informative
+    y_true[0, :, 1, 0] = 5.0                  # constant target -> below the 1e-8 floor
+    y_true[0, :, 2, 0] = ramp                 # informative target...
+    recon = torch.zeros(1, H, 3, 1)
+    recon[0, :, 0, 0] = ramp * 0.5            # correlates perfectly, half the scale
+    recon[0, :, 1, 0] = 5.0
+    recon[0, :, 2, 0] = 3.0                   # ...but a FLAT reconstruction -> corr undefined
+
+    loaders = _fake_roundtrip_batch(monkeypatch, y_true, recon)
+    stats = rt.roundtrip_correlation(object(), loaders, torch.device("cpu"), split="test")
+
+    assert stats["n"] == 1 and stats["n_degenerate"] == 2
+    assert stats["corr"] == pytest.approx(1.0)      # finite, not nan
+    assert stats["std_ratio"] == pytest.approx(0.5)  # the 1e6 outlier is gone
+
+
+def test_dataset_mode_argument_guards():
+    """The two modes must not blend: a synthetic geometry flag silently ignored in
+    dataset mode would score a different cell than the caller asked for (the B4 class)."""
+    import sys
+
+    def parse(*argv):
+        saved, sys.argv = sys.argv, ["llapdiff-stage1-roundtrip", *argv]
+        try:
+            return rt._parse_args()
+        finally:
+            sys.argv = saved
+
+    with pytest.raises(SystemExit):
+        parse("--dataset-key", "noaa_uk")                     # --pred required
+    with pytest.raises(SystemExit):
+        parse("--dataset-key", "noaa_uk", "--pred", "168", "--tasks", "x")   # exclusive
+    with pytest.raises(SystemExit):
+        parse("--dataset-key", "noaa_uk", "--pred", "168", "--phase-spread", "0.393")
+    with pytest.raises(SystemExit):
+        parse("--tasks", "synthetic_linear_chirp", "--pred", "168")  # --pred is dataset-mode
+
+    # Split defaults differ by mode: gates run on val, synthetic keeps its historical test.
+    assert parse("--dataset-key", "noaa_uk", "--pred", "168").split == "val"
+    assert parse("--tasks", "synthetic_linear_chirp").split == "test"
+    assert parse("--tasks", "synthetic_linear_chirp", "--split", "val").split == "val"
+    # Task mode keeps its historical default task list.
+    assert parse().tasks == ["synthetic_linear_chirp"] and parse().split == "test"

@@ -10,7 +10,7 @@ Those three originals are kept verbatim in **`archive/`** (see `archive/README.m
 raw record; the phase-by-phase implementation history survives only there. This document is
 the one to read and maintain.
 
-**Last updated:** 2026-07-31 · **Branch:** `main` (after the `speed_up` merge) · **Tests:** 403 passing
+**Last updated:** 2026-08-01 · **Branch:** `main` (after the `speed_up` merge) · **Tests:** 411 passing
 **Status of the code:** all fixes below are **landed and committed** except where marked OPEN.
 `update_method` is deliberately left at `347cd8a` (pre-fix) as the reference point.
 
@@ -38,6 +38,19 @@ the one to read and maintain.
 | **B16** | `_best.pt` and `_best_ema.pt` hold identical weights; `_load_stack` never applies EMA (`finetuning/` is unaffected) | `train_val_llapdiff.py`, `llapdiff_checkpoint_eval.py` | 🔴 critical | **OPEN** |
 | **B17** | `llapdiff-synthetic-regime` crashes at its own default geometry | `run_synthetic_regime_shift.py` | 🟡 minor | **OPEN** (workaround documented) |
 | **B18** | `final_eval.py` scored a raw/EMA **hybrid**: the shared `analysis`/`synthesis.encoder` alias kept raw weights | `finetuning/final_eval.py` | 🔴 critical | fixed 2026-07-29 |
+| **B19** | PhysioNet h=12 gives the diffusion stage 13 training windows (5 val, 5 test) | dataset geometry | 🔴 critical | **OPEN** |
+| **B20** | Stage-1 round-trip is capped at the cross-entity **mean** share: Gate 0 fails on 3 of 5 real cells (B5 on real data) | `latent_vae.py` | 🔴 critical | **OPEN — preliminary** |
+| **B21** | The conditioning pipeline discards ~½ the forecastable signal at stage 2 and more at stage 1; no gate detects it | `summarizer.py`, `latent_vae.py` | 🔴 critical | **OPEN — preliminary** |
+| **B22** | `SUM_FT_MODE` fine-tunes the summarizer but it is never persisted → silent train/eval mismatch, weights lost | `train_val_llapdiff.py`, `llapdiff_checkpoint_eval.py` | 🔴 critical | fixed 2026-08-01 |
+
+### Knobs added while investigating B21 (2026-08-01)
+
+| knob | default | what it does |
+|---|---|---|
+| `COND_NORM_MODE = "global"` | not the default (`"sample"` still is) | Normalises the conditioning with **fixed statistics computed once over train**, persisted per checkpoint. Batch-independent like `"sample"` (B15's requirement) but **level-preserving**, and unit-scaled. Measured −0.028 val CRPS vs `"sample"` on noaa_uk h=168, one seed — promising, not yet adopted. Raises if the statistics are missing rather than silently falling back. |
+
+Both `normalize_cond_per_batch` and the resolver reject an unknown mode, and every other
+mode's checkpoints resolve their statistics to `None`, so nothing pre-existing moves.
 
 ---
 
@@ -377,6 +390,11 @@ that date. Ruled out by measurement: input dropout (0.620→0.586), latent width
 `val_recon` 3.2× better, entity diversity retained.
 **Gate 0** (`llapdiff-stage1-roundtrip`) now checks this before any Fig-2 claim: stage-1
 round-trip corr must exceed ~0.85 on the run's own cache.
+🔴 **The mechanism was never fixed, only side-stepped.** `--phase-spread` narrows the
+*generator's* per-entity phases so the panel stops cancelling; the mean-pool is untouched. On
+**real** datasets that escape hatch does not exist, and the same bottleneck binds directly —
+see **B20**, where the round-trip on every real cell equals that dataset's cross-entity
+mean share, and three of five cells fail Gate 0 because of it.
 
 ### B6 — Horizon-blind ρ initialisation 🔴 *(2026-07-22, both cores)*
 Both cores initialised `ρ ~ U(0.01, 0.2)` with **no horizon term**. The synthesis envelope is
@@ -482,12 +500,530 @@ to be raised first (shorter `WINDOW`/`PRED`, or a split that treats patients rat
 relative-time offsets as the sampling unit — the latter is a design change to the
 set-VAE's entity pooling, not a config tweak).
 
+**Update 2026-08-01 — B19 is not PhysioNet's only defect.** Gate 0 now runs on real datasets
+(**B20**) and PhysioNet h=12 scores a stage-1 round-trip of **0.059** on val against a 0.85
+gate. Two separate things are wrong: its cross-entity mean share is only **0.171**, so the
+pooling ceiling alone fails the gate before any window count matters; and it is the one cell
+that falls *below* its own ceiling on val (0.059) while sitting exactly on it on train
+(0.173) — which is this bug, the five-window val split. Every statistical claim on this cell
+is therefore blocked twice over, upstream and downstream of the denoiser.
+
 *Relationship to the "denoiser barely uses its conditioning" issue below: on PhysioNet
 those observations are fully explained by 13-window memorization. A conditioning-shuffle
 probe shows the denoiser **does** respond to its conditioning (39 % output change under a
 shuffled summary, 67 % with none), so it is not ignoring the input — it simply cannot
 generalize from 13 examples. The conditioning issue should be re-measured on noaa_uk
 before being treated as a modelling defect.*
+
+---
+
+### B20 — The stage-1 round-trip ceiling is the cross-entity **mean** share 🔴 **OPEN — preliminary (2026-08-01)**
+
+*Found 2026-08-01, immediately after `llapdiff-stage1-roundtrip` gained a `--dataset-key/--pred`
+mode and Gate 0 could be run on a real dataset for the first time. **This is a first-pass
+measurement (2 batches per cell) and has not been run at full split coverage** — the mechanism
+below is well supported, but treat the exact numbers as provisional.*
+
+**Gate 0 on all five campaign cells** (val split, threshold 0.85, 2 batches, EMA-irrelevant —
+stage 1 only):
+
+| cell | round-trip corr | std ratio | n | verdict |
+|---|---|---|---|---|
+| **noaa_uk h168** | **0.922** | 0.90 | 120 | **PASS** |
+| **bms_air h168** | **0.941** | 0.98 | 235 | **PASS** |
+| physionet h12 | **0.059** | 0.05 | 110 (266 constant windows skipped) | **FAIL** |
+| crypto h100 | 0.657 | 0.75 | 1 124 | **FAIL** |
+| us_equity h100 | 0.674 | 0.70 | 2 210 | **FAIL** |
+
+#### The mechanism: the decoder emits the panel mean
+
+`latent_vae.py` mean-pools the entity axis before `mu_head`, so one window becomes **one**
+latent with **no entity axis** — this is B5, but here it is measured on real data, where the
+data-side escape hatch B5 used (`--phase-spread`, redrawing the generator's per-entity phases)
+does not exist. Diagnostic probe (same 2 val batches; window-eligibility filters differ
+slightly from the tool's, hence small differences from the table above):
+
+| cell | ent/win | VAE params | train corr | val corr | corr(recon, panel mean) | cross-entity std retained |
+|---|---|---|---|---|---|---|
+| noaa_uk h168 | 4 | 0.80 M | 0.975 | 0.922 | **1.000** | 0.059 |
+| bms_air h168 | 7 | 0.81 M | 0.975 | 0.908 | **0.948** | 0.538 |
+| crypto h100 | 113 | 0.82 M | 0.517 | 0.657 | **0.995** | 0.218 |
+| us_equity h100 | 221 | 0.83 M | 0.541 | 0.674 | **0.992** | 0.201 |
+| physionet h12 | 75 | 0.86 M | 0.173 | 0.059 | 0.306 | 0.907 |
+
+Every entity's reconstruction correlates ≈ 0.99–1.00 with the **cross-entity mean of the
+targets**, while retaining only ~20 % of the cross-entity variation (5.9 % on noaa_uk). The
+decoder is reproducing the panel average and discarding each entity's deviation from it.
+
+**The consequence is quantitative, and it closes the case.** If the reconstruction *is* the
+panel mean, then the round-trip correlation must equal the data's own entity-to-panel-mean
+correlation — a property of the **dataset**, with no model in it. Measured directly on the
+targets (no VAE involved):
+
+| cell | corr(y_entity, panel mean) | shared variance share | **Gate-0 round-trip** |
+|---|---|---|---|
+| noaa_uk h168 | **0.922** | 85.1 % | **0.922** |
+| bms_air h168 | 0.894 | 80.3 % | 0.908 |
+| crypto h100 | **0.657** | 50.6 % | **0.657** |
+| us_equity h100 | 0.678 | 48.0 % | 0.674 |
+| physionet h12 | 0.171 | 37.0 % | 0.059 (train: 0.173) |
+
+⇒ **Gate 0 is not measuring VAE quality on these cells. It is measuring how much of each
+entity's target is shared across the panel**, and the pooling architecture pins the VAE to
+exactly that ceiling. noaa_uk (4 co-located UK weather stations, 85 % shared) and bms_air
+(7 sensors, 80 %) pass because the panel mean nearly *is* each entity's signal. Crypto and
+us_equity fail because financial targets are ~50 % idiosyncratic and the panel mean — a market
+factor — cannot carry the other half.
+
+#### Capacity is NOT the cause — explicitly ruled out
+
+The obvious hypothesis is that the failing cells are over-parameterized. Three independent
+disproofs:
+
+1. **The denoiser is not in the loop.** Gate 0 instantiates `LatentVAE` and nothing else
+   (`tools/run_stage1_roundtrip.py`; the file contains no reference to `LLapDiff`,
+   `LapFormer` or `laptrans`). The 10.2–11.8 M-parameter backbone of the B19 discussion is
+   stage 3 and never runs here.
+2. **The VAEs are the same size everywhere** — 0.80–0.86 M parameters across all five cells,
+   an 8 % spread. There is no larger model on the failing cells.
+3. **The failing cells UNDERFIT, they do not overfit.** Over-parameterization predicts
+   train ≫ val. Measured train ≤ val, stably across sample sizes:
+
+   | cell | batches | train | val |
+   |---|---|---|---|
+   | crypto | 2 / 8 / 20 | 0.517 / 0.522 / 0.518 | 0.657 / 0.632 / 0.617 |
+   | us_equity | 2 / 8 / 20 | 0.541 / 0.591 / 0.587 | 0.674 / 0.672 / 0.643 |
+
+   The VAE cannot reconstruct its **own training windows** on those cells (0.52 vs the 0.975
+   it reaches on noaa_uk/bms_air). That is a structural bottleneck, not excess capacity.
+   *(Splits are chronological, so a small train sample is regime-specific; the 20-batch rows
+   are there to show the ordering is not a sampling artefact.)*
+
+#### PhysioNet is a second, distinct failure on top of the ceiling
+
+PhysioNet is the only cell that falls **below** its own pooling ceiling, and only on val:
+
+- Its panel-mean ceiling is **0.171**. On **train** it achieves **0.173** — i.e. exactly the
+  ceiling, like every other cell. On **val** it collapses to **0.059**.
+- Its `corr(recon, panel mean)` is only **0.306** and its cross-entity std ratio is **0.907** —
+  the opposite signature to crypto/us_equity. Its decoder produces output that varies across
+  entities but matches neither the entity nor the panel: it is not reproducing anything.
+- The train/val gap is the natural reading of **B19**: five val windows. This is the one place
+  in the table where an over-parameterization argument does apply — but to the *val estimate*,
+  not to the reconstruction mechanism.
+
+So PhysioNet carries **three** compounding defects: the B5 pooling ceiling (0.171 — already
+below the 0.85 gate before anything else happens), the B19 five-window val split, and the
+degeneracy below.
+
+#### ⚠️ PhysioNet's number needed a tool fix to be readable at all
+
+The first run reported `corr = nan`, `std_ratio = 206413`. Not a numerical blow-up — `mu` and
+the reconstruction are finite throughout. Cause: **71 % of PhysioNet's val entity-windows are
+constant** (median true target std exactly **0**; sparse clinical series carried forward).
+`np.corrcoef` on a constant series is undefined, `roundtrip_correlation` aggregated with a
+plain `np.mean`, and a single `nan` destroyed the aggregate while near-constant windows
+(true std ~1.5e-08, above the 1e-8 floor) inflated the std ratio to ~1e6. Synthetic
+benchmark targets are never constant, which is why this never surfaced before real datasets
+were admitted. Constant and undefined windows are now dropped and counted (`n_degenerate`),
+and the filter is a verified no-op where nothing is degenerate (noaa_uk and bms_air score
+identically before and after).
+
+**Audit rule:** read `n` and the skipped count, never `corr` alone. A cell scored on a
+minority of its split is telling you about that minority.
+
+#### What this affects
+
+- **Gate 0 as a gate still works and its verdicts stand**: noaa_uk and bms_air — the Phase-1
+  and Phase-2 datasets of `CMD_UQ_RECOVERY_PLAN.md` — pass, so the campaign's chosen cells are
+  sound and the plan does not need re-routing.
+- **It independently corroborates Phase 0** from a different direction: the three cells the
+  window audit rejected on supervision volume are the same three that fail here on stage-1
+  representational capacity.
+- **It raises the bar for any future finance cell.** Any crypto/us_equity result is bounded by
+  a ~0.66 stage-1 round-trip, i.e. the denoiser is being asked to forecast a latent that cannot
+  represent half the target. A "ties baseline" outcome there is not attributable to the model.
+- **It does not by itself invalidate published numbers**: nothing in the paper currently rests
+  on crypto or us_equity, and PhysioNet is already retired by B19.
+
+#### Not yet established (why this entry is marked preliminary)
+
+- Full-split coverage; everything above is 2 batches per cell (20 for the train/val check).
+- Whether an entity-conditioned decoder path recovers the idiosyncratic component.
+  `VAE_ENTITY_CONDITION` is **True** and the decoder does receive an entity embedding, yet the
+  cross-entity std collapses anyway — that tension is unexplained and is the first thing to
+  look at.
+- Whether the 0.85 threshold is the right gate for a panel whose shared share is genuinely
+  ~50 %. Arguably the honest gate is "round-trip ≈ panel-mean ceiling" (is the VAE at its
+  structural limit?) *plus* a separate check that the ceiling is high enough to be worth
+  forecasting. Those are two different questions and the current single number conflates them.
+
+---
+
+### B21 — The conditioning pipeline discards most of the forecastable signal 🔴 **OPEN — preliminary (2026-08-01)**
+
+*Found 2026-08-01 while running Phase 1a (the ridge positive control) of
+`CMD_UQ_RECOVERY_PLAN.md` on noaa_uk h=168. **Preliminary**: one cell, one seed, val split,
+linear probes only.*
+
+> ## 🔴 Read this first — the central inference below is weaker than originally written
+>
+> Every number in this entry comes from a **linear** probe, and a later experiment in the
+> same session shows linear decodability is **not** a valid proxy for information the
+> denoiser can use. `SUM_FT_MODE="all"` produced the **best forecast of any run**
+> (val CRPS 0.3240 vs 0.3627 control) while making the conditioning **less** linearly
+> decodable (`cond_summary` → raw target 6.8 % vs 7.7 % frozen; → latent **1.4 % vs 5.7 %**).
+>
+> So a representation can carry *more* usable signal and *less* linear signal at the same
+> time. A ridge probe measures a **lower bound** on usable information, not its quantity.
+>
+> **What survives:** the measurements themselves (raw history is far more linearly decodable
+> than the summary; the level component that z-scoring discards is more linearly decodable
+> than the part it keeps). Those are facts about linear decodability.
+>
+> **What does not survive as stated:** "the summarizer discards ~½ the forecastable signal".
+> The summarizer is a deterministic function of the history, so it can only lose or *reformat*
+> — and the `SUM_FT_MODE="all"` result is direct evidence that reformatting is happening. The
+> gap is consistent with loss, with nonlinear re-encoding, or with both, and this entry cannot
+> separate them. Treat the headline as **"the conditioning is much less linearly decodable
+> than the raw history"**, which is what was actually measured.
+
+#### The measurement
+
+Ridge from a frozen representation of the history to the h=168 target, fit on 14 446 train
+windows, evaluated on 2 183 val windows, alpha selected on a chronological holdout **inside
+train** (val never touched), baseline = `baseline_rmse_predict_mean` exactly as
+`llapdiff-uq-eval` computes it. **Temporal resolution matched at 32 of 336 positions for
+every feature set**; the target is the per-entity raw temperature trajectory:
+
+| input to ridge | dim | relative RMSE reduction |
+|---|---|---|
+| **raw history, temperature channel only** | **128** | **27.3 %** |
+| `cond_summary` (the denoiser's conditioning) | 8 192 | 14.2 % |
+| `cond_summary_raw` | 8 192 | 13.5 % |
+
+**128 raw numbers beat 8 192 dimensions of summarizer output by ~2×.** Giving the summarizer
+64× more dimensions at the same temporal resolution recovers only about half the signal that
+is sitting in the raw history.
+
+Signal remaining after each stage of the pipeline:
+
+| stage | linear headroom |
+|---|---|
+| raw data (history → target) | **27.3 %** |
+| after the summarizer (stage 2) | ~14 % |
+| after the VAE, i.e. the latent the denoiser must predict (stage 1) | **5.6 %** |
+
+⚠️ Those three are measured in different spaces and at different feature dimensions, so this
+is an ordering, **not** a clean decomposition. At matched 2 048 features the stage-1 step is
+raw 7.7 % → latent 5.6 %.
+
+#### Stage 2 — two mechanisms, both by design
+
+1. **The training objective is not the downstream task.** The summarizer optimises *history
+   reconstruction* (`SUM_LOSS_W_X/V/T`, `trainers/train_val_summarizer.py`). Nothing pushes it
+   to preserve the component that predicts the *future*. It is not broken; it is solving a
+   different problem, and the pipeline then treats its output as if it were a sufficient
+   statistic for forecasting.
+2. **Per-window z-scoring erases the level — and the erased part is the more informative
+   half.** `normalize_cond_per_batch(mode="sample")` reduces over `dims=(1,)`, so per window
+   and per feature dim it subtracts the mean over tokens and divides by the std over tokens.
+   Measured on noaa_uk: the across-window std of the *per-window mean* of `cond_summary` is
+   **exactly 0.00000** (`cond_summary_raw`: 0.04092) — the level is projected out, and no
+   linear combination of the normalised tokens can recover it, ever.
+
+   Restoring **exactly** what the normalisation removes (the per-window mean and std over the
+   token axis, 2 × 256 numbers):
+
+   | features | dim | reduction |
+   |---|---|---|
+   | `cond_summary` (level erased) | 2 048 | 7.7 % |
+   | + erased MEAN restored | 2 304 | 9.3 % |
+   | + erased MEAN and STD restored | 2 560 | 9.3 % |
+   | `cond_summary_raw` (never normalised) | 2 048 | 10.8 % |
+   | **the erased MEAN alone** | **256** | **12.4 %** |
+
+   **The 256 numbers thrown away are more predictive on their own than the entire 2 048-dim
+   normalised summary that is kept.** (The combined rows sit *below* the mean alone because
+   ridge has one shared alpha, and the optimal regularisation for 256 dense dims differs from
+   that for 2 048 sparse ones — a limitation of the probe, not of the information.)
+
+   🔴 **Correction to an earlier draft of this entry.** It said `cond_summary_raw` is also
+   handed to the denoiser, "so the model is not fully blind". **That is wrong at the default
+   configuration.** `LapFormer._select_summary_tokens` (`lapformer.py:461`) returns
+   `cond_summary_raw` only when `use_raw=True`, and both gates — `COND_POOL_USE_RAW` and
+   `ANALYSIS_QK_USE_RAW` — default to **False** and are not set in `config.py`. So the
+   denoiser never sees the raw summary, and the level component reaches it by **no path at
+   all**.
+
+   This does **not** retract B15, which fixed a real batch-dependence bug. The problem is the
+   remedy chosen: `"sample"` removes the batch dependence *and* the level. A third option
+   achieves both — **global** normalisation with fixed statistics computed once over train:
+   batch-independent by construction (B15's requirement) and level-preserving. That mode does
+   not exist; the code offers only `"batch"` and `"sample"`.
+
+   ⚠️ **`SUM_FT_MODE` cannot address this.** The z-scoring is a projection applied *after* the
+   summarizer, so whatever the fine-tuned encoder emits, the normalised output still has a
+   per-token-axis mean of exactly zero. The stage-2 fine-tuning experiment tests mechanism (1)
+   only.
+
+   **`COND_POOL_USE_RAW=True` tested 2026-08-01 — it makes things worse, and the failure is
+   informative.** Matched pair, noaa_uk h=168 arm d seed 0, 60 epochs, campaign eval profile,
+   differing in exactly this one flag (verified in the checkpoint at
+   `model_config["llapdiff"]["pole_pool_use_raw_summary"]`):
+
+   | | e5 | e30 | e60 | best val CRPS |
+   |---|---|---|---|---|
+   | control | 0.4483 | 0.4096 | **0.3627** | 0.3627 (e60) |
+   | `COND_POOL_USE_RAW=True` | **0.4128** | 0.4400 | 0.4459 | 0.4128 (**e5**) |
+
+   It **stalls rather than diverges**: train loss plateaus at ~0.88 from epoch 20 while the
+   control keeps descending to 0.626 (1.01 → 0.83 → 0.75 → 0.626). So the flag impairs
+   *optimisation itself*, not just generalisation.
+
+   ⚠️ **This does not falsify mechanism (2) — it falsifies this delivery mechanism.** Two
+   reasons. First, the treated run's epoch-5 CRPS (0.4128) is the *best* early value of any
+   run including the control (0.4483), which is what you would expect if the level genuinely
+   helps before something else dominates. Second, `cond_summary_raw` is **unnormalised**:
+   measured std 0.574 overall, with per-window per-dim stds ranging 0.05–0.43. Feeding that
+   straight into the pole conditioning vector is a scale problem, and the pole field is
+   exactly where a badly-scaled input does most damage (it sets ρ and ω).
+
+   Note what the flag does and does not reach: it gates `make_pole_cond` (→ ρ(t), ω(t)) and
+   `make_block_cond`, but the latter is inert (`block_summary_adaln=False`) and the trunk's
+   main cross-attention over the summary tokens is **not gated at all**. So this tested the
+   pole path only.
+
+   **`COND_NORM_MODE="global"` implemented and tested 2026-08-01 — it works, and it confirms
+   the scale diagnosis.** Fixed statistics computed once over the train split (per hidden
+   dim, reduced over windows and tokens: 5 472 096 rows, mean |·| 0.0896, std 0.5190),
+   persisted in the checkpoint and reloaded at eval. Batch-independent (so B15's requirement
+   still holds), level-preserving, and unit-scaled.
+
+   | run (60 ep, seed 0, matched) | best val CRPS | vs control |
+   |---|---|---|
+   | `ctrl_e60` — `"sample"`, the current default | 0.3627 | — |
+   | `rawpole_e60` — level restored, **bad scale** | 0.4128 | **+0.050 (worse, stalls)** |
+   | **`globalnorm_e60`** — level restored, **unit scale** | **0.3344** | **−0.028** |
+
+   It is better than the control at **11 of 12 evals**, and dramatically so early
+   (e5: 0.3665 vs 0.4483). The three rows together are the cleanest result in this entry:
+   *the same information* helps or hurts depending only on the scale it arrives at.
+
+   ⚠️ **One seed.** −0.028 is below the 0.036 nondeterminism band of §4 retraction 1, so the
+   endpoint alone would not carry the claim; the 11/12 trajectory and the early-epoch gap are
+   what make it credible. **Not yet a recommendation to change the default** — that needs
+   multi-seed confirmation and a second dataset.
+
+   Unlike `SUM_FT_MODE="all"` (below), this intervention is **campaign-compatible**: it leaves
+   stage 1/2 frozen and shared across arms, so it does not violate the parity requirement that
+   every cross-arm comparison depends on.
+
+   **The probe under `"global"` (2026-08-02) reproduces the dissociation at the top of this
+   entry, in the opposite direction to the CRPS.** Exact A/B — raw summaries collected once,
+   both normalisations applied offline, same summarizer, same windows, same honest alpha:
+
+   | conditioning | dims | → latent | → raw target |
+   |---|---|---|---|
+   | `"sample"` | 2 048 / 8 192 | 5.6 % / 4.2 % | 7.7 % / 14.2 % |
+   | `"global"` | 2 048 / 8 192 | 4.9 % / **6.8 %** | **12.3 % / 16.4 %** |
+   | raw history | 128 | **11.6 %** | **27.3 %** |
+
+   `"global"` clearly improves the **raw-target** readout (+4.6 points at 2 048) and improves
+   val CRPS, yet the **latent** readout barely moves. Two consequences: the latent is a bad
+   yardstick for conditioning quality (reinforcing the top box), and the raw history still
+   beats every summarizer variant by ~1.7× on the raw target with 64× fewer features — so
+   `"global"` narrows the B21 gap without closing it.
+
+   This is what blocks Phase 1a of `CMD_UQ_RECOVERY_PLAN.md`: the raw history clears that
+   gate's 10 % threshold (11.6 %) while no conditioning variant does (best 6.8 %).
+
+#### Stage 1 — a second loss that Gate 0 cannot see
+
+The VAE's *latent coordinates* are harder to predict than the signal they encode:
+
+| target | reduction |
+|---|---|
+| VAE round-trip reconstruction of the raw targets | **9.6 %** |
+| the latent `mu_norm` itself | **5.6 %** |
+
+The VAE does **not** destroy forecastability in data space — it slightly *improves* it (9.6 %
+vs 7.7 % for the raw targets), consistent with **B20**: it discards the idiosyncratic,
+high-frequency component, which is also the least predictable one. But what the denoiser is
+asked to regress is the latent code, and that is the least predictable quantity in the table.
+Reconstruction quality and latent predictability are different properties, and the same
+reconstruction can be reached through a smooth or a scrambled code.
+
+🔴 **Gate 0 is blind to this.** noaa_uk **passes Gate 0 at 0.922** while handing the denoiser a
+latent on which a linear readout of its own conditioning gets 5.6 %. Gate 0 measures
+*reconstruction*; nothing in the plan measures *latent predictability*. A stage-1 health check
+that a pipeline can pass while being unfit for its downstream purpose is not a sufficient gate.
+
+#### What this changes
+
+- **The Phase-1a verdict must be read carefully.** By the letter of the pre-registered rule
+  (ridge from the frozen summarizer tokens, < 10 % ⇒ uninformative ⇒ move datasets), noaa_uk
+  h=168 **fails**: 6.2 % honest / 9.8 % under a leaky oracle-alpha upper bound. But 1a's stated
+  *purpose* is "establish whether the target is forecastable **at all** on this dataset", and
+  by that test the answer is clearly **yes** — 27.3 % from the raw history. **1a as written
+  conflates dataset quality with summarizer quality.**
+- **Do NOT move the gate to bms_air on the strength of 1a.** The failure branch assumes the
+  cause is a dataset lacking temporal structure. Here it is not: the same summarizer would
+  travel to the new cell and most likely reproduce the result. This supersedes the earlier
+  recommendation in this session.
+- **It sits upstream of the open "denoiser barely uses its conditioning" issue** (§3). That
+  entry compares a ridge probe on `cond_summary` (R² +0.747) against the trained denoiser
+  (weak/negative) and concludes the denoiser cannot exploit its conditioning. B21 shows
+  `cond_summary` is *itself* impoverished relative to the raw history, so there are two losses
+  in series, not one.
+
+#### Not yet established
+
+- ~~Whether `SUM_FT_MODE` recovers any of the gap.~~ **Tested 2026-08-01 — essentially null.**
+  noaa_uk h=168, arm d, seed 0, `SUM_FT_MODE="pool"`, 60 epochs, campaign eval profile.
+  Frozen and fine-tuned summarizers probed in the same process, same windows, same ridge
+  procedure, so the encoder is the only difference:
+
+  | probe (2 048 summary dims) | frozen | fine-tuned |
+  |---|---|---|
+  | `cond_summary` → RAW target | 7.7 % | **8.6 %** |
+  | `cond_summary` → LATENT target | 5.7 % | **5.2 %** |
+  | raw history → RAW target (reference) | 27.3 % | 27.3 % |
+
+  The weights genuinely moved (`max |fine-tuned − frozen| = 5.9e-02`, so this is not a no-op),
+  but the representation gained ~1 point on the raw target, lost ~0.5 on the latent, and got
+  nowhere near the 27.3 % reference. **It does not close the B21 gap.**
+
+  Read this as weak evidence, not a refutation of mechanism (1). Four reasons: `"pool"`
+  unlocks only **131 776 of 5 234 592** summarizer parameters (**2.5 %**) — `"top"` (5.2 %) and
+  `"all"` (100 %) are untested; one seed, 60 epochs; the gradient reaching the summarizer is
+  the diffusion loss routed through the conditioning path, which is exactly the path the open
+  §3 issue says is weak, so a null result may reflect a weak training signal rather than an
+  unimportant mechanism; and it **cannot** touch mechanism (2) by construction.
+
+  **Update: a matched control now exists** (the `COND_POOL_USE_RAW` pair supplied one — same
+  60 epochs, same seed, same profile, defaults elsewhere), so the CRPS *is* readable after
+  all: **0.3467 (`pool`) vs 0.3627 (control) = −0.016**, and the treated run sits below the
+  control at every eval from epoch 30 onward (0.3745/0.3714/0.3648/0.3817/0.3666/0.3602/0.3467
+  vs 0.4096/0.4065/0.4009/0.3936/0.3827/0.3694/0.3627).
+
+  ⚠️ **Do not promote this to a finding on one seed.** §4 retraction 1 records two
+  *byte-identical* configs on this codebase producing CRPS 0.2243 vs 0.1886 — a 0.036 swing
+  from `cudnn.benchmark` nondeterminism alone, i.e. **more than twice this effect**. The
+  consistent 7-eval offset is worth more than the endpoint, but it is still n=1. It also
+  points the opposite way to the representation probe above (which moved −0.5 points on the
+  latent), so mechanism (1) remains genuinely unresolved.
+
+  ⚠️ Running this at all required fixing **B22** first: `SUM_FT_MODE` was silently discarding
+  the fine-tuned summarizer, so the experiment would have been unevaluable.
+
+  **`SUM_FT_MODE="all"` tested next — and it changes the conclusion. Mechanism (1) is
+  supported, by CRPS, with a dose-response.** One control, three treatments, all 60 epochs,
+  seed 0, arm d, same eval profile, differing in one flag:
+
+  | run | fine-tuned params | best val CRPS | vs control | non-finite grad skips |
+  |---|---|---|---|---|
+  | `ctrl_e60` | 0 | 0.3627 | — | 0 |
+  | `sumft_pool_e60` | 131 776 (2.5 %) | 0.3467 | −0.016 | 0 |
+  | **`sumft_all_e60`** | **5 234 592 (100 %)** | **0.3240** | **−0.039** | 0 |
+
+  **Monotone in the fine-tuning surface** — 0 → 2.5 % → 100 % of the summarizer gives
+  0.3627 → 0.3467 → 0.3240. A three-point ordered dose-response is materially stronger than
+  any single pairwise delta, and the `all` effect (−0.039) exceeds the 0.036
+  nondeterminism band of §4 retraction 1. Stability concerns did not materialise: zero
+  non-finite gradient skips in all three runs, including full fine-tuning at
+  `SUM_FT_LR_MULT=0.1`.
+
+  🔴 **But the representation probe moves the OPPOSITE way.** On the `all` summarizer,
+  `cond_summary` → raw target falls to **6.8 %** (frozen: 7.7 %) and → latent to **1.4 %**
+  (frozen: 5.7 %). The best-forecasting encoder is the least linearly decodable one. So
+  fine-tuning is **not** adding linearly-readable signal; it is reshaping the representation
+  into something this denoiser can consume. That is why the box at the top of this entry
+  retracts the "discards ~½ the signal" framing.
+
+  Still one seed per cell, 60 epochs, one dataset. The dose-response is what carries the
+  claim, not any single run. `SUM_FT_MODE="all"` is **not** thereby recommended for the
+  campaign: it makes the summarizer arm-specific, which breaks the shared-frozen-stage-1/2
+  parity requirement that every cross-arm comparison in this project depends on (§1b).
+- Whether the loss is in the summarizer's **architecture** or its **objective**. **Two
+  architectural explanations are now eliminated (2026-08-02, CPU-only, no model touched):**
+
+  1. **Not a dimensional bottleneck.** Input is `[N=4, K=336, F=5]` = **6 720** numbers per
+     window; `cond_summary` is `[S=336, H=256]` = **86 016**. The summary is **12.8× larger
+     than its own input**, so nothing is lost to compression.
+  2. **Not entity pooling** — on this cell. `LaplaceAE.forward` step 5 aggregates across
+     entities exactly as the VAE does (`encoded_mean = (encoded_bn * entity_weight).sum(dim=1)
+     / entity_denom`), so the pipeline mean-pools the entity axis **twice**, at stage 2 and
+     again at stage 1. But it costs almost nothing here:
+
+     | history representation | dims | reduction |
+     |---|---|---|
+     | per-entity — what the summarizer is given | 128 | **27.3 %** |
+     | entity-mean — what it keeps after pooling | 32 | **25.3 %** |
+     | `cond_summary` — what comes out | 2 048 | **7.7 %** |
+
+     Entity pooling costs **2 points**; the remaining ~17 points are lost downstream of it.
+     Consistent with B20: noaa_uk's 4 stations share 85 % of their variance, so averaging
+     them discards little. ⚠️ **This is cell-specific** — crypto (113 entities, 50 % shared)
+     and us_equity (221, 48 %) would pay far more, and the double pooling is worth
+     re-measuring there before it is dismissed.
+
+  ⇒ What remains is the **encoder + query-pooling + objective**, and both surviving strands of
+  evidence point at re-encoding rather than destruction: the `SUM_FT` dose-response (better
+  CRPS as more of the summarizer is fine-tuned) and the `SUM_FT="all"` inversion (best CRPS,
+  *worst* linear probe). So "1.7× is lost" is very likely the wrong frame — see the box at the
+  top of this entry — and the defensible statement remains "not linearly accessible".
+- Whether feeding raw history features to the denoiser alongside the summary closes the gap.
+- Replication on a second cell, a second seed, and with a nonlinear probe. The denoiser is
+  nonlinear with cross-attention over all 336 tokens and may extract more from `cond_summary`
+  than ridge does — though the comparison is fair in that both feature sets received identical
+  linear treatment, and the winner needed 128 dimensions against 8 192.
+
+---
+
+### B22 — `SUM_FT_MODE` silently discards the fine-tuned summarizer 🔴 *(found & fixed 2026-08-01)*
+
+**Found** while setting up the B21 follow-up experiment — `SUM_FT_MODE` is the one existing
+knob that directly tests B21's mechanism, and it turned out not to be evaluable.
+
+**What was wrong.** With `SUM_FT_MODE` ∈ {`pool`, `top`, `all`} the stage-3 trainer unfreezes
+part of the summarizer and trains it through the conditioning path
+(`_select_summarizer_finetune_named_params`, `train_val_llapdiff.py:1948`). But:
+
+- `_checkpoint_payload()` stored `model`, `ema`, `optimizer`, `mu_mean/mu_std` and two
+  `summ_ft_*` counters — **no summarizer state**. Verified on a real checkpoint: the only
+  matching keys are `summ_ft_skipped_nonfinite_grad_steps` and `summ_max_nonfinite_grad_steps`.
+- The trainer **reads** `config.SUM_CKPT` (line 2058) and never writes it. `grep torch.save`
+  over the whole trainer returns exactly one hit, and it is not the summarizer.
+- `_load_stack` unconditionally reloaded the summarizer from `cfg.SUM_CKPT`
+  (`llapdiff_checkpoint_eval.py:381`) — the **original shared frozen artifact**.
+
+So the denoiser was trained against a fine-tuned conditioning encoder and scored against a
+different one, with no warning; and the fine-tuned weights were destroyed at process exit.
+This is the same family as **B15** (train/eval conditioning mismatch) and **B18** (raw/EMA
+mismatch): the training and evaluation paths disagree about which artifact is in force.
+
+**Scope of the damage: none, so far.** `SUM_FT_MODE` defaults to `"none"` and no campaign in
+this repo has enabled it, so no existing result is affected. It was a trap waiting for the
+first person to turn the knob on — which B21 makes likely.
+
+**The fix.** Persist and prefer, mirroring what B15's follow-up did for `cond_norm_mode`:
+
+- `_checkpoint_payload` adds `payload["summarizer"]` and `payload["sum_ft_mode"]`, **guarded
+  by `if sum_ft_named_params`** — these state dicts run 21 MB (noaa_uk) to 1.1 GB
+  (us_equity), so the default path must not carry one.
+- `_load_stack` uses `payload["summarizer"]` when present and otherwise falls back to
+  `cfg.SUM_CKPT`. Absent the key — every pre-fix checkpoint and every `SUM_FT_MODE="none"`
+  run — behaviour is byte-identical to before. Verified on a real checkpoint.
+
+**Guarded by** `tests/test_eval_protocol_split.py::test_finetuned_summarizer_is_persisted_and_preferred_at_eval`
+(a source-level pin on both call sites, including the ordering; it does not exercise a real
+fine-tuning run).
+
+⚠️ **Still open around this knob**, per §1b: a summarizer trained under the old
+normalisation and then fine-tuned *through* the conditioning path is an untested combination.
+And `finetuning/`'s trial pruning keeps only `_best_ema.pt`, which now carries the summarizer —
+worth watching for disk growth on large-summarizer datasets.
 
 ---
 
@@ -506,6 +1042,16 @@ weights live under a separate `ema` key that `_load_stack` never applies.
 `llapdiff-checkpoint-eval`, the H2 chirp benchmark, and the T1/T4/UQ tools. For those,
 **the reported CRPS is a raw-weight number labelled EMA** despite `USE_EMA_EVAL = True` —
 including the G2/G3 factorial and the 5-seed Fig-2 campaign.
+
+**Opt-out coverage (2026-08-01).** Three consumers now carry `--weights {raw,ema}`, which
+applies the shadow via the alias-proof `_apply_ema_weights`: `llapdiff-checkpoint-eval`
+(B18), `llapdiff-uq-eval`, and — added 2026-08-01 — **`llapdiff-u1-sweep`**, whose absence
+would have frozen the campaign's guidance choice on raw weights. Measured on the
+`fixed_bugs` physionet incumbent at one fixed sampling cell: **val CRPS 0.2673 (raw) vs
+0.2593 (EMA)**, i.e. 0.008 — larger than that campaign's entire 0.0014 tuning gain. All
+three still **default to `raw`** so previously published cells stay reproducible, so the
+underlying defect is unchanged and this entry stays OPEN. `llapdiff-t1-poles`,
+`llapdiff-t4-timing` and the H2 benchmark remain raw-only.
 
 **The `finetuning/` harness is only partly affected.** `eval_sampling.py` — the selection
 path — applies the EMA shadow correctly: it copies `payload["ema"]` onto the live model
@@ -678,7 +1224,12 @@ distinguishable from each other or from zero. **Do not read any single-run slope
 1. **Checkpoint freshness** (B3) — compare the `checkpoint` column's mtime in
    `chirp_benchmark_raw.csv` against the run time.
 2. **Artifact identity** (B4) — confirm `artifact_cache.json` matches the cache in use.
-3. **Gate 0** (B5) — `llapdiff-stage1-roundtrip` must exceed ~0.85 on the run's *own* cache.
+3. **Gate 0** (B5, B20) — `llapdiff-stage1-roundtrip` must exceed ~0.85 on the run's *own*
+   cache. It also runs on a real cell (`--dataset-key <ds> --pred <H>`, scored on val).
+   ⚠️ Compare the result against that dataset's **cross-entity mean share**, not against 0.85
+   alone: the mean-pooled VAE is pinned to that ceiling (B20), so a "failure" may be the panel
+   being idiosyncratic rather than the VAE being bad. Read `n` and the skipped-window count
+   too — PhysioNet scores on 29 % of its val windows, the rest being constant.
 4. **Modes alive** (B6/B7) — oscillating modes with `envelope_mass < 0.1` are dead; learned ρ
    more than ~10× the expected decay is a red flag; recovered ρ spanning exactly the init
    range means ρ is unidentified and the init is doing all the work.
@@ -744,10 +1295,12 @@ class they were trained in and still load under `strict=True`.
 | `tests/test_pole_init_horizon.py` | B6 |
 | `tests/test_pole_recovery.py` | B2, B14 |
 | `tests/test_chirp_modal.py` | B1 (`test_chirp_coeffs_receive_gradient_at_init`), bounds, LTI-equivalence |
-| `tests/test_stage1_roundtrip.py` | B5 / Gate 0 |
+| `tests/test_stage1_roundtrip.py` | B5 / Gate 0; B20 (constant-window filter, dataset-mode guards) |
 | `tests/test_synthetic_chirp_benchmark.py` | B3, B4 |
+| `tests/test_chirp_uq.py` | B16 (`--weights` on uq-eval and u1-sweep), mean-only reads without a UQ head |
 
-Run: `conda activate llapdiff && python -m pytest tests/ -q` → **378 passing**.
+Run: `python -m pytest tests/ -q` → **411 passing** (see `CLAUDE.md` for the venv +
+`PYTHONPATH` preamble; the `conda activate llapdiff` line is from the original environment).
 
 ---
 

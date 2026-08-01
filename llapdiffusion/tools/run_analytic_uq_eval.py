@@ -5,6 +5,13 @@ Loads a chirp+UQ checkpoint and reports:
 1. **Latent space** (the space where the law is exactly Gaussian): PIT calibration
    error, reliability (central-interval coverage), Gaussian NLL, mean RMSE — from
    one analytic read of N(mean, Var) at the test (or val) queries.
+
+   With ``--latent-only`` this also accepts a checkpoint **without** the UQ head: the
+   mean is still readable, so the mean-only metrics (``latent_rmse``, ``latent_mse``,
+   ``latent_corr`` against ``baseline_rmse_predict_mean`` / ``latent_target_std``) are
+   reported and everything requiring a variance is omitted. That is the read the
+   Phase-1 signal gate of ``w_docs/CMD_UQ_RECOVERY_PLAN.md`` needs, and it is taken on
+   a plain-MSE S1 arm, which by construction has no UQ head.
 2. **Data space** (default; disable with ``--latent-only``): CRPS/MAE/MSE of the
    analytic law propagated through the decoder — an ensemble of latent Gaussian
    draws, one decoder pass per draw, scored by the UNCHANGED
@@ -52,18 +59,15 @@ from llapdiffusion.tools.llapdiff_checkpoint_eval import build_eval_config
 from llapdiffusion.trainers import train_val_llapdiff as tv
 
 
-def prepare_eval_stack(cfg, ckpt_path, *, device: torch.device):
-    """Loaders + frozen stack for a checkpoint, mirroring evaluate_checkpoint's
-    preamble (predict-type + target metadata synced from the checkpoint, loaders
-    built with the resolved target columns). Returns (loaders, stack)."""
-    ckpt_path = Path(ckpt_path)
-    payload = torch.load(ckpt_path, map_location="cpu")
-    ce._apply_checkpoint_predict_type(cfg, payload, explicit_predict_type=None)
-    setattr(
-        cfg,
-        "CHECKPOINT_TARGET_METADATA_APPLIED",
-        ce._apply_checkpoint_target_metadata_if_unrequested(cfg, payload),
-    )
+def build_eval_loaders(cfg):
+    """Train/val/test loaders for an eval config, with the target artifact config synced.
+
+    Split out of ``prepare_eval_stack`` so a tool that needs the *data* but has no
+    diffusion checkpoint can reuse the same construction — ``llapdiff-stage1-roundtrip``
+    scores the frozen stage-1 VAE alone (Gate 0), which exists before any denoiser does.
+    Callers that do have a checkpoint must apply its predict-type/target metadata to
+    ``cfg`` BEFORE calling this, since the target columns feed the loaders.
+    """
     run_experiment = ce.resolve_run_experiment(cfg.DATA_DIR)
     batch_size = int(getattr(cfg, "BATCH_SIZE", getattr(cfg, "DATES_PER_BATCH", 1)))
     loaders = run_experiment(
@@ -82,6 +86,22 @@ def prepare_eval_stack(cfg, ckpt_path, *, device: torch.device):
         **dataloader_kwargs(cfg),
     )
     ce.sync_target_artifact_config(cfg, ce._target_policy(cfg), update_output_dirs=False)
+    return loaders
+
+
+def prepare_eval_stack(cfg, ckpt_path, *, device: torch.device):
+    """Loaders + frozen stack for a checkpoint, mirroring evaluate_checkpoint's
+    preamble (predict-type + target metadata synced from the checkpoint, loaders
+    built with the resolved target columns). Returns (loaders, stack)."""
+    ckpt_path = Path(ckpt_path)
+    payload = torch.load(ckpt_path, map_location="cpu")
+    ce._apply_checkpoint_predict_type(cfg, payload, explicit_predict_type=None)
+    setattr(
+        cfg,
+        "CHECKPOINT_TARGET_METADATA_APPLIED",
+        ce._apply_checkpoint_target_metadata_if_unrequested(cfg, payload),
+    )
+    loaders = build_eval_loaders(cfg)
     stack = ce._load_stack(cfg, ckpt_path, device, loaders[0])
     return loaders, stack
 
@@ -108,7 +128,9 @@ def _parse_args() -> argparse.Namespace:
                         help="Cap for the latent-space pass only; data space runs the full split.")
     parser.add_argument("--num-bins", type=int, default=20)
     parser.add_argument("--latent-only", action="store_true",
-                        help="Skip the data-space (decoder-propagated) evaluation.")
+                        help="Skip the data-space (decoder-propagated) evaluation. Also the "
+                             "mode that accepts a checkpoint without the UQ head, where only "
+                             "the mean-only latent metrics are defined (Phase-1 signal gate).")
     parser.add_argument("--skip-sampled", action="store_true",
                         help="Data space: skip the (expensive) sampled-diffusion baseline. "
                              "REQUIRED for a TRAIN_T_SAMPLER='max_only' checkpoint, where "
@@ -196,12 +218,26 @@ def _predict_mean_var(
     dt_model,
     mean_source: str,
     device: torch.device,
+    with_variance: bool = True,
 ):
+    """(mean, variance) under the requested mean source.
+
+    ``with_variance=False`` reads the mean alone, for a checkpoint built without the
+    Theorem-C UQ head (``LapFormer.forward`` raises on ``return_variance=True`` there).
+    The returned variance is then ``None`` and the caller must skip every
+    law-dependent metric. It also saves the extra t=1 forward in the ``ddim`` path.
+    """
     timesteps = int(diff_model.scheduler.timesteps)
     B = mu_shape[0]
     if mean_source == "oneshot":
         t = torch.full((B,), timesteps - 1, device=device, dtype=torch.long)
         x_t = torch.randn(mu_shape, device=device)
+        if not with_variance:
+            mean = diff_model(
+                x_t, t, cond_summary=cond_summary, cond_summary_raw=cond_summary_raw,
+                dt=dt_model,
+            )
+            return mean, None
         return diff_model(
             x_t, t, cond_summary=cond_summary, cond_summary_raw=cond_summary_raw,
             dt=dt_model, return_variance=True,
@@ -218,6 +254,8 @@ def _predict_mean_var(
         dt=dt_model,
         dynamic_thresh_p=float(sampling.get("dynamic_thresh_p", 0.0)),
     )
+    if not with_variance:
+        return mean, None
     t1 = torch.ones(B, device=device, dtype=torch.long)
     x_t1, _ = diff_model.scheduler.q_sample(mean, t1, torch.randn_like(mean))
     _, variance = diff_model(
@@ -240,10 +278,45 @@ def main() -> None:
     _, val_dl, test_dl, _ = loaders
     loader = val_dl if args.split == "val" else test_dl
     diff_model, vae, summarizer, mu_mean, mu_std = stack
-    if not bool(getattr(diff_model.model, "chirp_uq_head", False)):
+
+    # A checkpoint without the UQ head carries no predictive law, but its MEAN is still
+    # readable -- and the mean-only latent metrics (latent_rmse/latent_corr against
+    # baseline_rmse_predict_mean) are exactly the Phase-1 signal gate of
+    # w_docs/CMD_UQ_RECOVERY_PLAN.md, which is read on a plain-MSE S1 arm that by
+    # construction has no UQ head. Those metrics live only in this tool, so refusing
+    # the checkpoint outright made the gate unmeasurable. Everything that needs the
+    # variance is dropped rather than approximated, and the data-space arms -- which
+    # propagate the law through the decoder -- are still refused.
+    has_uq_head = bool(getattr(diff_model.model, "chirp_uq_head", False))
+    if not has_uq_head and not args.latent_only:
         raise ValueError(
-            "Checkpoint was not trained with CHIRP_UQ_HEAD=True; the analytic "
-            "Gaussian law is unavailable."
+            "Checkpoint was not trained with CHIRP_UQ_HEAD=True, so the analytic "
+            "Gaussian law is unavailable and the data-space analytic arm cannot be "
+            "computed. Pass --latent-only for the mean-only latent metrics "
+            "(latent_rmse, latent_mse, latent_corr, baseline_rmse_predict_mean, "
+            "latent_target_std), or use llapdiff-checkpoint-eval for plain sampled "
+            "forecast metrics."
+        )
+    if not has_uq_head:
+        print(
+            "[uq-eval] checkpoint has no UQ head: reporting mean-only latent metrics; "
+            "latent_gaussian_nll / pit_calibration_error / reliability / "
+            "mean_predicted_std are omitted."
+        )
+
+    # `oneshot` returns the network's RAW output, which is the x0 estimate only under
+    # predict_type='x0'; under 'v'/'eps' it is a different quantity entirely and
+    # latent_rmse would silently score it against x0 targets. This could not fire while
+    # the tool was UQ-only (chirp_uq_head forces x0), so it guards the path just opened.
+    # `ddim` is safe either way -- generate() converts through scheduler.to_x0.
+    checkpoint_predict_type = str(getattr(diff_model, "predict_type", "x0"))
+    if args.mean_source == "oneshot" and checkpoint_predict_type != "x0":
+        raise ValueError(
+            f"--mean-source oneshot reads the raw network output, which is an x0 "
+            f"estimate only for predict_type='x0'; this checkpoint is "
+            f"'{checkpoint_predict_type}', so the latent metrics would compare "
+            f"different quantities. Use --mean-source ddim (converts to x0 for any "
+            f"parameterization), or evaluate an x0 checkpoint."
         )
 
     # _load_stack (shared with u1/t1/t4/eval_sampling) deliberately loads payload["model"],
@@ -282,6 +355,7 @@ def main() -> None:
             dt_model=dt_model,
             mean_source=str(args.mean_source),
             device=device,
+            with_variance=has_uq_head,
         )
 
         mask = torch.as_tensor(obs_any, device=device, dtype=torch.bool)
@@ -290,7 +364,8 @@ def main() -> None:
         mask = mask.expand_as(mu_norm)
         ys.append(mu_norm[mask].detach().cpu())
         means.append(mean[mask].detach().cpu())
-        variances.append(variance[mask].detach().cpu())
+        if variance is not None:
+            variances.append(variance[mask].detach().cpu())
 
         batches += 1
         if args.max_batches is not None and batches >= int(args.max_batches):
@@ -300,9 +375,8 @@ def main() -> None:
         raise RuntimeError("No observed latent targets found on the selected split.")
     y = torch.cat(ys)
     mean = torch.cat(means)
-    var = torch.cat(variances)
+    var = torch.cat(variances) if variances else None
 
-    u = gaussian_pit(y, mean, var)
     report: Dict[str, object] = {
         "dataset_key": args.dataset_key,
         "pred": int(args.pred),
@@ -310,6 +384,8 @@ def main() -> None:
         "split": args.split,
         "mean_source": args.mean_source,
         "weights": args.weights,
+        # False => this is a mean-only read and every law-dependent key below is absent.
+        "has_uq_head": has_uq_head,
         "num_elements": int(y.numel()),
         # Trivial-predictor baselines, so latent_rmse is interpretable without assuming
         # the latents are unit-scale (they are not: std ~1.46 on physionet h=12).
@@ -317,15 +393,25 @@ def main() -> None:
         "baseline_rmse_predict_zero": float(y.pow(2).mean().sqrt().item()),
         "baseline_rmse_predict_mean": float((y - y.mean()).pow(2).mean().sqrt().item()),
         "latent_rmse": float((mean - y).pow(2).mean().sqrt().item()),
+        # Squared forms, reported alongside the RMSEs because the two quantities the
+        # plan reads them for are squared: the Phase-1 gate's "latent x0 MSE", and the
+        # Phase-3 residual scale that CHIRP_UQ_INIT_VAR must be initialised near (a
+        # VARIANCE -- confusing it with a std is the failure that phase exists to fix).
+        "latent_mse": float((mean - y).pow(2).mean().item()),
+        "baseline_mse_predict_mean": float((y - y.mean()).pow(2).mean().item()),
         "latent_corr": (
             float(torch.corrcoef(torch.stack([mean.reshape(-1), y.reshape(-1)]))[0, 1].item())
             if y.numel() > 1 else None
         ),
-        "latent_gaussian_nll": gaussian_nll(y, mean, var),
-        "pit_calibration_error": pit_calibration_error(u, num_bins=int(args.num_bins)),
-        "reliability": reliability_curve(u),
-        "mean_predicted_std": float(var.clamp_min(1e-6).sqrt().mean().item()),
     }
+    if var is not None:
+        u = gaussian_pit(y, mean, var)
+        report.update({
+            "latent_gaussian_nll": gaussian_nll(y, mean, var),
+            "pit_calibration_error": pit_calibration_error(u, num_bins=int(args.num_bins)),
+            "reliability": reliability_curve(u),
+            "mean_predicted_std": float(var.clamp_min(1e-6).sqrt().mean().item()),
+        })
 
     if not args.latent_only:
         # Data-space comparison: the analytic law propagated through the decoder

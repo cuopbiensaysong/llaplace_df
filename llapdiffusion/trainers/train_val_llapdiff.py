@@ -485,7 +485,11 @@ def _build_cond_summary(
         stats = _history_stat_tokens(V, T, mask_bn, device, dt=dt, x_obs_mask=x_obs_mask)
         cond_summary_raw = adapter(cond_summary_raw, stats)
     cond_summary = (
-        normalize_cond_per_batch(cond_summary_raw, mode=_resolve_cond_norm_mode(diff_model))
+        normalize_cond_per_batch(
+            cond_summary_raw,
+            mode=_resolve_cond_norm_mode(diff_model),
+            stats=_resolve_cond_norm_stats(diff_model),
+        )
         if norm
         else cond_summary_raw
     )
@@ -530,7 +534,11 @@ def _build_cond_summary_pair(
     # the legacy "batch" mode couples it to batch composition, which differs between
     # shuffled training batches and sequential eval batches (see normalize_cond_per_batch).
     cond_summary = (
-        normalize_cond_per_batch(cond_summary_raw, mode=_resolve_cond_norm_mode(diff_model))
+        normalize_cond_per_batch(
+            cond_summary_raw,
+            mode=_resolve_cond_norm_mode(diff_model),
+            stats=_resolve_cond_norm_stats(diff_model),
+        )
         if norm
         else cond_summary_raw
     )
@@ -1586,6 +1594,80 @@ def _resolve_cond_norm_mode(diff_model: Optional[nn.Module] = None) -> str:
     return str(mode)
 
 
+def _resolve_cond_norm_stats(
+    diff_model: Optional[nn.Module] = None,
+) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
+    """The fixed (mean, std) that ``COND_NORM_MODE="global"`` normalises with.
+
+    Stamped onto the model beside ``cond_norm_mode`` — from the checkpoint when rebuilding
+    one, else computed over train at the start of stage 3. Returns ``None`` for the other
+    modes, which do not use it.
+    """
+    return getattr(diff_model, "cond_norm_stats", None) if diff_model is not None else None
+
+
+@torch.no_grad()
+def compute_global_cond_stats(
+    summarizer: nn.Module,
+    diff_model: Optional[nn.Module],
+    train_dl,
+    device: torch.device,
+    *,
+    max_batches: Optional[int] = None,
+    verbose: bool = False,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Per-hidden-dim (mean, std) of the conditioning summary over the TRAIN split.
+
+    Reduced over windows and tokens, so the statistic is a property of the dataset rather
+    than of any batch or window — which is what makes ``"global"`` both batch-independent
+    (B15's requirement) and level-preserving (B21's).
+
+    ⚠️ Computed once, before training. With ``SUM_FT_MODE != "none"`` or a trainable
+    ``cond_adapter`` the producing modules move afterwards, so the statistic goes stale;
+    both are off by default and the combination is untested.
+    """
+    total = torch.zeros((), device=device, dtype=torch.float64)
+    s1 = s2 = None
+    for b, (xb, yb, meta) in enumerate(train_dl):
+        if max_batches is not None and b >= max_batches:
+            break
+        (V, T), _, mask_bn = _sanitize_batch(xb, yb, meta, device)
+        if not mask_bn.any():
+            continue
+        _, raw = _build_cond_summary_pair(
+            summarizer, diff_model, V, T, mask_bn, device,
+            dt=meta.get("delta_t"), x_obs_mask=meta.get("x_obs_mask"), norm=False,
+        )
+        flat = raw.reshape(-1, raw.shape[-1]).to(torch.float64)
+        s1 = flat.sum(0) if s1 is None else s1 + flat.sum(0)
+        s2 = (flat * flat).sum(0) if s2 is None else s2 + (flat * flat).sum(0)
+        total = total + flat.shape[0]
+    if s1 is None or float(total) <= 1:
+        raise RuntimeError(
+            "COND_NORM_MODE='global' could not compute conditioning statistics: the train "
+            "loader produced no usable batches."
+        )
+    mean = s1 / total
+    var = (s2 / total - mean * mean).clamp_min(0.0)
+    mean = mean.view(1, 1, -1).to(torch.float32)
+    std = var.sqrt().view(1, 1, -1).to(torch.float32)
+    if verbose:
+        print(f"[cond-norm] global stats over {int(total)} (window, token) rows: "
+              f"mean |.| {mean.abs().mean():.4f}, std {std.mean():.4f}")
+    return mean, std
+
+
+def _cond_norm_stats_from_checkpoint(
+    payload: object,
+) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
+    if not isinstance(payload, dict):
+        return None
+    stats = payload.get("cond_norm_stats")
+    if not stats:
+        return None
+    return (torch.as_tensor(stats["mean"]), torch.as_tensor(stats["std"]))
+
+
 def _llapdiff_model_config(config_obj: object) -> Dict[str, object]:
     return {
         "llapdiff": _llapdiff_model_kwargs(config_obj),
@@ -1666,6 +1748,14 @@ def build_llapdiff_model(
         str(getattr(config_obj, "COND_NORM_MODE", "sample"))
         if checkpoint_payload is None
         else _cond_norm_mode_from_checkpoint(checkpoint_payload)
+    )
+    # The "global" mode's fixed statistics ride with the mode. From the checkpoint when
+    # rebuilding one -- scoring with statistics other than the ones trained under would be
+    # the same class of train/eval mismatch as B15 and B22 -- else left None here and filled
+    # in by stage-3 setup, which computes them over train.
+    model.cond_norm_stats = (
+        None if checkpoint_payload is None
+        else _cond_norm_stats_from_checkpoint(checkpoint_payload)
     )
     adapter_cfg = _cond_adapter_config(config_obj)
     if adapter_cfg["mode"] == "stats":
@@ -2093,6 +2183,15 @@ def run(
     adapter_cfg = _cond_adapter_config(config)
     cond_adapter_mode = str(adapter_cfg["mode"])
     diff_model = build_llapdiff_model(config, device)
+
+    # COND_NORM_MODE="global" needs fixed statistics over the train split. Computed here,
+    # once, before any training step and before the precompute cache is consumed, so every
+    # epoch and every later evaluation share one definition of the conditioning scale.
+    if _resolve_cond_norm_mode(diff_model) == "global" and _resolve_cond_norm_stats(diff_model) is None:
+        diff_model.cond_norm_stats = compute_global_cond_stats(
+            laplace_summarizer, diff_model, train_dl, device,
+            verbose=bool(getattr(config, "VERBOSE", False)) or True,
+        )
 
     init_ckpt_raw = getattr(config, "DIFF_INIT_CKPT", None)
     init_ckpt_path = None
@@ -2759,6 +2858,24 @@ def run(
             "summ_ft_skipped_nonfinite_grad_steps": int(skipped_summary_ft_nonfinite_grad_steps),
             "summ_max_nonfinite_grad_steps": int(max_summary_nonfinite_grad_steps),
         }
+        # SUM_FT_MODE != "none" mutates the summarizer during stage 3, but the summarizer is
+        # loaded at eval from config.SUM_CKPT -- the ORIGINAL frozen file, which this trainer
+        # never writes. Without persisting it here the denoiser is trained against one
+        # conditioning encoder and scored against another, silently (B22), and the fine-tuned
+        # weights are lost when the process exits. Saved only when fine-tuning is actually
+        # active: these state dicts run 21 MB (noaa_uk) to 1.1 GB (us_equity), so attaching
+        # one to every checkpoint would be a large regression for the default path.
+        if sum_ft_named_params:
+            payload["summarizer"] = laplace_summarizer.state_dict()
+            payload["sum_ft_mode"] = str(sum_ft_mode)
+        # The "global" normalisation is defined by its statistics; scoring under different
+        # ones is the B15/B22 mismatch again, so they travel with the checkpoint.
+        _cn_stats = _resolve_cond_norm_stats(diff_model)
+        if _cn_stats is not None:
+            payload["cond_norm_stats"] = {
+                "mean": _cn_stats[0].detach().cpu(),
+                "std": _cn_stats[1].detach().cpu(),
+            }
         payload.update(extra)
         return payload
 

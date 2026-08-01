@@ -518,7 +518,10 @@ def _broadcast_norm_stats(stats: torch.Tensor, ref: torch.Tensor) -> torch.Tenso
 
 
 def normalize_cond_per_batch(
-    cs: torch.Tensor, eps: float = 1e-6, mode: str = "batch"
+    cs: torch.Tensor,
+    eps: float = 1e-6,
+    mode: str = "batch",
+    stats: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
 ) -> torch.Tensor:
     """z-score the conditioning summary for each feature dim; keeps gradients.
 
@@ -533,9 +536,34 @@ def normalize_cond_per_batch(
 
     ``mode="sample"`` reduces over S only, so the result is a function of the window alone
     and train/eval are identical by construction.
+
+    ``mode="global"`` applies FIXED statistics precomputed once over the training split
+    (``stats=(mean, std)``, each broadcastable to ``cs``). It is batch-independent like
+    ``"sample"`` -- so it satisfies the requirement B15 was introduced for -- but it does
+    NOT subtract a per-window mean, so the window's absolute LEVEL survives. That matters:
+    ``"sample"`` provably erases it (measured on noaa_uk, the across-window std of the
+    per-window mean of the normalised summary is exactly 0.0), and on a seasonal target the
+    discarded component is more linearly decodable than the part that is kept (B21).
+    Unlike feeding ``cond_summary_raw`` straight through (``COND_POOL_USE_RAW``, which
+    stalled training on a scale problem), the output here is unit-scaled.
     """
-    if mode not in ("batch", "sample"):
-        raise ValueError(f"Unknown cond norm mode '{mode}'. Use 'batch' or 'sample'.")
+    if mode not in ("batch", "sample", "global"):
+        raise ValueError(
+            f"Unknown cond norm mode '{mode}'. Use 'batch', 'sample', or 'global'."
+        )
+    if mode == "global":
+        if stats is None:
+            # Fail loudly: silently falling back to a per-window statistic would recreate
+            # exactly the level erasure this mode exists to avoid, with no visible symptom.
+            raise ValueError(
+                "cond norm mode 'global' requires precomputed (mean, std) statistics; "
+                "none were supplied. They are computed once over the train split at the "
+                "start of stage 3 and persisted in the checkpoint."
+            )
+        mean, std = stats
+        mean = mean.to(device=cs.device, dtype=cs.dtype)
+        std = std.to(device=cs.device, dtype=cs.dtype)
+        return (cs - mean) / (std + eps)
     dims = (0, 1) if mode == "batch" else (1,)
     m = cs.mean(dim=dims, keepdim=True)
     v = cs.var(dim=dims, keepdim=True, unbiased=False)

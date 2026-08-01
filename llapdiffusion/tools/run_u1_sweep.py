@@ -5,9 +5,15 @@ that reshape the predictive distribution without retraining) and logs the dynami
 threshold clip rate per cell. Selection stays on val — test is touched once, later,
 with the chosen configuration (pre-registration rule).
 
+⚠️ Pass ``--weights ema``. Like every other ``_load_stack`` consumer this tool reads
+``payload["model"]``, which holds RAW weights even inside ``llapdiff_*_best_ema.pt``
+(bug B16) -- so the default ``raw`` would freeze the guidance choice on weights no
+other phase of the campaign uses. The default is kept at ``raw`` only so previously
+recorded U1 cells stay reproducible; the choice is recorded in every output row.
+
 Run:
   llapdiff-u1-sweep --dataset-key physionet --pred 12 --checkpoint <ckpt> \
-      --guidance 1.0 1.25 1.5 2.0 --steps 16 32 64
+      --guidance 1.0 1.25 1.5 2.0 --steps 16 32 64 --weights ema
 """
 
 from __future__ import annotations
@@ -21,7 +27,7 @@ from typing import Dict, List, Optional
 import torch
 
 from llapdiffusion.models.llapdiff_utils import set_torch
-from llapdiffusion.tools.llapdiff_checkpoint_eval import build_eval_config
+from llapdiffusion.tools.llapdiff_checkpoint_eval import _apply_ema_weights, build_eval_config
 from llapdiffusion.tools.run_analytic_uq_eval import prepare_eval_stack
 from llapdiffusion.tools.run_synthetic_regime_shift import _write_rows
 from llapdiffusion.trainers import train_val_llapdiff as tv
@@ -45,6 +51,18 @@ def _parse_args() -> argparse.Namespace:
                         help="Override the thresholding clamp ceiling (default: config, 1.0).")
     parser.add_argument("--split", choices=("val", "test"), default="val",
                         help="Keep 'val' for tuning; 'test' only for the single final read.")
+    parser.add_argument(
+        "--weights", choices=("raw", "ema"), default="raw",
+        help=(
+            "Which weights to score. 'raw' (default) keeps the historical behaviour: "
+            "_load_stack reads payload['model'], which holds RAW weights even in "
+            "llapdiff_*_best_ema.pt (that file differs only in which val metric selected "
+            "the epoch -- bug B16). 'ema' transplants payload['ema'] onto the live "
+            "parameters, matching the training/finetuning protocol (EMA decay 0.999). "
+            "Pass 'ema' for any campaign run: freezing guidance on raw weights picks the "
+            "setting for a model no other phase evaluates. Recorded in every output row."
+        ),
+    )
     parser.add_argument("--output-root", type=str,
                         default=str(Path.cwd() / "ldt" / "results" / "u1_sweep"))
     parser.add_argument("--verbose", action="store_true")
@@ -73,6 +91,17 @@ def main() -> None:
     loader = val_dl if args.split == "val" else test_dl
     diff_model, vae, summarizer, mu_mean, mu_std = stack
 
+    # _load_stack (shared with uq-eval/t1/t4/eval_sampling) deliberately loads
+    # payload["model"], i.e. RAW weights. Apply the EMA shadow here, reusing the
+    # alias-proof named_parameters() transplant -- LapFormer aliases analysis.* as
+    # synthesis.encoder.*, so a key-wise state_dict merge would leave the alias raw.
+    if args.weights == "ema":
+        replaced = _apply_ema_weights(diff_model, torch.load(args.checkpoint, map_location="cpu"))
+        print(f"[u1-sweep] applied the EMA shadow to {replaced} parameters")
+    else:
+        print("[u1-sweep] scoring RAW weights (--weights raw). Every other phase of the "
+              "campaign uses EMA; pass --weights ema to match it.")
+
     base_sampling = tv._sampling_kwargs(cfg, prefix="TEST")
     rows: List[Dict[str, object]] = []
     for w in args.guidance:
@@ -100,6 +129,7 @@ def main() -> None:
                     "guidance": float(w),
                     "steps": int(steps),
                     "split": args.split,
+                    "weights": args.weights,
                     "dynamic_thresh_p": float(sampling.get("dynamic_thresh_p", 0.0)),
                     "crps": _metric(payload, "crps"),
                     "mae": _metric(payload, "mae"),
@@ -115,13 +145,18 @@ def main() -> None:
                   f"clip_frac={rows[-1]['clip_fraction_mean']:.4g}")
 
     result_root = Path(args.output_root).resolve()
-    tag = f"{args.dataset_key}_h{int(args.pred)}_{Path(args.checkpoint).stem}_{args.split}"
+    # The weight source is part of the tag: raw and ema sweeps of the SAME checkpoint
+    # are different results and must not overwrite each other.
+    tag = (f"{args.dataset_key}_h{int(args.pred)}_{Path(args.checkpoint).stem}"
+           f"_{args.split}_{args.weights}")
     _write_rows(rows, result_root / f"{tag}.csv", result_root / f"{tag}.json")
     (result_root / f"{tag}_meta.json").write_text(
         __import__("json").dumps(
             {
                 "created_at_utc": datetime.now(timezone.utc).isoformat(),
                 "checkpoint": str(args.checkpoint),
+                "split": args.split,
+                "weights": args.weights,
                 "grid": {"guidance": list(map(float, args.guidance)),
                          "steps": list(map(int, args.steps))},
             },

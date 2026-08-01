@@ -378,12 +378,24 @@ def _load_stack(
         rope_base=float(getattr(cfg, "SUM_ROPE_BASE", 10000.0)),
         channel_balanced_x_loss=bool(getattr(cfg, "SUM_CHANNEL_BALANCED_X_LOSS", False)),
     ).to(device)
-    sum_state = torch.load(cfg.SUM_CKPT, map_location=device)
-    tv._load_module_state(
-        summarizer,
-        sum_state["model"] if isinstance(sum_state, dict) and "model" in sum_state else sum_state,
-        strict=True,
-    )
+    # A checkpoint trained with SUM_FT_MODE != "none" carries its OWN fine-tuned summarizer,
+    # and it must win over cfg.SUM_CKPT: the denoiser was trained against that encoder, so
+    # reloading the original shared file would score a train/eval mismatch (B22). Absent the
+    # key -- every checkpoint predating the fix, and every SUM_FT_MODE="none" run -- fall back
+    # to the shared frozen artifact, which is the historical behaviour.
+    finetuned_summarizer = payload.get("summarizer") if isinstance(payload, dict) else None
+    if finetuned_summarizer:
+        tv._load_module_state(summarizer, finetuned_summarizer, strict=True)
+        if verbose:
+            print(f"[eval] using the checkpoint's fine-tuned summarizer "
+                  f"(sum_ft_mode={payload.get('sum_ft_mode', '?')}), not {cfg.SUM_CKPT}")
+    else:
+        sum_state = torch.load(cfg.SUM_CKPT, map_location=device)
+        tv._load_module_state(
+            summarizer,
+            sum_state["model"] if isinstance(sum_state, dict) and "model" in sum_state else sum_state,
+            strict=True,
+        )
     summarizer.eval()
 
     validate_checkpoint_target_metadata(payload, cfg, context="LLapDiff")

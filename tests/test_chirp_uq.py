@@ -397,3 +397,120 @@ def test_pit_metrics_calibrated_vs_overconfident():
     mask = torch.zeros(n, dtype=torch.bool)
     mask[: n // 2] = True
     assert gaussian_pit(y, mean, var, mask=mask).shape == (n // 2,)
+
+
+# --------------------------------------------------------------------------------
+# Mean-only reads on a checkpoint WITHOUT the UQ head (the Phase-1 signal gate of
+# w_docs/CMD_UQ_RECOVERY_PLAN.md, which is taken on a plain-MSE S1 arm).
+# --------------------------------------------------------------------------------
+
+
+def _mean_only_model(predict_type="x0", **kwargs):
+    """A chirp model with NO UQ head — what the S1 gate arm actually is."""
+    return LLapDiff(
+        data_dim=8, hidden_dim=32, num_layers=2, num_heads=4, laplace_k=4,
+        timesteps=50, predict_type=predict_type, denoiser_modal_type="chirp",
+        **kwargs,
+    )
+
+
+@pytest.mark.parametrize("mean_source", ["oneshot", "ddim"])
+def test_predict_mean_var_reads_the_mean_without_a_uq_head(mean_source):
+    """`with_variance=False` must read the mean off a no-UQ-head checkpoint.
+
+    The gate metrics (latent_rmse/latent_corr vs baseline_rmse_predict_mean) live only
+    in this tool, and the model it is read on has no predictive law — so asking for the
+    variance is not merely unnecessary, it raises. Without this path the campaign's
+    decision point has no runnable measurement.
+    """
+    from llapdiffusion.tools import run_analytic_uq_eval as uq
+
+    torch.manual_seed(0)
+    model = _mean_only_model().eval()
+    B, T, D = 2, 5, 8
+    cond = torch.randn(B, 4, 32)
+    dt = torch.sort(torch.rand(B, T), dim=1).values
+
+    mean, variance = uq._predict_mean_var(
+        model, SimpleNamespace(TEST_STEPS=2),
+        mu_shape=(B, T, D), cond_summary=cond, cond_summary_raw=cond,
+        dt_model=dt, mean_source=mean_source, device=torch.device("cpu"),
+        with_variance=False,
+    )
+    assert variance is None, "no UQ head => no predictive law to report"
+    assert mean.shape == (B, T, D) and torch.isfinite(mean).all()
+
+
+def test_variance_request_still_raises_without_a_uq_head():
+    """Pins WHY with_variance exists: the model refuses return_variance=True."""
+    torch.manual_seed(0)
+    model = _mean_only_model().eval()
+    B, T, D = 2, 5, 8
+    cond = torch.randn(B, 4, 32)
+    with pytest.raises(RuntimeError, match="chirp_uq_head"):
+        model(
+            torch.randn(B, T, D), torch.zeros(B, dtype=torch.long),
+            cond_summary=cond, cond_summary_raw=cond,
+            dt=torch.sort(torch.rand(B, T), dim=1).values,
+            return_variance=True,
+        )
+
+
+def test_mean_only_report_drives_the_u3_gates_safely():
+    """A mean-only report must read G-c correctly and FAIL G-b, never pass it.
+
+    The law-dependent keys are OMITTED rather than set to None, so `report.get(k, nan)`
+    in run_u3_uq.py yields nan and the NLL-health gate fails closed. Setting them to
+    None instead would raise TypeError in float(); returning defaults would let a
+    checkpoint with no calibration at all report a passing calibration gate.
+    """
+    import importlib.util
+    import pathlib
+    import sys
+
+    from llapdiffusion.tools import run_analytic_uq_eval as uq
+
+    finetuning = pathlib.Path(uq.__file__).resolve().parents[2] / "finetuning"
+    sys.path.insert(0, str(finetuning))
+    try:
+        spec = importlib.util.spec_from_file_location("_u3", finetuning / "run_u3_uq.py")
+        u3 = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(u3)
+    finally:
+        sys.path.remove(str(finetuning))
+
+    mean_only = {
+        "has_uq_head": False,
+        "latent_rmse": 1.2,
+        "latent_mse": 1.44,
+        "baseline_rmse_predict_mean": 1.46,
+        "baseline_mse_predict_mean": 2.13,
+        "latent_target_std": 1.46,
+        "latent_corr": 0.31,
+    }
+    # G-c is mean-only by construction, so it reads a mean-only report unchanged.
+    assert u3._gate_c(mean_only)["verdict"].startswith("PASS")
+    losing = {**mean_only, "latent_rmse": 2.4}
+    assert u3._gate_c(losing)["verdict"].startswith("CONFOUNDED")
+
+    # G-b needs calibration it cannot have here: it must fail, not pass, and not crash.
+    assert u3._gate_b(mean_only)["verdict"].startswith("FAIL")
+
+
+def test_u1_sweep_exposes_a_weights_flag_defaulting_to_raw():
+    """Guards bug B16 in the guidance audit: the sweep loads payload['model'] (RAW)
+    even from *_best_ema.pt, so freezing guidance without --weights ema picks the
+    setting for weights no other phase of the campaign evaluates."""
+    import sys
+
+    from llapdiffusion.tools import run_u1_sweep
+
+    argv = sys.argv
+    sys.argv = ["llapdiff-u1-sweep", "--dataset-key", "physionet", "--pred", "12",
+                "--checkpoint", "x.pt"]
+    try:
+        assert run_u1_sweep._parse_args().weights == "raw"  # historical default
+        sys.argv = argv[:0] + sys.argv + ["--weights", "ema"]
+        assert run_u1_sweep._parse_args().weights == "ema"
+    finally:
+        sys.argv = argv

@@ -79,6 +79,7 @@ Installed console scripts (from `pyproject.toml`):
 | `llapdiff-artifact-prep`    | `llapdiffusion.tools.run_multidataset_artifact_prep:main` |
 | `llapdiff-synthetic-regime` | `llapdiffusion.tools.run_synthetic_regime_shift:main`     |
 | `llapdiff-synthetic-chirp`  | `llapdiffusion.tools.run_synthetic_chirp_benchmark:main`  |
+| `llapdiff-stage1-roundtrip` | `llapdiffusion.tools.run_stage1_roundtrip:main`           |
 | `llapdiff-uq-eval`          | `llapdiffusion.tools.run_analytic_uq_eval:main`           |
 | `llapdiff-u1-sweep`         | `llapdiffusion.tools.run_u1_sweep:main`                   |
 | `llapdiff-t1-poles`         | `llapdiffusion.tools.run_t1_pole_invariance:main`         |
@@ -787,6 +788,33 @@ recorded in the cache `meta.json`. If you change `--gap-mean` away from 1.0,
 also set `CHIRP_TIME_SCALE ≈ PRED·gap_mean` in `configs/config.py` so the chirp
 basis window matches the horizon's actual time span.
 
+### 5.14b Stage-1 round-trip ("Gate 0")
+
+Encodes the true targets through the trained set-VAE and decodes them straight back — no
+forecasting — and reports the correlation with the originals. That correlation is the
+**upper bound on any denoiser built on that VAE**, so it is the first thing to check before
+trusting a downstream number (H2 silently sat under a 0.62 ceiling for exactly this
+reason). PASS/FAIL against `--threshold` (default 0.85); exits non-zero on failure.
+
+```bash
+# a real dataset, against its preset's frozen stage-1 VAE (run artifact-prep first)
+llapdiff-stage1-roundtrip --dataset-key noaa_uk --pred 168
+
+# the synthetic chirp benchmark, addressed like the benchmark's own caches
+llapdiff-stage1-roundtrip --tasks synthetic_linear_chirp --seeds 0 \
+  --sweep-period 144 --phase-spread 0.393 \
+  --artifact-root ldt/synthetic_artifacts/chirp_benchmark
+```
+
+The two modes are mutually exclusive and the synthetic geometry flags (`--phase-spread`,
+`--sweep-period`, `--freq-multiplier`, …) are **rejected** rather than ignored in dataset
+mode, since they define the synthetic data and mean nothing for a preset. `--split`
+defaults to `val` for a dataset (gates and diagnostics run on val) and `test` for tasks
+(historical); `--max-batches` defaults to 2. Entity-windows whose target is constant — so
+the correlation is undefined — are skipped and reported as `n_degenerate`; read `n`
+alongside `corr`, because a cell scored on a minority of its split is telling you about
+that minority.
+
 ### 5.15 Analytic UQ (Theorem C) and sampling sweeps
 
 The chirp core optionally predicts a **closed-form Gaussian predictive law** in
@@ -822,6 +850,18 @@ tool's historical behaviour, but it is almost never what you want: this tool loa
 metric selected the epoch). Pass `--weights ema` to match the training/finetuning protocol.
 The choice is recorded in the report JSON.
 
+**Mean-only mode (no UQ head).** With `--latent-only` the tool also accepts a checkpoint
+trained *without* `CHIRP_UQ_HEAD` — a plain-MSE arm. It then reports the mean-only latent
+metrics (`latent_rmse`, `latent_mse`, `latent_corr`, `baseline_rmse_predict_mean`,
+`baseline_mse_predict_mean`, `latent_target_std`), stamps `has_uq_head: false` in the
+report, and omits everything requiring a predictive law (`latent_gaussian_nll`,
+`pit_calibration_error`, `reliability`, `mean_predicted_std`). The data-space arms still
+refuse such a checkpoint: they propagate the Theorem-C law through the decoder and there is
+no law. This is the read the Phase-1 signal gate of `w_docs/CMD_UQ_RECOVERY_PLAN.md` takes.
+Note `--mean-source oneshot` returns the network's raw output, which is an `x0` estimate
+only under `--predict-type x0`; it refuses any other parameterization, whereas
+`--mean-source ddim` converts through `scheduler.to_x0` and is always safe.
+
 which reports latent PIT calibration error, a reliability (coverage) curve,
 Gaussian NLL, and mean RMSE, using either a single one-shot forward
 (`--mean-source oneshot`, default) or the deterministic DDIM mean
@@ -837,8 +877,14 @@ MSE for both arms, wall-clock seconds, and `analytic_speedup_x`. Control with
 
 ```bash
 llapdiff-u1-sweep --dataset-key physionet --pred 12 --checkpoint <ckpt> \
-  --guidance 1.0 1.25 1.5 2.0 --steps 16 32 64
+  --guidance 1.0 1.25 1.5 2.0 --steps 16 32 64 --weights ema
 ```
+
+⚠️ `llapdiff-u1-sweep` carries the same `--weights {raw,ema}` flag and the same B16 trap as
+`llapdiff-uq-eval`: it loads through `_load_stack`, so the default `raw` sweeps weights no
+other phase evaluates (measured 0.008 val CRPS apart on one fixed cell). The weight source
+is recorded in every row and is part of the output filename, so raw and EMA sweeps of the
+same checkpoint no longer overwrite each other.
 
 (per-cell CRPS/MAE/MSE plus the dynamic-threshold clip fraction; add
 `--dynamic-thresh-p 0.995` [and optionally `--dynamic-thresh-max`] to run the

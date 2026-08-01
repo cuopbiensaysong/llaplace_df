@@ -375,3 +375,64 @@ def test_cond_norm_mode_is_persisted_and_defaults_to_legacy():
     assert _resolve_cond_norm_mode(SimpleNamespace(cond_norm_mode="sample")) == "sample"
     # ...and with no model (or an unstamped one) it falls back to the config
     assert _resolve_cond_norm_mode(None) == str(base_config.COND_NORM_MODE)
+
+
+def test_global_cond_norm_preserves_level_and_stays_unit_scaled():
+    """`COND_NORM_MODE="global"` must keep what "sample" provably erases.
+
+    "sample" subtracts a per-window mean, so the window's absolute LEVEL is projected out —
+    measured on noaa_uk, the across-window std of the per-window mean is exactly 0.0, and
+    the discarded component is more linearly decodable than the part kept (B21). "global"
+    uses fixed train statistics: still batch-independent (B15's requirement) but
+    level-preserving, and unlike raw `cond_summary_raw` it stays unit-scaled — feeding the
+    unscaled tensor in is what stalled training under `COND_POOL_USE_RAW`.
+    """
+    from llapdiffusion.models.llapdiff_utils import normalize_cond_per_batch
+
+    torch.manual_seed(0)
+    B, S, H = 6, 20, 8
+    level = torch.arange(B, dtype=torch.float32).view(B, 1, 1) * 3.0
+    cs = level + torch.randn(B, S, H)
+    flat = cs.reshape(-1, H)
+    stats = (flat.mean(0).view(1, 1, H), flat.std(0).view(1, 1, H))
+
+    per_window_level = lambda z: z.mean(dim=1).std(dim=0).mean().item()
+
+    sample_out = normalize_cond_per_batch(cs, mode="sample")
+    assert per_window_level(sample_out) == pytest.approx(0.0, abs=1e-6)  # erased, by construction
+
+    global_out = normalize_cond_per_batch(cs, mode="global", stats=stats)
+    assert per_window_level(global_out) > 0.5          # level survives
+    assert 0.5 < float(global_out.std()) < 2.0         # and stays on a sane scale
+
+    # It must be a pure function of the window: batch composition cannot change it (B15).
+    subset = normalize_cond_per_batch(cs[:3], mode="global", stats=stats)
+    torch.testing.assert_close(subset, global_out[:3])
+
+    # No statistics => fail loudly. Falling back to a per-window statistic would silently
+    # re-erase the level with no visible symptom.
+    with pytest.raises(ValueError, match="requires precomputed"):
+        normalize_cond_per_batch(cs, mode="global")
+
+
+def test_global_cond_norm_stats_travel_with_the_checkpoint():
+    """Scoring under statistics other than the ones trained with is the B15/B22 mismatch."""
+    from types import SimpleNamespace
+
+    from llapdiffusion.trainers.train_val_llapdiff import (
+        _cond_norm_stats_from_checkpoint,
+        _resolve_cond_norm_stats,
+    )
+
+    mean, std = torch.randn(1, 1, 8), torch.rand(1, 1, 8) + 0.5
+    payload = {"cond_norm_stats": {"mean": mean, "std": std}}
+    got = _cond_norm_stats_from_checkpoint(payload)
+    torch.testing.assert_close(got[0], mean)
+    torch.testing.assert_close(got[1], std)
+
+    # Checkpoints from every other mode carry nothing, and must resolve to None rather
+    # than to some default that would silently change the normalisation.
+    assert _cond_norm_stats_from_checkpoint({}) is None
+    assert _cond_norm_stats_from_checkpoint({"cond_norm_stats": None}) is None
+    assert _resolve_cond_norm_stats(None) is None
+    assert _resolve_cond_norm_stats(SimpleNamespace()) is None

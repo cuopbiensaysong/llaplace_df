@@ -92,6 +92,33 @@ def test_evaluate_regression_num_samples_defaults_to_config():
     assert signature.parameters["num_samples"].default is None
 
 
+def test_finetuned_summarizer_is_persisted_and_preferred_at_eval():
+    """B22: SUM_FT_MODE mutates the summarizer in stage 3, but eval reloads it from
+    cfg.SUM_CKPT -- the original shared file, which the trainer never writes. Without
+    persisting it, the denoiser is trained against one conditioning encoder and scored
+    against another, silently, and the fine-tuned weights are lost at process exit.
+
+    Source-level pin: it guards the two call sites that would regress silently. It does
+    not exercise a real fine-tuning run.
+    """
+    import pathlib
+
+    root = pathlib.Path(tv.__file__).resolve().parents[2]
+    trainer = (root / "llapdiffusion/trainers/train_val_llapdiff.py").read_text()
+    evaluator = (root / "llapdiffusion/tools/llapdiff_checkpoint_eval.py").read_text()
+
+    # 1. The trainer saves it, and only when fine-tuning is actually on (these state dicts
+    #    reach 1.1 GB on us_equity, so the default path must not carry one).
+    assert 'payload["summarizer"] = laplace_summarizer.state_dict()' in trainer
+    assert "if sum_ft_named_params:" in trainer
+
+    # 2. Eval prefers the checkpoint's copy over the shared frozen artifact.
+    assert 'payload.get("summarizer")' in evaluator
+    marker = evaluator.index('payload.get("summarizer")')
+    fallback = evaluator.index("torch.load(cfg.SUM_CKPT", marker)
+    assert marker < fallback, "the checkpoint's summarizer must be consulted BEFORE SUM_CKPT"
+
+
 # --------------------------------------------------------------------- eval subsets
 def test_strided_subset_spans_the_split_while_prefix_truncates():
     assert prefix_indices(146, 48) == list(range(48))
