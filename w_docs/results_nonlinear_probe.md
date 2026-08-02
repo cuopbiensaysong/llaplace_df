@@ -621,6 +621,75 @@ But they also pre-registered that **a null is ambiguous** — and a null is what
 more plausible target, and 1a costs minutes. If a cross-check cell is wanted, test the shorter
 horizons before abandoning the dataset.
 
+### 9.9 Horizon sweep — bms_air is not forecastable at **any** supported horizon
+
+The §9.7 recommendation (try a shorter horizon) has now been tested, at the human's direction.
+**A only** — B and C would need stage-1/2 artifacts that exist for h=168 only, and building them
+would mean training into the shared `ldt/vae/**` and `ldt/summarizer/**` surface. A needs no
+model at all, and A is the gate that fails, so the question is answerable without that.
+
+Well-powered cells only (alpha-fit set ≥ 20 % of train — see §9.10):
+
+| horizon | best A | at | full panel n=12 | other well-powered cells |
+|---|---|---|---|---|
+| **24** | **+1.8 %** | n=1 (8 874/2 034) | **−2.8 %** (13 514/1 372) | n=11 +1.7 % |
+| 48 | +0.5 % | n=1 (15 185/3 528) | −2.8 % (9 979/544) | n=10 −0.3 %, n=11 −6.3 % |
+| 96 | 0.0 % | n=1 (24 084/5 099) | — (146 val, thin) | n=10 −1.2 %, n=11 −1.8 % |
+| 168 | −0.3 % | n=1 (30 359/5 855) | n/a (23 val) | — |
+
+**Best value anywhere across four horizons and every entity count: +1.8 %, against a 10 % gate.**
+Monotone decline with horizon (1.8 → 0.5 → 0.0 → −0.3), which is the physically expected shape
+for PM2.5 and further evidence this is a property of the target rather than of the pipeline.
+
+**A side benefit: the h=168 mode-1 anomaly is now explained.** At h=24 the modal entity count is
+**12** — the full panel — not 1. The fully-observed-target filter over 24 steps is far less
+restrictive than over 168. So bms_air's mode-1 at h=168 was an artefact of requiring 168
+consecutive fully-observed steps across all stations, not a standing property of the dataset.
+That also means the **matched full-panel cell that was infeasible at h=168 (23 val windows) is
+well-powered at h=24 (13 514/1 372)** — and it reads **−2.8 %**. So the full-panel measurement
+that §9.1 could not obtain now exists, and it agrees.
+
+⇒ bms_air cannot serve as the Phase-2 cross-check at **any** of its horizons. This is settled,
+not a "try the next horizon" situation.
+
+### 9.10 🔴 A defect in `ridge_reduction` — introduced by my own §2 proposal
+
+Found by a crash while running h=96. **`TypeError: unsupported operand type(s) for +: 'float'
+and 'NoneType'`** at `W = V @ (RV / (lam + best[0])[:, None])`.
+
+**Cause.** `blocked_purged_split(n, n_blocks=15, holdout=(3,8,13), purge=WINDOW)` bans up to
+`2 × 3 × purge` windows around the holdout blocks. At `purge=336` that is ~2 016 windows, so on
+a small train set the **alpha-selection fit set collapses** — to exactly **zero** at
+n_train ≈ 1 420 (bms_air h=96, n=7). `best` then stays `(None, inf)` and the failure surfaces as
+a TypeError deep inside rather than as a clear error.
+
+**This is a regression from the fix I proposed in §2.** The original `cut = max(1, int(0.8*n))`
+always left ≥ 80 % of train for fitting; blocked+purged has no such floor. I proposed it without
+a small-n guard and agent-A adopted it, so this is mine.
+
+**Severity is bounded — the final model is unaffected.** `ridge_reduction` fits the reported
+model on the **full** train set (`fit(Xtr, ytr)`); only **alpha** is chosen on the split. So a
+thin fit degrades alpha selection, not the fit. Measured fit fractions:
+
+| cell | n_train | alpha-fit n | fit % | status |
+|---|---|---|---|---|
+| noaa_uk h168 n=4 | 14 446 | 9 541 | 66 % | ok — **all §1–§8 results unaffected** |
+| bms_air h168 n=1 | 30 359 | 22 271 | 73 % | ok — the primary cell |
+| bms_air h24 n=1 / n=12 | 8 874 / 13 514 | 5 082 / 8 795 | 57 / 65 % | ok |
+| bms_air h48 n=1 / n=12 | 15 185 / 9 979 | 10 132 / 5 967 | 67 / 60 % | ok |
+| **bms_air h168 n=8** | 2 596 | **223** | **9 %** | ⚠ my §9.2 secondary row |
+| bms_air h24 n=10 | 2 477 | 159 | 6 % | ⚠ |
+| bms_air h48 n=9 | 1 888 | 41 | 2 % | ⚠ |
+| bms_air h96 n=7 | 1 420 | **0** | 0 % | 🔴 crashes |
+
+**Every cell carrying a conclusion is sound** (≥ 57 % fit). The affected rows are all secondary
+and all already ≈ 0, and a mis-chosen alpha can only depress a reduction, so no verdict moves.
+**Retracted as unreliable: the n=8 h=168 row (−4.6 %), h24 n=10 (+1.3 %), h48 n=9 (−1.2 %).**
+
+Rule of thumb for the tool: with `purge=WINDOW`, `ridge_reduction` needs roughly
+**n_train ≳ 10 × purge** for a healthy alpha-selection fit. A guard belongs in the repo; I did
+not add one, because agent-A owns that file.
+
 ### 9.8 Not established here
 
 - **Shorter bms_air horizons untested** (24/48/96) — the recommendation above is untested.

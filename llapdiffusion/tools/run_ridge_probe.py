@@ -152,7 +152,8 @@ def _collect(dl, stack, device, *, history_steps: int, entities: Optional[int]):
     return keep, tuple(torch.stack(z) for z in bags[keep])
 
 
-def blocked_purged_split(n: int, *, n_blocks: int = 15, holdout=(3, 8, 13), purge: int = 0):
+def blocked_purged_split(n: int, *, n_blocks: int = 15, holdout=(3, 8, 13), purge: int = 0,
+                         min_fit_frac: float = 0.5):
     """Fit/holdout indices for selection INSIDE train, without a regime confound.
 
     The obvious choice — the chronological last 20 % of train — is pathological on a
@@ -169,23 +170,51 @@ def blocked_purged_split(n: int, *, n_blocks: int = 15, holdout=(3, 8, 13), purg
     the loaders' own ``global_purged_horizon`` policy. Pass ``purge=WINDOW``.
 
     Credit: diagnosed by a second agent while probing B21 (`w_docs/results_nonlinear_probe.md` §2).
+
+    🔴 **Small-n guard.** Purging around three blocks bans up to ``2 * len(holdout) * purge``
+    windows, and unlike the trailing-20 % rule this has **no floor**: at
+    ``n_train ≈ 2*3*WINDOW`` the fit set collapses to nothing. Observed as a
+    ``TypeError: unsupported operand type(s) for +: 'float' and 'NoneType'`` deep inside
+    ``ridge_reduction`` — the alpha loop never ran, so ``best`` stayed ``(None, inf)``. This
+    degrades gracefully instead: fewer holdout blocks first (keeps the purge intact, which is
+    the part that prevents leakage), then a shorter purge, and a clear error if even that
+    cannot leave ``min_fit_frac`` of the data for fitting. Every degradation is announced,
+    because a silently-narrowed selector is what this whole function exists to avoid.
     """
-    edges = np.linspace(0, n, n_blocks + 1).astype(int)
-    hold = np.zeros(n, dtype=bool)
-    for b in holdout:
-        if 0 <= b < n_blocks:
-            hold[edges[b]:edges[b + 1]] = True
-    fit = ~hold
-    if purge > 0:
-        banned = np.zeros(n, dtype=bool)
-        for b in holdout:
-            if not (0 <= b < n_blocks):
-                continue
-            lo, hi = edges[b], edges[b + 1]
-            banned[max(0, lo - purge):lo] = True
-            banned[hi:min(n, hi + purge)] = True
-        fit &= ~banned
-    return np.flatnonzero(fit), np.flatnonzero(hold)
+    def _split(blocks, pg):
+        edges = np.linspace(0, n, n_blocks + 1).astype(int)
+        hold = np.zeros(n, dtype=bool)
+        for b in blocks:
+            if 0 <= b < n_blocks:
+                hold[edges[b]:edges[b + 1]] = True
+        fit = ~hold
+        if pg > 0:
+            banned = np.zeros(n, dtype=bool)
+            for b in blocks:
+                if not (0 <= b < n_blocks):
+                    continue
+                lo, hi = edges[b], edges[b + 1]
+                banned[max(0, lo - pg):lo] = True
+                banned[hi:min(n, hi + pg)] = True
+            fit &= ~banned
+        return fit, hold
+
+    for blocks in (tuple(holdout), (holdout[len(holdout) // 2],)):
+        for pg, note in ((purge, None), (purge // 4, "purge reduced 4x")):
+            fit, hold = _split(blocks, pg)
+            if fit.sum() >= max(2, int(min_fit_frac * n)) and hold.sum() >= 2:
+                if blocks != tuple(holdout) or note:
+                    print(f"[ridge] small train set (n={n}): selection holdout degraded to "
+                          f"{len(blocks)} block(s)"
+                          f"{', ' + note if note else ''} -> fit {fit.sum()} / hold {hold.sum()}")
+                return np.flatnonzero(fit), np.flatnonzero(hold)
+    raise ValueError(
+        f"blocked_purged_split cannot leave {min_fit_frac:.0%} of n={n} for alpha selection at "
+        f"purge={purge} ({len(holdout)} holdout blocks ban up to {2*len(holdout)*purge} windows). "
+        "This cell is too small for a purged selector: reduce --history-steps/--tokens and "
+        "rerun, or score a cell with more windows. Do NOT silently drop the purge — it is what "
+        "keeps a fit window from sharing its context with a selection window."
+    )
 
 
 def ridge_reduction(Xtr, ytr, Xva, yva, *, purge: int = 0) -> float:
@@ -212,6 +241,12 @@ def ridge_reduction(Xtr, ytr, Xva, yva, *, purge: int = 0) -> float:
         r = float(np.sqrt((((Xtr[hold_idx] - xm0) @ W + ym0 - ytr[hold_idx]) ** 2).mean()))
         if r < best[1]:
             best = (a, r)
+    if best[0] is None:
+        raise RuntimeError(
+            "alpha selection produced no candidate -- the selection holdout was empty. "
+            "blocked_purged_split should have raised first; if you see this, its guard was "
+            "bypassed."
+        )
     xm, ym, lam, V, RV = fit(Xtr, ytr)
     W = V @ (RV / (lam + best[0])[:, None])
     pred = (Xva - xm) @ W + ym

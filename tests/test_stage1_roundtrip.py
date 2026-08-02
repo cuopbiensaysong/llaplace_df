@@ -139,3 +139,36 @@ def test_dataset_mode_argument_guards():
     assert parse("--tasks", "synthetic_linear_chirp", "--split", "val").split == "val"
     # Task mode keeps its historical default task list.
     assert parse().tasks == ["synthetic_linear_chirp"] and parse().split == "test"
+
+
+def test_blocked_purged_split_degrades_instead_of_collapsing():
+    """Regression: purging three blocks has no lower bound on the fit set.
+
+    `blocked_purged_split(purge=WINDOW)` bans up to `2*len(holdout)*purge` windows. Unlike the
+    trailing-20% rule it replaced, that has no floor -- at n_train ~ 2*3*336 the alpha-selection
+    fit set collapsed to ZERO and `ridge_reduction` died with
+    `TypeError: unsupported operand type(s) for +: 'float' and 'NoneType'` deep inside, because
+    the alpha loop never ran. Found on bms_air h=96 by a second agent; the regression came from
+    the very fix that agent had proposed.
+    """
+    import numpy as np
+    from llapdiffusion.tools.run_ridge_probe import blocked_purged_split
+
+    # The exact configuration that crashed.
+    fit, hold = blocked_purged_split(1420, purge=336)
+    assert len(fit) > 0 and len(hold) > 0
+    assert not (set(fit.tolist()) & set(hold.tolist()))
+
+    # The sizes our published results used must be untouched by the guard.
+    for n, expect_frac in ((14446, 0.66), (30359, 0.73)):
+        fit, _ = blocked_purged_split(n, purge=336)
+        assert abs(len(fit) / n - expect_frac) < 0.02, f"n={n} fit fraction moved"
+
+    # Degradation keeps the fit set above the floor at every size it can serve...
+    for n in (700, 1420, 2500, 5000):
+        fit, hold = blocked_purged_split(n, purge=336)
+        assert len(fit) >= 0.5 * n and len(hold) >= 2
+
+    # ...and where it genuinely cannot, it says so instead of returning something unusable.
+    with pytest.raises(ValueError, match="cannot leave"):
+        blocked_purged_split(40, purge=336)
