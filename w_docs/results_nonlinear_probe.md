@@ -511,6 +511,128 @@ points the same way as the campaign's open "denoiser barely uses its conditionin
 
 ---
 
+## 9. Phase 1a on bms_air h=168 — the test is **void**, not passed or failed
+
+Requested by agent-A (comms 2026-08-03 08:55) to see whether B21 generalises beyond noaa_uk.
+Inference only; no training, no diffusion cache, no checkpoint. cuda:2. Per their instruction
+I report bms_air's rows and my own verdict and leave the joint read with noaa_uk to them.
+
+### 9.1 Pre-flight — the brief's structural premise did not hold
+
+`run_ridge_probe._collect` scores the **modal** entity count only. The brief described bms_air
+as "12 entities/window". Measured (model-free replica of `_collect`'s filters, one loader pass):
+
+| cell | seen | eligible | modal | at modal |
+|---|---|---|---|---|
+| noaa_uk train | 16 286 | 16 286 (100 %) | **4** | 14 446 (88.7 %) |
+| noaa_uk val | 2 183 | 2 183 (100 %) | **4** | 2 183 (100 %) |
+| bms_air train | 95 099 | 57 469 (60.4 %) | **1** | 30 359 (52.8 %) |
+| bms_air val | 17 598 | 9 442 (53.7 %) | **1** | 5 855 (62.0 %) |
+
+bms_air's mode is **1**, and a matched full-panel run is infeasible — **23** twelve-entity
+windows in val against noaa_uk's 2 183. So I ran two cells: the modal n=1, and n=8 as the
+best-powered multi-entity cell with a scoreable val.
+
+### 9.2 Results — nothing is forecastable, at either entity count
+
+% RMSE reduction vs predict-the-mean, val, honest blocked+purged alpha:
+
+**agent-A ruled (comms 09:20) that n=1 carries the read**, because the A ≫ B contrast is
+*within-cell* — same windows, same targets, only the input representation changes — so it does
+not need noaa_uk's geometry to answer "does the summarizer lose the signal on this dataset
+too?". n=8 is the secondary row.
+
+| cell | n train/val | dims | A raw history | B cond (best) | C latent (best) | tool verdict |
+|---|---|---|---|---|---|---|
+| **n=1 (modal, primary)** | 30 359 / 5 855 | 32 | **−0.3 %** | 0.6 % | 3.7 % | MOVE DATASET |
+| n=8 (secondary) | 2 596 / 747 | 256 | **−4.6 %** | −6.3 % ⚠ | 1.2 % | MOVE DATASET |
+
+Per-view detail at n=1: cond 2 048 → 0.6 % raw / 3.7 % latent; cond 8 192 → 0.2 % / 3.4 %.
+At n=8: cond 2 048 → −6.3 % / 1.2 %; cond 8 192 → −3.5 % / 1.0 %.
+
+⚠ **The n=8 row now quotes the 2 048-dim view, per agent-A's instruction.** At n=8 the
+8 192-dim view is **under-determined** — 2 596 training rows against 8 192 features — so its
+−3.5 % is regularisation-dominated and must not be read as the better result. n=1 has no such
+problem (30 359 rows).
+
+### 9.3 🔴 My own hypothesis, falsified
+
+I predicted the n=1 cell would be depressed because those are the windows where 11 of 12
+stations are unobserved — the sparsest subset. **Wrong: n=8 is worse, not better.** Recording
+it as a failed prediction.
+
+### 9.4 The negative values are NOT a level-shift artefact — ruled out three ways
+
+I checked this specifically because §2 of this report found exactly that failure mode on this
+codebase. All three say no:
+
+| check | bms_air n=8 | reference |
+|---|---|---|
+| train→val shift | +0.033 = **0.03 val-std** | noaa_uk shift 0.14 val-std, and it scored +27.3 % |
+| reduction vs **train**-mean baseline (removes any val-baseline advantage) | **−0.15 %** | — |
+| **level-free** corr(pred, target) on val | **r = −0.025** (r² = 0.0006) | — |
+
+The oracle-alpha fit also selects **α = 1e8**, the largest value in the grid — ridge shrinks
+the solution to nothing because there is no useful direction. Honest −4.62 % vs oracle −0.19 %
+is alpha selection alone; both round to "no signal".
+
+### 9.5 Why — and it is physical, not a pipeline defect
+
+| cell | target | horizon |
+|---|---|---|
+| noaa_uk | **temperature** | 168 h |
+| bms_air | **PM2.5** | 168 h |
+
+Seven-day-ahead temperature carries strong seasonal/diurnal structure. Seven-day-ahead PM2.5
+is driven by meteorology, emissions and transport and has little history-decodable structure
+at that range. Nothing here indicts stage 1, stage 2 or the conditioning.
+
+### 9.6 🔴 What this does and does not tell us about B21
+
+**The test agent-A designed is void, not answered.** Their falsification criterion was "if
+bms_air comes back with B ≈ A, that falsifies the mechanism story". Observed **B ≈ A** — but
+**vacuously**, because A ≈ 0. You cannot measure whether stage 2 discards forecastable signal
+on a cell that has no forecastable signal to discard. The §6 mechanism is neither supported
+nor falsified by this run.
+
+This is B21's own lesson recurring: *"1a as written conflates dataset quality with summarizer
+quality."* Here the dataset end of that conflation is binding.
+
+**agent-A pre-registered the asymmetry, and it lands on the ambiguous side.** Before seeing the
+numbers they noted (comms 09:20) that at n=1 the summarizer's entity aggregation
+(`encoded_mean = (encoded_bn * entity_weight).sum(dim=1) / entity_denom`) is a **no-op** — there
+is nothing to pool — so entity pooling is excluded *by construction* as a rival explanation.
+A **positive** A ≫ B there would therefore have been *stronger* evidence for §6 than the
+noaa_uk result, where pooling was merely cheap (27.3 → 25.3) rather than structurally absent.
+But they also pre-registered that **a null is ambiguous** — and a null is what we got. So the
+"void" reading above is their own stated caveat, not a post-hoc excuse.
+
+### 9.7 Two consequences for the plan
+
+1. **`CMD_UQ_RECOVERY_PLAN.md` Phase 2 designates bms_air h=168 as the cross-check dataset.**
+   By 1a's own decision table this cell fails the **A** branch — "the only branch that
+   justifies changing datasets" — so it cannot serve that role at this horizon. Worth knowing
+   before committing training there, which is exactly why the gate exists.
+2. **Gate 0 and 1a's A gate are independent, and bms_air proves it.** bms_air has the
+   **highest Gate 0 of all five cells (0.941)** and no forecastable signal whatsoever. Passing
+   Gate 0 does not license using a cell; it only says stage 1 can reconstruct what it is given.
+
+**Concrete cheap next step:** bms_air supports horizons 24/48/96/168. PM2.5 at 24 h is a far
+more plausible target, and 1a costs minutes. If a cross-check cell is wanted, test the shorter
+horizons before abandoning the dataset.
+
+### 9.8 Not established here
+
+- **Shorter bms_air horizons untested** (24/48/96) — the recommendation above is untested.
+- **Linear probes only.** §4–§8 found nonlinearity adds ~nothing on noaa_uk's rich view, but
+  that was noaa_uk; I did not run an MLP here.
+- **n=8 is under-powered** — 2 596 train windows against noaa_uk's 14 446 — so its −4.6 % is
+  the weaker of the two rows. The n=1 row (30 359) is the better-powered one and agrees.
+- **One seed of the frozen stack**, one target column (`PM2.5`, the cache default).
+- I did **not** reconcile these with noaa_uk; that joint read is agent-A's.
+
+---
+
 ## 7. What I could **not** establish
 
 *(Kept as the closing section, so it covers §4–§5 **and** the §8 follow-up. Numbering left

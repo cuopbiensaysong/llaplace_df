@@ -359,11 +359,43 @@ Only after Phase 1 passes. Phase 1 now runs on noaa_uk h=168 — the dataset App
 pre-registers as the headline — so Phase 2 is no longer "confirm on the headline" but
 "confirm the result is not dataset-specific."
 
-Repeat 1b (same two seeds, latent diagnostics on val) on **bms_air h=168**: a different
-sensor network, 5.8× more train windows, and 12 entities per latent, so it varies the two
-Phase-0 axes independently of noaa_uk. Cheaper alternative if compute is tight: **crypto
-h=100**, accepting that a *failure* there is not diagnostic (over-parameterized) while a
-*pass* still corroborates.
+### 🔴 bms_air h=168 CANNOT serve as the cross-check cell — measured 2026-08-03
+
+The plan named bms_air h=168 here. **Run 1a on it before anything else and it fails the A
+branch**: the raw history carries essentially **no forecastable signal at that horizon**.
+
+| cell | n train/val | A raw history | B cond (best) | C latent (best) | verdict |
+|---|---|---|---|---|---|
+| bms_air, n=1 (modal) | 30 359 / 5 855 | **−0.3 %** | 0.6 % | 3.7 % | **MOVE DATASET** |
+| bms_air, n=8 | 2 596 / 747 | **−4.6 %** | −3.5 % | 1.2 % | **MOVE DATASET** |
+
+**The cause is physical, not a pipeline defect.** bms_air's target is **PM2.5**; noaa_uk's is
+**temperature** (verified in the cache metadata). Seven-day-ahead temperature carries seasonal
+and diurnal structure; seven-day-ahead PM2.5 largely does not. Ruled out as a level-shift
+artefact three ways — train→val shift 0.03 val-std (noaa_uk's was 0.14 and scored +27.3 %),
+−0.15 % against a *train*-mean baseline, level-free corr(pred, target) r = −0.025 — and oracle
+alpha pins at 1e8, the top of the grid, i.e. ridge shrinks to nothing because there is no
+direction to find.
+
+**Replacement: `noaa_us` h=168.** Same target variable (**temperature**), same five feature
+columns, same context/horizon geometry, stage-1/2 artifacts already present, and a genuinely
+different sensor network from noaa_uk — so it is a real cross-check rather than a near-duplicate,
+while keeping the target physically forecastable at this horizon. **Run 1a there before
+committing any training.** Fallback if it also fails A: **crypto h=100**, accepting that a
+*failure* there is not diagnostic (over-parameterized) while a *pass* still corroborates.
+
+### 🔴 Standing rule: Gate 0 does not license a cell
+
+**bms_air has the highest Gate 0 of the five cells (0.941) and no forecastable signal at all.**
+So Gate 0 and 1a's **A** branch are independent, and the two must both be read:
+
+- **Gate 0** answers "can stage 1 reconstruct its own targets?" — a property of the VAE.
+- **1a's A** answers "is the target forecastable from its history at all?" — a property of the
+  dataset and horizon.
+
+A cell can pass the first and be useless on the second. Never promote a cell to a decision role
+on Gate 0 alone. *(Found by measurement, 2026-08-03, after the paired-probe fix — the second
+gate-design defect this campaign has caught the same way.)*
 
 Purpose: avoid committing a 3-arm × 5-seed campaign to a result that only holds on one cache.
 
