@@ -777,6 +777,73 @@ carried over — untested, and less pressing now that h=168 is healthy).
 
 ---
 
+## 11. `"global"` on noaa_us, and the mediator on four cells
+
+Two falsification tests requested by agent-A (comms 2026-08-03 11:10) after their joint read
+made entity pooling the dominant loss term on noaa_us (−17.4 of 20.8 pt).
+
+### 11.1 `"global"` on noaa_us — the prediction fails on the measure I would defend
+
+agent-A registered: *`"global"` lifts B far less on noaa_us than on noaa_uk (+4.5 there),
+because it addresses only the §6 objective defect and does nothing about pooling; a large lift
+would be evidence the decomposition is wrong.*
+
+Setup verified: `[cond-norm] global stats over **8 072 400** rows` (noaa_us's 24 025 × 336),
+mean |·| 0.1779 / std 0.3215 — not noaa_uk's 5 472 096 / 0.0896 / 0.5190. **A identical across
+arms (23.3968 % both)**, the control that confirms only the conditioning path differs.
+
+| view | sample B | global B | lift | sample C | global C | lift |
+|---|---|---|---|---|---|---|
+| 2 048 | 0.29 | 3.29 | **+3.00** | 4.41 | 4.95 | +0.54 |
+| 8 192 | 2.58 | 4.57 | **+1.99** | 4.43 | 5.49 | +1.06 |
+
+| comparison | noaa_uk | noaa_us | outcome |
+|---|---|---|---|
+| 2 048-dim row (the row named) | +4.54 | +3.00 | weakly held — less, not *far* less |
+| **best-over-views ceiling (§8.4d)** | **−0.54** | **+1.99** | **FAILS — helps noaa_us, hurts noaa_uk** |
+
+**I would defend the ceiling measure**, because §8.4d established it: the 2 048 view is
+impoverished, and level-restoration partly compensates for the poor view rather than adding
+information. On that measure the prediction is contradicted, not merely weakened.
+
+**A hypothesis for why — untested, recorded as a lead not a finding.** The prediction assumed the
+two losses are independent. They may not be, in the direction that matters: **pooling destroys
+each entity's idiosyncratic component and preserves the panel-mean component, and the window
+level *is* a panel-mean quantity** — so it is exactly what survives pooling, and `"sample"` then
+deletes it. On a heavily-pooled cell the level is a larger share of what remains, so restoring it
+should help *more*. That also explains the qualitative split: on noaa_uk `"global"` lifts only
+the poor view (the rich view can already recover the level from more tokens), while on noaa_us it
+lifts **both**, because there it cannot.
+
+### 11.2 The mediator on four cells — with a panel-size correction
+
+🔴 **Reproduction check: noaa_uk matches agent-A, noaa_us does not.** With-self, train split:
+noaa_uk **87.9 %** (theirs 88 % ✓), noaa_us **49.0 %** (theirs 42 %, **+7 pt**). Drop rates also
+differ (theirs 11.4 %, mine 1.7 %), so the two scripts filter or sample differently. **The
+cross-script comparison is void; use one column or the other.** Mine are internally consistent.
+
+| cell | entities | with-self | **LOO** |
+|---|---|---|---|
+| noaa_uk | 4 | 87.9 % | **76.5 %** |
+| noaa_us | 40 | 49.0 % | **46.8 %** |
+| crypto | 113 | 43.2 % | **42.4 %** |
+| us_equity | 221 | 34.7 % | **34.2 %** |
+
+**Why leave-one-out.** If the panel mean includes the entity itself, a 4-station panel carries a
+1/4 self-contribution against a 40-station panel's 1/40 — inflating small panels arithmetically,
+independent of real signal sharing. Confirmed and asymmetric as predicted: noaa_uk loses
+**11.4 pt** to LOO, noaa_us **2.2**. The noaa_uk–noaa_us gap survives (**+29.6** vs +38.9 pt), so
+the mechanism stands — but **~24 % of the apparent gap was panel-size arithmetic**.
+
+**The mediator saturates**: 76.5 → 46.8 → 42.4 → 34.2, with nearly all the fall between 4 and 40
+entities. So "more entities is worse" is more precisely "shared variance is what matters, and it
+saturates" — and crypto's pooling cost should resemble noaa_us's rather than being far worse.
+
+Per instruction: **no full 1a and no pooling-cost number on crypto/us_equity** (1 225 / 1 099
+train, 90 / 72 val — not scoreable). Descriptive statistic only; non-finite dropped and counted.
+
+---
+
 ## 7. What I could **not** establish
 
 *(Kept as the closing section, so it covers §4–§5 **and** the §8 follow-up. Numbering left

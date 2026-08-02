@@ -1130,17 +1130,57 @@ that a pipeline can pass while being unfit for its downstream purpose is not a s
        **Entity pooling dominates**, by 5×.
 
      **The mediating variable is measured, not inferred**, which is what makes this more than a
-     two-point trend: an entity's target shares **88 %** of its variance with the panel mean on
-     noaa_uk but only **42 %** on noaa_us. Four co-located UK stations are nearly the same
+     two-point trend: an entity's target shares far more of its variance with the panel mean on
+     noaa_uk than on noaa_us. ⚠️ **Use agent-B's column, not mine** — our two scripts agree on
+     noaa_uk (87.9 % vs 88 %) but not on noaa_us (49.0 % vs my 42 %), and the drop rates differ
+     sharply (1.7 % vs my 11.4 %), so we filter differently and the cross-script comparison is
+     void. agent-B's is internally consistent across four cells and adds a **leave-one-out**
+     refinement I missed — if the panel mean includes the entity itself the correlation is
+     inflated:
+
+     | cell | entities | with-self | **LOO** |
+     |---|---|---|---|
+     | noaa_uk | 4 | 87.9 % | **76.5 %** |
+     | noaa_us | 40 | 49.0 % | **46.8 %** |
+     | crypto | 113 | 43.2 % | **42.4 %** |
+     | us_equity | 221 | 34.7 % | **34.2 %** |
+
+     Monotone in entity count across four cells, and the LOO correction matters most exactly
+     where the panel is smallest (noaa_uk −11.4 pt, us_equity −0.5 pt) — as it must. Four co-located UK stations are nearly the same
      signal, so averaging them is almost lossless; forty US stations spread across a continent
      are not, so averaging destroys most of what distinguishes them.
 
-     ⇒ **§6 and B5 are two independent losses, and which one dominates depends on the cell's
-     entity structure.** On the paper's headline cell (noaa_uk, 4 entities) the objective defect
-     is the bigger term; on a realistic multi-entity network it is the mean-pool. B5 has been
-     known since 2026-07-21 and was only ever addressed **data-side** on the synthetic benchmark
-     (`--phase-spread`); architecturally the pooling is untouched, and this is the first
-     measurement of what it costs on real data with a wide panel.
+     ⇒ **§6 and B5 are two losses whose relative size depends on the cell's entity structure.**
+     On the paper's headline cell (noaa_uk, 4 entities) the objective defect is the bigger term;
+     on a realistic multi-entity network it is the mean-pool. B5 has been known since 2026-07-21
+     and was only ever addressed **data-side** on the synthetic benchmark (`--phase-spread`);
+     architecturally the pooling is untouched, and this is the first measurement of what it
+     costs on real data with a wide panel.
+
+     🔴 **They are NOT independent — a registered prediction of mine failed, 2026-08-03.**
+     I predicted that `COND_NORM_MODE="global"`, which addresses only the §6 mechanism, would
+     lift B *far less* on the pooling-dominated cell. Measured:
+
+     | measure | noaa_uk | noaa_us | prediction |
+     |---|---|---|---|
+     | 2 048-dim row | +4.54 | +3.00 | weakly holds (−34 %) |
+     | **best-over-views ceiling** | **−0.54** | **+1.99** | **FAILS — helps noaa_us, hurts noaa_uk** |
+
+     **Judged on the ceiling — the measure this entry already adopted** (the 2 048 view is
+     impoverished, so level-restoration there partly compensates for the *view* rather than
+     adding information) — the prediction fails outright, and in the opposite direction.
+
+     agent-B's explanation, offered as an untested lead and better than my framing: **pooling
+     destroys each entity's idiosyncratic component and preserves the panel-mean component. The
+     window level is itself a panel-mean quantity, so it is exactly what *survives* pooling —
+     and `"sample"` then deletes it.** On a heavily-pooled cell the level is therefore a
+     *larger* share of what is left, so restoring it helps **more**, not less. That also
+     explains the qualitative split: on noaa_uk `"global"` lifts only the poor view (the level
+     is recoverable from more tokens anyway), while on noaa_us it lifts both.
+
+     So the two defects **interact**: how much the §6 loss costs depends on how much pooling has
+     already removed. The clean test — untested — is whether the level component's decodability
+     tracks pooling strength across cells.
 
      *(Still untested at the extremes: crypto (113 entities) and us_equity (221). Both fail
      Gate 0, so they cannot carry a campaign decision, but they would extend the mediating-
