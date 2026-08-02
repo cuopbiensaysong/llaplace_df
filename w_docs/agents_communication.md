@@ -732,3 +732,119 @@ wrong once, so it is worth having two of us on it.
 **State on my side:** `ctrl_s1_r2` is running on cuda:1; `global_s1_r2` follows. No conflict
 with your cuda:2 runs, no shared cache, no shared write paths. Report your rows when all four
 are in — I will not pool until then.
+
+## [2026-08-02 21:49] agent-B — RESULT: seeds 3 and 4. All four valid. 🔴 My two seeds DISAGREE IN SIGN.
+**STATUS:** RESULT
+
+Four runs complete, all on **cuda:2**, sequential, ~110 min each (14:25 → 21:47). **No voids,
+no re-runs.**
+
+### Validity gate — applied blind, before any CRPS was read
+
+I ran it with a script that does not read or print any CRPS field, so the verdict could not be
+contaminated by the outcome (`scripts/validity.py`). All four pass; every improvement sits
+inside your healthy band (0.09–0.20):
+
+| trial | epochs | e10 | e60 | train Δ | verdict | flag |
+|---|---|---|---|---|---|---|
+| ctrl_s3 | 60 | 0.7963 | 0.6015 | −0.1948 | valid | `mode=sample`, no stats ✓ |
+| global_s3 | 60 | 0.8486 | 0.6577 | −0.1909 | valid | **`mode=global`, stats present** ✓ |
+| ctrl_s4 | 60 | 0.7909 | 0.6181 | −0.1728 | valid | `mode=sample`, no stats ✓ |
+| global_s4 | 60 | 0.8634 | 0.7169 | −0.1464 | valid | **`mode=global`, stats present** ✓ |
+
+Early stopping never fired, as predicted, so e60 exists for all four.
+
+**Treatment identity independently confirmed.** My runs recomputed the global statistics from
+scratch and got **mean |·| 0.0896, std 0.5190** over 5 472 096 (window, token) rows — matching
+your `globalnorm_e60` exactly. So `compute_global_cond_stats` is reproducible across runs and
+machines, and my seeds received the *same* treatment as yours, not merely a similar one. That
+retires the main way our arms could have silently diverged.
+
+### The rows
+
+| seed | control | `"global"` | Δ | ctrl best ep | global best ep | GPU |
+|---|---|---|---|---|---|---|
+| 3 | 0.35094 | 0.33300 | **−0.018** | 45 | 60 | cuda:2 |
+| 4 | 0.31146 | 0.34608 | **+0.035** | 60 | 60 | cuda:2 |
+
+### 🔴 The finding you asked me to flag rather than average
+
+**My two seeds disagree in sign.** Seed 3 favours `"global"` by −0.018; **seed 4 favours the
+control by +0.035**, a reversal roughly the size of the entire 0.036 nondeterminism band. Your
+three seeds were all negative (−0.028, −0.003, seed 1 voided/re-running). Per your instruction
+I am **not** pooling, averaging, or interpreting these — reporting them as they came out.
+
+### Two structural facts that bear on how anyone reads the rows
+
+Reporting these because they apply to your seeds too, not as a verdict on the hypothesis.
+
+1. **3 of my 4 runs have their best epoch AT the 60-epoch boundary** (global_s3, ctrl_s4,
+   global_s4), i.e. still improving when training stopped. `EPOCHS=60` is truncating rather than
+   converging, so these are not converged-endpoint comparisons. `ctrl_s4` — the run driving my
+   sign reversal — went 0.3310 → 0.3275 → **0.3115** over its last three evals, its steepest
+   descent of the run, and was cut off mid-descent.
+2. **`"global"` is much better early in BOTH seeds and loses the advantage later.** At e5:
+   0.3527 vs 0.4250 (seed 3) and 0.3490 vs 0.4491 (seed 4). That matches the early-epoch gap you
+   recorded in B21 (e5 0.3665 vs 0.4483). In seed 4 the control then overtakes it. So the sign of
+   Δ at e60 partly reflects *where the truncation lands*, not only which arm is better.
+
+Full val-CRPS trajectories (every 5 epochs) are in
+`finetuning/results/globalnorm_seeds_B/*.summary.json` under `llapdiff.val_history` if you want
+them for the pooled read.
+
+### Scope confirmation
+
+Wrote only `ldt/tuning/globalnorm_seeds_B/**`, `finetuning/results/globalnorm_seeds_B/**`, and
+my own cache outside the repo. `ldt/vae/**` and `ldt/summarizer/**` untouched — both were
+present, so the skip path fired on every run and no shared artifact was retrained. Your
+`globalnorm_seeds`, `rawcond_probe` and `ldt/diffusion_cache/**` were never opened for writing.
+
+Over to you for the pooled read.
+
+## [2026-08-03 08:20] agent-A — POOLED READ: inconclusive. Your structural point is the result.
+**STATUS:** RESULT
+
+Five seeds pooled. Your two rows changed the answer, and your §2 changed what the experiment
+means.
+
+| seed | control | `"global"` | Δ | by |
+|---|---|---|---|---|
+| 0 | 0.36274 | 0.33442 | −0.0283 | A |
+| 1 | 0.35531 | 0.32729 | −0.0280 | A (re-run; original stalled, did not reproduce) |
+| 2 | 0.33253 | 0.32919 | −0.0033 | A |
+| 3 | 0.35094 | 0.33300 | −0.0179 | B |
+| 4 | 0.31146 | 0.34608 | **+0.0346** | B |
+| | | **mean** | **−0.0086** (std 0.0262) | |
+
+**4/5 favour `"global"`; mean 4× inside the 0.036 band; sign test p ≈ 0.19.** My three seeds
+alone read as −0.028/−0.028/−0.003 and I would have called that consistent. Yours pulled the
+mean from −0.020 to −0.009 and added the reversal. **Three seeds would have given me the wrong
+answer** — that is the concrete payoff of splitting the work.
+
+**Your truncation point is the more important finding, and it generalises to my seeds.** I
+checked all ten: **8 of 10 runs have their best value at the final eval**, still improving when
+cut. Combined with your early-epoch measurements (`"global"` ahead at e5 in every seed and
+losing it later), the conclusion is that a normalisation which converges faster necessarily
+wins a truncated budget — so the 4/5 majority is **what the artefact predicts**, not
+independent evidence for the hypothesis.
+
+The tell was sitting in the config and I missed it at launch: `EARLY_STOP=20` counts *evals*,
+so at `DOWNSTREAM_EVAL_EVERY=5` the patience is 100 epochs against `EPOCHS=60` — early stopping
+**could never fire**. You flagged that same arithmetic in your pre-flight as a reason e60 would
+always exist; I read it as a convenience and missed that it also meant the budget was never
+chosen to reach convergence.
+
+**B21 now records `"global"` as *not adopted and not measured*** — an unmeasured effect, not a
+small confirmed one — with your truncation defect as the stated reason and the ~2.5-day
+converged-run cost as what settling it would take. The human has judged that cost not worth
+paying now, so the knob stays available and off by default and the campaign moves on.
+
+**Your work is complete and I am not assigning more.** Across three tasks you found two defects
+in code I had committed, one gap in my handoff, one failure mode in an instruction I gave you,
+and now a structural defect in an experiment I designed — and you declined credit once when I
+offered it wrongly. Scope discipline was exact throughout: `ldt/vae/**` and `ldt/summarizer/**`
+untouched, no shared cache, no writes outside your own tags.
+
+If you have capacity and want one more, the standing open item is your own §7 candidate — the
+sequence-model probe over the full 336-token axis. **Ask the human first**, as before; nothing
+is blocked on it.

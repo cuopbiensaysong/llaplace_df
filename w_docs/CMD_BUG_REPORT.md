@@ -47,7 +47,7 @@ the one to read and maintain.
 
 | knob | default | what it does |
 |---|---|---|
-| `COND_NORM_MODE = "global"` | not the default (`"sample"` still is) | Normalises the conditioning with **fixed statistics computed once over train**, persisted per checkpoint. Batch-independent like `"sample"` (B15's requirement) but **level-preserving**, and unit-scaled. Measured on noaa_uk h=168, paired within seed: −0.028 (seed 0) and −0.003 (seed 2), **both inside the 0.036 noise band**; seed 1 voided (control stalled). **Promising but unconfirmed**, on the CRPS axis and the probe axis alike. Not adopted. Raises if the statistics are missing rather than silently falling back. |
+| `COND_NORM_MODE = "global"` | not the default (`"sample"` still is) | Normalises the conditioning with **fixed statistics computed once over train**, persisted per checkpoint. Batch-independent like `"sample"` (B15's requirement) but **level-preserving**, and unit-scaled. Measured on noaa_uk h=168, paired within seed, **5 seeds**: 4/5 favour it but the mean is −0.0086, **4× inside the 0.036 noise band** (sign test p ≈ 0.19). 🔴 **Inconclusive by construction** — `EPOCHS=60` truncates rather than converges (8/10 runs still improving when cut) and `"global"` converges faster, so a truncated budget is biased toward exactly the majority observed. **Not adopted, and not measured.** Settling it needs ~2.5 days of converged runs. Raises if the statistics are missing rather than silently falling back. |
 
 Both `normalize_cond_per_batch` and the resolver reject an unknown mode, and every other
 mode's checkpoints resolve their statistics to `None`, so nothing pre-existing moves.
@@ -875,39 +875,63 @@ raw 7.7 % → latent 5.6 %.
    (e5: 0.3665 vs 0.4483). The three rows together are the cleanest result in this entry:
    *the same information* helps or hurts depending only on the scale it arrives at.
 
-   🔴 **Multi-seed, 2026-08-02 — the effect is materially smaller than that one seed implied.**
-   Paired within seed (both arms at the same seed, 60 epochs, same protocol):
+   🔴 **Five seeds, paired within seed, 2026-08-02/03 — INCONCLUSIVE, and the protocol is why.**
+   Ten runs (seeds 0–2 agent-A on cuda:1, seeds 3–4 agent-B on cuda:2, identical protocol;
+   agent-B independently recomputed the global statistics and got mean |·| 0.0896 / std 0.5190,
+   matching seed 0 exactly, so both halves received the same treatment, not merely a similar one):
 
    | seed | control | `"global"` | Δ |
    |---|---|---|---|
-   | 0 | 0.36274 | 0.33442 | **−0.028** |
-   | 1 | *voided* | *voided* | — |
-   | 2 | 0.33253 | 0.32919 | **−0.003** |
+   | 0 | 0.36274 | 0.33442 | −0.0283 |
+   | 1 | 0.35531 | 0.32729 | −0.0280 |
+   | 2 | 0.33253 | 0.32919 | −0.0033 |
+   | 3 | 0.35094 | 0.33300 | −0.0179 |
+   | 4 | 0.31146 | 0.34608 | **+0.0346** |
+   | | | **mean** | **−0.0086** (std 0.0262) |
 
-   **Both valid deltas sit inside the 0.036 band.** The honest status of `"global"` is
-   **promising but unconfirmed** — and that now holds on *both* axes, since the probe result
-   above shows it does not improve the raw-target readout at the best view either. Two
-   independent lines converge on "smaller effect than it first looked".
+   **4/5 favour `"global"`, but the mean is 4× smaller than the 0.036 noise band** and a sign
+   test at n=5 gives p ≈ 0.19. Seed 1 is a re-run: the original `ctrl_s1` stalled (train loss
+   0.861 → 0.866, no progress in 50 epochs) and was voided on a criterion fixed before
+   unblinding; the stall did **not** reproduce, so it was cudnn nondeterminism rather than a
+   property of that seed. Excluding it *reduced* the apparent effect, so it was not a
+   favourable exclusion.
 
-   **Seed 1 was voided on a criterion fixed before unblinding**: a run is invalid if its train
-   loss at e60 ≥ its train loss at e10. `ctrl_s1` went 0.861 → **0.866** — no progress in 50
-   epochs — while the other five runs improved by 0.09–0.20. It is the same stall signature as
-   `rawpole_e60`. Excluding it *reduces* the apparent effect (its Δ was −0.049, the largest of
-   the three), so this is not a favourable exclusion. Both seed-1 arms are being re-run.
+   ### 🔴 The measurement does not answer the question it was built for
 
-   ⚠️ **The seed noise is the same size as the effect.** Control spread across the three seeds
-   is **0.0404**, larger than the 0.036 band itself and larger than the mean effect. Any
-   conclusion here needs ≥5 seeds, not 3.
+   *(Structural defect in this experiment, found by agent-B on its own seeds and confirmed here
+   across all ten runs.)*
 
-   *(Suggestive but explicitly not claimed: `"global"`'s spread was 0.0108 against the
-   control's 0.0404, and it was the `"sample"` arm that stalled. If `"global"` genuinely
-   stabilises optimisation that could matter more than the CRPS delta — but §4 retraction 2 is
-   a "lower variance" claim that had to be withdrawn, and a variance ratio at n=3 is nearly
-   meaningless.)*
+   **`EPOCHS=60` truncates rather than converges: 8 of 10 runs have their best value at the
+   final eval**, i.e. every one of those was still improving when training stopped. And
+   `"global"` is **much better early and loses the advantage later** — e5: 0.3665 vs 0.4483
+   (seed 0), 0.3527 vs 0.4250 (seed 3), 0.3490 vs 0.4491 (seed 4). The run that produced the
+   one sign reversal, `ctrl_s4`, went 0.3310 → 0.3275 → **0.3115** over its last three evals,
+   its steepest descent of the run, and was cut off mid-descent.
 
-   **Not a recommendation to change the default.** That needs ≥5 seeds and a second dataset —
-   and note noaa_uk (temperature) is the most favourable possible cell for a level-preserving
-   normalisation, so it is the wrong place to generalise from.
+   ⇒ **A normalisation that converges faster necessarily wins a truncated budget.** The sign of
+   Δ at e60 therefore reflects *where the cut lands* as much as which arm is better, and it is
+   biased toward the direction 4/5 of the seeds show. The majority is what the artefact
+   predicts, so it is not independent evidence for the hypothesis.
+
+   The tell was in the config and was missed at launch: `EARLY_STOP=20` counts **evals**, so at
+   `DOWNSTREAM_EVAL_EVERY=5` the patience is 100 epochs against `EPOCHS=60` — early stopping
+   **could never fire**, which is precisely the signal that the budget was not chosen to reach
+   convergence. It was chosen because it was cheap.
+
+   **Status: not adopted, and not measured.** `"global"` is *not* a small confirmed effect; it
+   is an unmeasured one. The probe axis agrees — §above shows it does not improve the raw-target
+   readout at the best view either. Settling it needs training to convergence (`EPOCHS` large
+   enough that early stopping actually fires) on ≥5 seeds: ~10 runs × ~5.9 h ≈ **2.5 days**.
+   That cost was judged not worth paying now; the knob stays available and off by default.
+
+   ⚠️ And noaa_uk (temperature) is the most favourable possible cell for a level-preserving
+   normalisation, so even a converged positive result there would not generalise without a
+   second dataset.
+
+   *(Suggestive, explicitly not claimed: across the three seeds where both arms ran to the
+   boundary, `"global"`'s spread was consistently narrower than the control's, and it was a
+   `"sample"` run that stalled. §4 retraction 2 is a withdrawn "lower variance" claim, and a
+   variance ratio at n=5 is still weak, so this is recorded as an observation only.)*
 
    Unlike `SUM_FT_MODE="all"` (below), this intervention is **campaign-compatible**: it leaves
    stage 1/2 frozen and shared across arms, so it does not violate the parity requirement that
