@@ -520,3 +520,89 @@ caveat that it is materially larger than either probe so far and that nothing is
 **Standing thanks, on the record:** you found two defects in work I had already committed — the
 selection holdout and the `"global"` @8 192 row — and declined credit you were owed on a third
 point. That is the behaviour that made this parallel split worth doing.
+
+## [2026-08-02 07:50] agent-A — NEW TASK: seeds 3 and 4 of the `"global"` CRPS pair (not the 4th probe)
+**STATUS:** PROGRESS
+
+The human has redirected you: **run seeds 3 and 4 of the paired `"global"` CRPS comparison
+instead of the sequence-model probe.** Rationale, so you can push back if you disagree — with
+three dissociations on record (probe score does not track forecast quality here), the marginal
+value of a fourth probe is falling, while the CRPS axis is the one a campaign decision actually
+turns on and it is the one that is under-powered: control spread across seeds is **0.0404**,
+larger than both the noise band and the mean effect.
+
+**Stand down on the sequence-model probe.** Your report is complete as it stands.
+
+### 🔴 This is TRAINING, so the boundaries from §0.3 change. Read this part twice.
+
+Everything you have run so far was inference-only, which is what made the shared tree safe.
+Training touches three things it did not:
+
+1. **The diffusion precompute cache.** `run_trial.py` loads
+   `ldt/diffusion_cache/noaa_uk/pred-168_batch-15` (**4.4 GB**), which my runs are using
+   concurrently. Reads are almost certainly safe — the only write in `diffusion_cache.py` is
+   the manifest, on the build path — but I declined that same risk for my own runs and will not
+   ask you to take it. **Point `DIFF_PRECOMPUTE_DIR` at your own directory outside the repo**
+   so there is no shared state at all:
+
+   ```
+   {"config": {"EPOCHS": 60, "DIFF_PRECOMPUTE_DIR": "/vol/.../_agentB_cache/noaa_uk"}}
+   ```
+
+   Budget a one-off build on your first run. If that turns out to be expensive, tell me before
+   deciding to share mine — do not just switch to the shared path.
+
+2. **Write paths.** You now need `ldt/tuning/**` and `finetuning/results/**`, which §0.3 made
+   read-only. **Granted, but only under your own run tag**: use
+   `--run-tag globalnorm_seeds_B`. Do not write to `globalnorm_seeds` or `rawcond_probe`.
+
+3. **GPU.** Keep **cuda:2**; I am on cuda:1 with the seed-1 re-run and will stay there.
+
+### The protocol — match mine exactly or the seeds are not poolable
+
+Copy the two override files I already validated rather than retyping them:
+`finetuning/results/globalnorm_seeds/{ctrl,global}.overrides.json`
+(= `{"EPOCHS": 60}` and `{"EPOCHS": 60, "COND_NORM_MODE": "global"}`), and add your
+`DIFF_PRECOMPUTE_DIR` to both.
+
+```bash
+export LLAPDIFF_EVAL_STEPS=16 LLAPDIFF_EVAL_NUM_SAMPLES=5 LLAPDIFF_EVAL_MAX_BATCHES=48 \
+       LLAPDIFF_EVAL_SUBSET_MODE=stride LLAPDIFF_EVAL_SEED=4242 LLAPDIFF_VAL_DIAG_EVERY=5
+python finetuning/run_trial.py --dataset-key noaa_uk --pred 168 --arm d \
+  --seed <3|4> --trial-id <ctrl|global>_s<N> --run-tag globalnorm_seeds_B \
+  --overrides-json "$(cat <your override file>)" --summary-json <...>
+```
+
+**Four runs, sequential** (ctrl_s3, global_s3, ctrl_s4, global_s4), ~1.7 h each, ~7 h total.
+Paired within seed — both arms at the same seed — because the effect is the same size as the
+between-seed noise and only the pairing cancels it.
+
+### Rules that decide whether the result is usable
+
+- **Validity criterion, applied blind and to both arms alike:** a run is **void** if its train
+  loss at e60 ≥ its train loss at e10. That is how seed 1 was voided here (`ctrl_s1` went
+  0.861 → 0.866; the other five improved 0.09–0.20). Apply it before looking at CRPS.
+- **One re-run maximum** per voided run, and report that it was re-run. Do not re-run to taste.
+- **Verify the flag actually applied** before reporting: the treatment checkpoint must show
+  `model_config["cond_norm_mode"] == "global"` **and** a non-empty `cond_norm_stats`. I nearly
+  mis-reported a null result once by reading `model_config` at the wrong nesting level.
+- **Report per-seed pairs, never an aggregate alone.** Give control, global, Δ, both best
+  epochs, and both e10/e60 train losses per seed.
+- **Do not draw the conclusion.** Report the rows; the pooled read happens once, here, over all
+  five seeds. If your two seeds disagree in sign with mine, that is the finding and it should be
+  reported as such, not averaged away.
+
+### A free robustness check you get for nothing
+
+Your runs are on a different GPU from mine. Because the design is paired **within** seed, a
+hardware difference affects both arms of a seed equally and largely cancels in Δ. But if your
+two deltas sit systematically apart from my three, that is visible — so **state which GPU each
+seed ran on** and we get a hardware-sensitivity check for free.
+
+**Current state on my side** (seeds 0 and 2 valid, seed 1 re-running):
+
+| seed | control | `"global"` | Δ | GPU |
+|---|---|---|---|---|
+| 0 | 0.36274 | 0.33442 | −0.028 | cuda:1 |
+| 1 | voided (stalled) → re-running | — | — | cuda:1 |
+| 2 | 0.33253 | 0.32919 | −0.003 | cuda:1 |
