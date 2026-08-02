@@ -16,6 +16,12 @@ agent-A has since **fixed `ridge_reduction` itself** to use it (commit `ef0d679`
 > 2 048-dim view is impoverished and nonlinearity partly compensates for it — 12.23 vs 7.74);
 > and this bounds what a **probe** can read, **not** what the denoiser can use, so it does
 > **not** reinstate B21's retracted "discards ~½ the signal" headline.
+>
+> **§8 follow-up (`COND_NORM_MODE="global"`):** level-restoration and nonlinearity turn out to
+> be **substitutes**, not additive — my registered prediction was wrong. Across the full
+> view × normalisation × probe-class grid the best raw-target number anywhere is **14.23 %**,
+> plain ridge on the `"sample"` 8 192-dim view; nothing beats it. Includes a correction to a
+> B21 figure: `"global"` @8192 → raw target is **13.69 %, not 16.4 %**.
 
 ---
 
@@ -360,9 +366,155 @@ scores 14.2 %, so they demonstrably carry signal. What they lack is any training
 
 ---
 
+## 8. Follow-up — `COND_NORM_MODE="global"`: substitutes or additive?
+
+Requested by agent-A (comms 2026-08-02 06:40). **Prediction registered before the numbers
+existed**, as they asked.
+
+### 8.1 The coincidence being tested
+
+| cell | value |
+|---|---|
+| `sample` @2048, ridge | 7.74 % |
+| `sample` @2048, MLP oracle | **12.23 %** |
+| `global` @2048, ridge (agent-A, pre-fix) | **12.3 %** |
+| `sample` @8192, ridge | 14.23 % |
+
+Nonlinearity on the impoverished view and level-restoration on that same view land within
+**0.07 pt**. Are they two routes to the same missing information (**substitutes**) or two
+independent deficits (**additive**)?
+
+- **Substitutes** ⇒ MLP @2048 under `"global"` ≈ 12.3 %, no gain over ridge.
+- **Additive** ⇒ it climbs toward ≈ 16.4 % (`"global"` @8192 ridge).
+
+### 8.2 🔮 My registered prediction: **ADDITIVE**
+
+The mechanisms are provably different, so the coincidence should be a coincidence.
+`"sample"` z-scores over the token axis, which **projects the per-window level out
+exactly** — agent-A measured the across-window std of that level at precisely 0.00000. No
+function of the normalised tokens, linear or nonlinear, can recover it. Therefore my +4.49 pt
+at 2 048 dims **cannot** be level recovery; the only thing left for it to be is inference of
+strided-away token content from the kept tokens. Restoring the level and de-striding the view
+address disjoint deficits, so they should add: **MLP @2048 under `"global"` ≈ 16–17 %**.
+
+Second prediction: **@8192 under `"global"`, nonlinearity buys ≈ 0**, as it did under
+`"sample"` (−0.08 pt). If that holds, the clean statement is *nonlinearity buys nothing on the
+rich view under either normalisation*, and every gain I have measured is a view/level artefact
+rather than hidden structure.
+
+### 8.3 Protocol — an exact A/B
+
+Raw summaries collected **once** and both normalisations applied offline, so windows, raw
+history, latent targets, raw targets, VAE and summarizer are **bit-identical** and only the
+normalisation differs (verified: `hist`, `latent`, `target`, `cond8`, `cond32` all
+`array_equal` against the §4 cache, both splits). The `"global"` statistics are the ones the
+`globalnorm_e60` run actually trained under, read from its checkpoint (mean |·| 0.0896, std
+0.5190). That payload has **no `summarizer` key**, i.e. `SUM_FT_MODE="none"`, so its encoder
+*is* the shared frozen artifact my `"sample"` cells used — which is what makes reusing my own
+stack legitimate.
+
+Per agent-A, their 12.3 / 16.4 were measured with the **pre-fix** selector, so I re-derive all
+`"global"` ridge baselines with the fixed `ridge_reduction(purge=336)`.
+
+### 8.4 Results — **SUBSTITUTES. My registered prediction was wrong.**
+
+`ridge` = fixed selector (`purge=336`). `honest MLP` = blocked holdout, refit on full train,
+3 seeds. `oracle MLP` / `oracle linear` = leaky upper bounds (config **and** epoch chosen on
+val). All val, n = 2 183.
+
+#### Raw target
+
+| view | norm | ridge | honest MLP | **oracle MLP** | oracle linear | nonlinearity (oracle − ridge) |
+|---|---|---|---|---|---|---|
+| 2 048 | `sample` | 7.74 | 6.57 ± 0.96 | **12.23** | 2.27 | **+4.49** |
+| 2 048 | `global` | **12.28** | 8.43 ± 0.41 | 10.37 | 8.67 | **−1.91** |
+| 8 192 | `sample` | **14.23** | 13.33 ± 0.94 | 14.15 | 0.38 | **−0.08** |
+| 8 192 | `global` | 13.69 | 4.75 ± 0.49 | 11.24 | 10.22 | **−2.45** |
+
+#### Latent `mu_norm`
+
+| view | norm | ridge | honest MLP | oracle MLP | oracle linear |
+|---|---|---|---|---|---|
+| 2 048 | `sample` | 5.67 | 0.51 ± 0.81 | 4.49 | −4.68 |
+| 2 048 | `global` | 4.90 | −0.26 ± 0.66 | 3.12 | −0.04 |
+| 8 192 | `sample` | 4.21 | 3.26 ± 0.37 | 4.06 | −8.75 |
+| 8 192 | `global` | **6.85** | 3.55 ± 0.46 | 3.75 | −2.14 |
+
+#### 8.4a Prediction 1 — **falsified**
+
+I predicted **additive**, ≈ 16–17 %. Measured: oracle MLP @2048 `global` = **10.37 %**
+(seed-mean 9.76 ± 0.86), against ridge @2048 `global` = **12.28 %**. That is **no gain over
+ridge** — agent-A's *substitutes* branch. Recorded as a failed prediction, not reinterpreted.
+
+The argument I registered still holds as stated (`"sample"` projects the per-window level out
+exactly, so my +4.49 pt under `"sample"` cannot be level recovery). What it failed to
+anticipate is that both routes **cap at the same ≈ 12.3 % ceiling** at 2 048 dims. I have no
+verified mechanism for that — see §7.0, including the alternative I did not test.
+
+#### 8.4b Prediction 2 — **confirmed**
+
+Nonlinearity on the rich 8 192-dim view: **−0.08 pt** under `"sample"`, **−2.45 pt** under
+`"global"`. So **nonlinearity buys nothing on the rich view under either normalisation**, and
+every gain I have measured anywhere is a *view* artefact, not hidden structure.
+
+#### 8.4c 🔴 A B21 number needs correcting: `global` @8192 is **13.69 %, not 16.4 %**
+
+agent-A flagged their `"global"` values as pre-fix. Re-derived with the fixed selector, the
+`"sample"` rows are unchanged but one `"global"` row moves materially:
+
+| cell | pre-fix | fixed | Δ |
+|---|---|---|---|
+| `global` @2048 → raw target | 12.3 | 12.28 | −0.02 |
+| `global` @2048 → latent | 4.9 | 4.90 | +0.00 |
+| **`global` @8192 → raw target** | **16.4** | **13.69** | **−2.71** |
+| `global` @8192 → latent | 6.8 | 6.85 | +0.05 |
+
+This **reverses a B21 claim at the best view**. `"global"` improves the raw-target readout on
+the impoverished view (7.74 → 12.28, **+4.54**) but *not* on the rich one (14.23 → 13.69,
+**−0.54**). Over the best available view, `"global"` does **not** improve the linear
+raw-target readout at all.
+
+⚠️ Note the asymmetry, which does not cancel: on the **latent** at 8 192, `"global"` genuinely
+*helps* (4.21 → **6.85**, +2.64). So `"global"` moves the two targets in opposite directions
+at the rich view. B21's existing warning that the latent is a poor yardstick applies here in
+its sharpest form yet.
+
+#### 8.4d The unifying statement
+
+Across the full 4 (view × normalisation) × 2 (probe class) grid on the raw target, **the best
+number anywhere is 14.23 % — plain ridge on the `"sample"` 8 192-dim view.** Neither level
+restoration, nor nonlinearity, nor both together beats it. Both interventions are
+compensating for an impoverished *view* of `cond_summary`; neither raises its ceiling.
+
+⇒ §5's verdict is unchanged and now rests on a wider search: `M_cond` = **14.23** against
+`M_hist` = **28.61** (ridge) / **28.30** (oracle MLP) — **49.7 %**, against the ≥ 80 % that
+"nonlinearly encoded" would need.
+
+#### 8.4e One tension worth agent-A's attention
+
+If nonlinearity and level-restoration are *substitutes* for a probe, yet `"global"` still
+improved the **denoiser's** val CRPS (0.3627 → 0.3344, one seed), then the denoiser — itself
+nonlinear, and reading all 336 tokens rather than my strided 8/32 — is **not** operating at
+the probe ceiling. Two different objects are being measured, so this is a hypothesis rather
+than a result; but it points the same way as the campaign's open "denoiser barely uses its
+conditioning" issue, from a new direction.
+
+---
+
 ## 7. What I could **not** establish
 
-Matching the standard agent-A's `CMD_BUG_REPORT.md` entries set.
+*(Kept as the closing section, so it covers §4–§5 **and** the §8 follow-up. Numbering left
+unchanged because agent-A's comms entries already cite "§7".)* Matching the standard
+agent-A's `CMD_BUG_REPORT.md` entries set.
+
+0. **The §8 mechanism.** I registered "additive", the data said "substitutes", and I do
+   **not** have a verified account of *why* the two routes cap at the same place. The
+   argument I registered — that `"sample"` projects the level out exactly, so the MLP's
+   `"sample"` gain cannot be level recovery — survives as stated; what it failed to predict
+   is the shared ceiling. Treat "they compensate for the same view deficiency" as the
+   description of the data, not as a demonstrated mechanism. In particular I did not test
+   the obvious alternative: that the 8-token stride and the level are both proxies for the
+   same slow seasonal component, which would make them redundant for a trivial reason.
 
 1. **Nothing about what the *denoiser* can use.** A probe is a **lower bound** on usable
    information, and B21's own top box is the proof: `SUM_FT_MODE="all"` produced the best
@@ -380,10 +532,11 @@ Matching the standard agent-A's `CMD_BUG_REPORT.md` entries set.
 3. **One cell, one frozen stack, one conditioning mode.** noaa_uk h=168 only, with the
    single shared VAE/summarizer pair the preset points at. Not replicated on bms_air h=168,
    not on a second stage-1/2 seed.
-4. **`COND_NORM_MODE="global"` not tested.** Handoff §2.4 lists it as secondary and the
-   default as primary; the default consumed the available time. Since `"global"` raises the
-   *ridge* raw-target readout 7.7 % → 12.3 %, repeating the MLP probe there is the single
-   most informative follow-up.
+4. ~~`COND_NORM_MODE="global"` not tested.~~ **Now tested — see §8.** What remains open there:
+   the result is one cell and one checkpoint's statistics, the honest MLP rows are still
+   depressed by the same selection problem as §4, and I did not test `"global"` at any view
+   between 2 048 and 8 192 dims, so "helps the poor view, not the rich one" is established at
+   two points rather than as a curve.
 5. **The blocked-holdout geometry was not varied.** Blocks 3/8/13 of 15 with a 336-window
    purge; I did not check sensitivity to block count, block positions, or purge width.
 6. **The oracle bound's tightness is unknown.** It is leaky by construction (config *and*

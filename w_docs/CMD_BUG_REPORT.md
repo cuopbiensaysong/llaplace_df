@@ -888,17 +888,45 @@ raw 7.7 % → latent 5.6 %.
    entry, in the opposite direction to the CRPS.** Exact A/B — raw summaries collected once,
    both normalisations applied offline, same summarizer, same windows, same honest alpha:
 
+   All rows below use the **fixed** `ridge_reduction` (`purge=336`). 🔴 **Two of them were
+   wrong in an earlier draft of this entry** — they were measured with the pathological
+   trailing-20 % selector, and the `"global"` @8 192 raw-target row moved by **−2.71 pt** when
+   re-derived (16.4 → 13.69). Corrected by agent-B, 2026-08-02.
+
    | conditioning | dims | → latent | → raw target |
    |---|---|---|---|
-   | `"sample"` | 2 048 / 8 192 | 5.6 % / 4.2 % | 7.7 % / 14.2 % |
-   | `"global"` | 2 048 / 8 192 | 4.9 % / **6.8 %** | **12.3 % / 16.4 %** |
-   | raw history | 128 | **11.6 %** | **27.3 %** |
+   | `"sample"` | 2 048 / 8 192 | 5.7 % / 4.2 % | 7.7 % / **14.2 %** |
+   | `"global"` | 2 048 / 8 192 | 4.9 % / **6.9 %** | 12.3 % / 13.7 % ~~(16.4)~~ |
+   | raw history | 128 | 10.0 % | **28.6 %** |
 
-   `"global"` clearly improves the **raw-target** readout (+4.6 points at 2 048) and improves
-   val CRPS, yet the **latent** readout barely moves. Two consequences: the latent is a bad
-   yardstick for conditioning quality (reinforcing the top box), and the raw history still
-   beats every summarizer variant by ~1.7× on the raw target with 64× fewer features — so
-   `"global"` narrows the B21 gap without closing it.
+   **The correction reverses the claim at the best view.** `"global"` improves the raw-target
+   readout on the *impoverished* 2 048-dim view (7.7 → 12.3, **+4.5**) but **not** on the rich
+   one (14.2 → 13.7, **−0.5**). Over the best available view, `"global"` does not improve the
+   linear raw-target readout at all.
+
+   It does **not** cancel: on the **latent** at 8 192 `"global"` genuinely helps
+   (4.2 → **6.9**, +2.6). So it moves the two targets in **opposite directions** at the rich
+   view — the sharpest instance yet of "the latent is a bad yardstick".
+
+   **And the two routes are substitutes, not additive.** An oracle MLP on the 2 048-dim
+   `"global"` view reaches only 10.4 % against ridge's 12.3 % — no gain — where the same
+   oracle MLP on the `"sample"` view gained +4.5. agent-B registered "additive" in advance and
+   recorded the falsification rather than reinterpreting it; the mechanism for the shared
+   ≈12.3 % ceiling is **not established** (one untested possibility: the 8-token stride and
+   the level may proxy the same slow seasonal component, which would make them redundant for
+   an uninteresting reason).
+
+   ⇒ **The best raw-target number anywhere in the view × normalisation × probe-class grid is
+   14.2 % — plain ridge on the `"sample"` 8 192-dim view.** Neither level restoration, nor
+   nonlinearity, nor both beats it. Both are compensating for an impoverished *view* of
+   `cond_summary`; neither raises its ceiling. The raw history still beats it by ~2×.
+
+   🔴 **This is the third dissociation, and together they are the most robust result in this
+   entry.** `SUM_FT_MODE="all"` improved CRPS while worsening the probe; `"global"` improves
+   CRPS (see below) while *not* improving the best raw-target readout. **Probe score does not
+   track forecast quality on this pipeline.** Treat every number in this entry as evidence
+   about representations, not as a predictor of campaign outcomes — and prefer CRPS with
+   matched seeds when a decision is at stake.
 
    This is what blocks Phase 1a of `CMD_UQ_RECOVERY_PLAN.md`: the raw history clears that
    gate's 10 % threshold (11.6 %) while no conditioning variant does (best 6.8 %).
