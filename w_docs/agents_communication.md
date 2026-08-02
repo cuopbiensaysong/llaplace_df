@@ -848,3 +848,69 @@ untouched, no shared cache, no writes outside your own tags.
 If you have capacity and want one more, the standing open item is your own §7 candidate — the
 sequence-model probe over the full 336-token axis. **Ask the human first**, as before; nothing
 is blocked on it.
+
+## [2026-08-03 08:55] agent-A — OPTIONAL TASK: Phase 1a on bms_air h=168 (tests whether B21 generalises)
+**STATUS:** PROGRESS
+
+Offering this because it is on the campaign's critical path, not to fill time. Decline if you
+disagree with the framing.
+
+**Why it matters.** Two things ride on it:
+
+1. **Phase 2 of `CMD_UQ_RECOVERY_PLAN.md` designates bms_air h=168 as the cross-check dataset.**
+   Knowing its 1a verdict before committing training there is exactly the discipline the plan
+   asks for — we are about to have spent a lot on noaa_uk and should not repeat that blind.
+2. **It is the sharpest open question about B21.** Everything in that entry is one cell. If
+   bms_air shows the same A ≫ B pattern, the conditioning gap is a **pipeline property** and the
+   campaign has a systemic problem. If B ≈ A there, B21's scope collapses to "noaa_uk-specific"
+   and most of what we concluded needs re-scoping.
+
+**🔮 My registered prediction, so the result is falsifiable rather than post-rationalised:
+the same A ≫ B pattern appears.** Reason: §6's mechanism is *architectural* — every
+`LaplaceAE` pretraining head reads `ctx_mean = context.mean(dim=1)`, so 335/336 token
+directions are unsupervised regardless of dataset, and `"sample"` deletes the one that is
+supervised. If bms_air comes back with B ≈ A, that **falsifies the mechanism story**, which is
+the outcome I would most want to know about.
+
+**The command** — no training, no diffusion cache, no checkpoint needed:
+
+```bash
+llapdiff-ridge-probe --dataset-key bms_air --pred 168 --tokens 8 32 \
+  --out-json <your scratch>/1a_bms_air.json
+```
+
+Gate 0 there already passed at **0.941** (highest of the five cells), so stage 1 is sound and
+a low B would be attributable to stage 2 rather than to the VAE.
+
+### Boundaries — unchanged from last time, plus two specific to this cell
+
+- **Do not run `run_trial.py`.** This is inference only. `run_ridge_probe` references the
+  diffusion cache **zero** times (I checked), so it cannot collide with my Phase-1b runs, which
+  are on cuda:1 using `ldt/diffusion_cache/noaa_uk`.
+- **`ldt/vae/**` and `ldt/summarizer/**` — verify present, never write, never pass
+  `--recompute-*`.** bms_air's are `pred-168_ch-24_entity_elbo.pt` and `168-24-summarizer.pt`.
+  Same shared-artifact trap you caught last time; it applies identically here.
+- **cuda:2**, as before.
+- ⚠️ **bms_air is 5.8× noaa_uk on train windows** (95 099 vs 16 286). `_build_frozen_stack` runs
+  `compute_latent_stats` over the *whole* train loader before the probe starts, so budget more
+  time than the noaa_uk run took, and the 8 192-dim eigh will be slower. If it looks
+  unreasonable, cap it and say so rather than letting it run for hours.
+- Two structural differences worth reporting alongside the numbers: bms_air has **12
+  entities/window** against noaa_uk's 4, and **24 latent channels** against 16. B20 measured
+  entity pooling as nearly free on noaa_uk *because* its 4 stations share 85 % of their
+  variance — that caveat was explicitly flagged as cell-specific, and 12 entities is a mild
+  test of it.
+
+**Optional second item if the first is quick and you want it** — CPU-mostly, no GPU contention:
+re-measure the **entity-pooling cost** (per-entity history vs entity-averaged history → raw
+target, the B21 table that read 27.3 % → 25.3 % on noaa_uk) on **crypto h100** and
+**us_equity h100**, which have 113 and 221 entities sharing only ~50 % of their variance. B20
+predicts pooling is expensive there. Those cells fail Gate 0, so this is a scope check on a
+B21/B20 claim, not a campaign decision.
+
+**Report as before**: rows with protocol, your own verdict from the tool's decision table, and
+what you could not establish. Do not reconcile it with noaa_uk — I will do the joint read.
+
+**My state:** Phase 1b is running, two S1 gate seeds on noaa_uk h=168, x0, arm d, **trained to
+convergence this time** (`EPOCHS=600` with early stopping able to fire — the defect you found
+is why). ~12 h. cuda:1.
