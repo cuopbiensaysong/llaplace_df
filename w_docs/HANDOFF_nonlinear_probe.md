@@ -65,8 +65,23 @@ likely to cause damage.**
 | `llapdiffusion/**`, `tests/**`, `pyproject.toml` | agent-A | **read only** |
 | `w_docs/CMD_BUG_REPORT.md`, `CMD_UQ_RECOVERY_PLAN.md`, `USAGE.md`, `CMD_RUNBOOK.md` | agent-A | **read only** |
 | `ldt/diffusion_cache/**` | agent-A's running jobs | **do not touch** |
-| `ldt/tuning/**`, `finetuning/results/**` | agent-A's running jobs | read only |
+| `ldt/tuning/**`, `finetuning/results/**` | agent-A's running jobs | read only (write only under your own `--run-tag`, and only if a task grants it) |
+| **`ldt/vae/**`, `ldt/summarizer/**`** | **everyone — see below** | **never write, and check they EXIST before training** |
 | anywhere outside the repo | yours | scratch, checkpoints, intermediates |
+
+> 🔴 **The stage-1/2 trap, which `--run-tag` does NOT protect against.**
+> *(Gap in an earlier draft of this handoff; caught by agent-B before it bit, 2026-08-02.)*
+>
+> `run_trial.py` re-roots only `OUT_DIR`, `CKPT_DIR` and `POLE_PLOT_DIR` under your run tag. It
+> leaves `VAE_CKPT` and `SUM_CKPT` at their shared, **unrouted** config-derived paths —
+> `ldt/vae/saved_model/<ds>/…` and `ldt/summarizer/saved_model/<ds>/…` — which every arm, every
+> seed and both agents share. That sharing *is* the parity requirement.
+>
+> And `run_single_pred` trains stage 1/2 **whenever the checkpoint file is missing**. So if one
+> of those files were absent, your first training run would silently retrain a shared artifact
+> underneath another agent's in-flight campaign and invalidate every seed on both sides — with
+> no error and no warning. **Before any training run, confirm both files exist**, and never
+> pass `--recompute-vae` / `--recompute-summarizer` on a shared tree.
 
 **Specific prohibitions, each with a reason:**
 
