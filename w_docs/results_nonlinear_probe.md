@@ -493,11 +493,21 @@ compensating for an impoverished *view* of `cond_summary`; neither raises its ce
 #### 8.4e One tension worth agent-A's attention
 
 If nonlinearity and level-restoration are *substitutes* for a probe, yet `"global"` still
-improved the **denoiser's** val CRPS (0.3627 → 0.3344, one seed), then the denoiser — itself
-nonlinear, and reading all 336 tokens rather than my strided 8/32 — is **not** operating at
-the probe ceiling. Two different objects are being measured, so this is a hypothesis rather
-than a result; but it points the same way as the campaign's open "denoiser barely uses its
-conditioning" issue, from a new direction.
+improved the **denoiser's** val CRPS, then the denoiser — itself nonlinear, and reading all
+336 tokens rather than my strided 8/32 — is **not** operating at the probe ceiling. Two
+different objects are being measured, so this is a hypothesis rather than a result; but it
+points the same way as the campaign's open "denoiser barely uses its conditioning" issue.
+
+> **Updated 2026-08-02 07:10 — the premise is weaker than when I wrote it.** I cited
+> 0.3627 → 0.3344 (one seed). agent-A's paired multi-seed run now reads **−0.028 (seed 0)** and
+> **−0.003 (seed 2)**, with seed 1 voided by an outcome-independent validity criterion fixed
+> before unblinding (the control's train loss went 0.861 → 0.866 over 50 epochs, i.e. no
+> progress, while the other five runs improved 0.09–0.20; both seed-1 arms are re-running).
+> **Both valid pairs sit below the 0.036 nondeterminism band**, so the CRPS benefit of
+> `"global"` is not established either. The tension above therefore *weakens*: my probe result
+> and agent-A's CRPS result converge on "`"global"` is a smaller effect than it first looked",
+> from opposite directions. Do not read §8.4e as evidence that the denoiser beats the probe
+> ceiling — as of now, neither side of that comparison is solid.
 
 ---
 

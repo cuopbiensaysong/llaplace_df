@@ -47,7 +47,7 @@ the one to read and maintain.
 
 | knob | default | what it does |
 |---|---|---|
-| `COND_NORM_MODE = "global"` | not the default (`"sample"` still is) | Normalises the conditioning with **fixed statistics computed once over train**, persisted per checkpoint. Batch-independent like `"sample"` (B15's requirement) but **level-preserving**, and unit-scaled. Measured −0.028 val CRPS vs `"sample"` on noaa_uk h=168, one seed — promising, not yet adopted. Raises if the statistics are missing rather than silently falling back. |
+| `COND_NORM_MODE = "global"` | not the default (`"sample"` still is) | Normalises the conditioning with **fixed statistics computed once over train**, persisted per checkpoint. Batch-independent like `"sample"` (B15's requirement) but **level-preserving**, and unit-scaled. Measured on noaa_uk h=168, paired within seed: −0.028 (seed 0) and −0.003 (seed 2), **both inside the 0.036 noise band**; seed 1 voided (control stalled). **Promising but unconfirmed**, on the CRPS axis and the probe axis alike. Not adopted. Raises if the statistics are missing rather than silently falling back. |
 
 Both `normalize_cond_per_batch` and the resolver reject an unknown mode, and every other
 mode's checkpoints resolve their statistics to `None`, so nothing pre-existing moves.
@@ -875,10 +875,39 @@ raw 7.7 % → latent 5.6 %.
    (e5: 0.3665 vs 0.4483). The three rows together are the cleanest result in this entry:
    *the same information* helps or hurts depending only on the scale it arrives at.
 
-   ⚠️ **One seed.** −0.028 is below the 0.036 nondeterminism band of §4 retraction 1, so the
-   endpoint alone would not carry the claim; the 11/12 trajectory and the early-epoch gap are
-   what make it credible. **Not yet a recommendation to change the default** — that needs
-   multi-seed confirmation and a second dataset.
+   🔴 **Multi-seed, 2026-08-02 — the effect is materially smaller than that one seed implied.**
+   Paired within seed (both arms at the same seed, 60 epochs, same protocol):
+
+   | seed | control | `"global"` | Δ |
+   |---|---|---|---|
+   | 0 | 0.36274 | 0.33442 | **−0.028** |
+   | 1 | *voided* | *voided* | — |
+   | 2 | 0.33253 | 0.32919 | **−0.003** |
+
+   **Both valid deltas sit inside the 0.036 band.** The honest status of `"global"` is
+   **promising but unconfirmed** — and that now holds on *both* axes, since the probe result
+   above shows it does not improve the raw-target readout at the best view either. Two
+   independent lines converge on "smaller effect than it first looked".
+
+   **Seed 1 was voided on a criterion fixed before unblinding**: a run is invalid if its train
+   loss at e60 ≥ its train loss at e10. `ctrl_s1` went 0.861 → **0.866** — no progress in 50
+   epochs — while the other five runs improved by 0.09–0.20. It is the same stall signature as
+   `rawpole_e60`. Excluding it *reduces* the apparent effect (its Δ was −0.049, the largest of
+   the three), so this is not a favourable exclusion. Both seed-1 arms are being re-run.
+
+   ⚠️ **The seed noise is the same size as the effect.** Control spread across the three seeds
+   is **0.0404**, larger than the 0.036 band itself and larger than the mean effect. Any
+   conclusion here needs ≥5 seeds, not 3.
+
+   *(Suggestive but explicitly not claimed: `"global"`'s spread was 0.0108 against the
+   control's 0.0404, and it was the `"sample"` arm that stalled. If `"global"` genuinely
+   stabilises optimisation that could matter more than the CRPS delta — but §4 retraction 2 is
+   a "lower variance" claim that had to be withdrawn, and a variance ratio at n=3 is nearly
+   meaningless.)*
+
+   **Not a recommendation to change the default.** That needs ≥5 seeds and a second dataset —
+   and note noaa_uk (temperature) is the most favourable possible cell for a level-preserving
+   normalisation, so it is the wrong place to generalise from.
 
    Unlike `SUM_FT_MODE="all"` (below), this intervention is **campaign-compatible**: it leaves
    stage 1/2 frozen and shared across arms, so it does not violate the parity requirement that
