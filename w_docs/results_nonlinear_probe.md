@@ -702,6 +702,81 @@ not add one, because agent-A owns that file.
 
 ---
 
+## 10. Phase 1a on noaa_us h=168 — **B21 replicates on a second sensor network, and harder**
+
+Requested by agent-A after §9 removed bms_air as the Phase-2 cross-check cell. Same target
+variable as noaa_uk (**temperature**), same context/horizon geometry, genuinely different
+sensor network (40 stations vs 4). Inference only, cuda:2, nothing written.
+
+### 10.1 Registered predictions (see §10.3 for the honesty caveat on A)
+
+1. **A ≥ 20 %** — the target is temperature at h=168, the physics that made noaa_uk
+   forecastable. This was the direct test of §9's "bms_air fails on its *target*, not the
+   pipeline" claim; a near-zero A here would have falsified it.
+2. **B < 0.7·A** — the conditioning gap reproduces. §6's mechanism is *architectural*, so it
+   should not care which sensor network produced the data. **B ≥ 0.7·A would have been real
+   evidence against §6** — and unlike bms_air this cell can deliver that, because A ≠ 0.
+3. Secondary: **C < 10 %**.
+
+### 10.2 Results
+
+val, **19 832 train / 3 289 val** at 40 entities, `cond_norm_mode="sample"`, no checkpoint,
+honest blocked+purged alpha on a **healthy 70 % fit set (13 850)** — the §9.10 small-n defect
+does not touch this cell.
+
+| probe | dims | → raw target | → latent |
+|---|---|---|---|
+| **A raw history** | 1 280 | **23.4 %** | 8.3 % |
+| B/C `cond_summary`, 8 tok | 2 048 | 0.3 % | 4.4 % |
+| B/C `cond_summary`, 32 tok | 8 192 | **2.6 %** | 4.4 % |
+
+**A = 23.4 % · B = 2.6 % · C = 4.4 %** → tool verdict **`FIX THE CONDITIONING (B21)`**.
+
+### 10.3 Prediction outcomes
+
+- **(2) B < 0.7·A — HELD, with room to spare.** Threshold 16.4 %, observed **2.6 %**.
+- **(3) C < 10 % — held** (4.4 %).
+- **(1) A ≥ 20 % — observed 23.4 %, but DISCOUNT IT.** I formed it before running but recorded
+  it in the comms channel only *after* A had come back. agent-A has no way to verify the
+  ordering and should not have to take my word for it. Only (2) and (3) were posted while still
+  unobserved.
+
+**Within-cell ratio B/A = 11.1 %** — the summarizer delivers about a ninth of the linearly
+available signal here. This is the informative case §9 could not provide: A is solidly non-zero,
+so a null in B would have been genuine evidence against §6. It is not a null. **§6 gets a
+positive replication on an independent network.**
+
+### 10.4 A candidate mechanism — flagged, not concluded
+
+Per agent-A's rule I do not reconcile this with noaa_uk; that joint read is theirs. One
+ingredient worth having in front of them:
+
+**noaa_us pools 40 entities into one latent; noaa_uk pools 4.** B20 measured entity pooling as
+nearly free on noaa_uk *specifically because* its 4 stations share 85 % of their variance, and
+flagged that as cell-specific. noaa_us is the first measured cell where that caveat could bite
+hard.
+
+⚠️ Two reasons not to over-read it even if the ratios line up: §6's mechanism (335/336 token
+directions unsupervised) is entity-count-**independent**, so pooling would be an *additional*
+loss rather than the same one; and two points is a suggestion, not a trend. crypto (113) and
+us_equity (221) remain the untested extremes.
+
+### 10.5 What this settles
+
+- **noaa_us h=168 passes 1a's dataset gate** (A = 23.4 %) and can serve as Phase 2's
+  cross-check cell.
+- **It confirms §9 from a second direction.** temperature 23.4 % vs PM2.5 −0.3 % — same tool,
+  metric, horizon, context length and probe. bms_air's failure is its target.
+- **Geometry is clean**, unlike bms_air: noaa_us's modal entity count **is** the full 40-station
+  panel, and it is the only scoreable count (every other has 0 val windows), so no `--entities`
+  override was needed and the modal cell is representative.
+
+**Not settled:** anything nonlinear on this cell; `COND_NORM_MODE="global"` here; a second seed
+of the frozen stack; other noaa_us horizons (agent-A asked for the horizon question to be
+carried over — untested, and less pressing now that h=168 is healthy).
+
+---
+
 ## 7. What I could **not** establish
 
 *(Kept as the closing section, so it covers §4–§5 **and** the §8 follow-up. Numbering left

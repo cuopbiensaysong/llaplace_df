@@ -1110,9 +1110,42 @@ that a pipeline can pass while being unfit for its downstream purpose is not a s
 
      Entity pooling costs **2 points**; the remaining ~17 points are lost downstream of it.
      Consistent with B20: noaa_uk's 4 stations share 85 % of their variance, so averaging
-     them discards little. ⚠️ **This is cell-specific** — crypto (113 entities, 50 % shared)
-     and us_equity (221, 48 %) would pay far more, and the double pooling is worth
-     re-measuring there before it is dismissed.
+     them discards little.
+
+     🔴 **RETRACTED as a general claim, 2026-08-03. On a 40-entity cell, entity pooling is the
+     DOMINANT loss, not a negligible one.** The caveat above ("this is cell-specific") was
+     correct and has now been cashed. Measured with the identical CPU-only probe on noaa_us
+     h=168 — same tool, same metric, same horizon, same context length:
+
+     | cell | entities | shared variance | per-entity A | entity-mean | **pooling cost** | after full summarizer (B) |
+     |---|---|---|---|---|---|---|
+     | noaa_uk | 4 | **88 %** | 28.6 % | 25.3 % | **−3.3 pt** | 14.2 % |
+     | **noaa_us** | **40** | **42 %** | 23.4 % | **6.0 %** | **−17.4 pt** | **2.6 %** |
+
+     Read as a decomposition of where the signal goes:
+
+     - **noaa_uk**: 28.6 → 25.3 (pooling, −3.3) → 14.2 (rest of the summarizer, −11.1).
+       The **objective defect (§6) dominates**.
+     - **noaa_us**: 23.4 → 6.0 (pooling, **−17.4**) → 2.6 (rest of the summarizer, −3.4).
+       **Entity pooling dominates**, by 5×.
+
+     **The mediating variable is measured, not inferred**, which is what makes this more than a
+     two-point trend: an entity's target shares **88 %** of its variance with the panel mean on
+     noaa_uk but only **42 %** on noaa_us. Four co-located UK stations are nearly the same
+     signal, so averaging them is almost lossless; forty US stations spread across a continent
+     are not, so averaging destroys most of what distinguishes them.
+
+     ⇒ **§6 and B5 are two independent losses, and which one dominates depends on the cell's
+     entity structure.** On the paper's headline cell (noaa_uk, 4 entities) the objective defect
+     is the bigger term; on a realistic multi-entity network it is the mean-pool. B5 has been
+     known since 2026-07-21 and was only ever addressed **data-side** on the synthetic benchmark
+     (`--phase-spread`); architecturally the pooling is untouched, and this is the first
+     measurement of what it costs on real data with a wide panel.
+
+     *(Still untested at the extremes: crypto (113 entities) and us_equity (221). Both fail
+     Gate 0, so they cannot carry a campaign decision, but they would extend the mediating-
+     variable relationship. 15 030 of 131 560 noaa_us entity-windows had constant targets and
+     were dropped from the shared-variance figure.)*
 
   ⇒ What remains is the **encoder + query-pooling + objective**, and both surviving strands of
   evidence point at re-encoding rather than destruction: the `SUM_FT` dose-response (better
