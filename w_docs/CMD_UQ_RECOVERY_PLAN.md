@@ -4,6 +4,11 @@
 is the ordered plan to get a defensible Table 3. Execute phases in order. Each phase has an
 explicit stop condition — **do not proceed past a failed stop condition**; report and wait.
 
+> 🛑 **STOPPED at Phase 1 as of 2026-08-03. Read `w_docs/CMD_CAMPAIGN_STATE.md` first** — it
+> carries the branch state, what is settled, and what the next task actually is. Phases 2–6 are on
+> hold; the 1b gate failed on both seeds and the cause is the conditioning (B21), so the next
+> action is the conditioning track, **not** the next phase in this file.
+
 ---
 
 ## Background (read once, do not re-litigate)
@@ -74,7 +79,7 @@ by a per-entity prior, not by the forecast. Do not use CRPS as a health check.
 
 ## Phase 0 — Window-count audit ✅ DONE 2026-07-31
 
-Full results: `finetuning/results/window_audit.md`. Reproduced here because every later phase
+Full results: **`w_docs/CMD_PHASE0_WINDOW_AUDIT.md`** (tracked; the `finetuning/results/` copy is gitignored). Reproduced here because every later phase
 depends on them.
 
 | cell | WINDOW | PRED | **train_w** | **val_w** | **test_w** | ent/win | supervision scalars | `LAPLACE_K` → params | vs params |
@@ -85,7 +90,7 @@ depends on them.
 | noaa_uk h168 | 336 | 168 | 16 286 | 2 183 | 4 702 | 4 | 43.8 M | **128 → 10.17 M** | **4.3× under** |
 | bms_air h168 | 336 | 168 | 95 099 | 17 598 | 33 449 | 12 | 383 M | 256 → 11.75 M | **32.6× under** |
 
-> **Corrected 2026-08-02** (`finetuning/results/window_audit.md` has the detail). The audit
+> **Corrected 2026-08-02** (`w_docs/CMD_PHASE0_WINDOW_AUDIT.md` has the detail). The audit
 > applied a single "10.2 M" to all five cells, but `LAPLACE_K` is a per-dataset preset field
 > and **only noaa_uk is 128** — the rest default to 256. Verdicts are unchanged; the ratios
 > move. The `k_probe` behind `laplace_k=128` **was run on noaa_uk**, so the gate cell's number
@@ -316,7 +321,8 @@ llapdiff-uq-eval --dataset-key <ds> --pred <h> --checkpoint <S1 ckpt> \
 
 Compare like-for-like (fixed t, identical noise, EMA weights).
 
-> **`--latent-only` is required here, and so is `--mean-source ddim`** (fixed 2026-08-01).
+> **`--latent-only` is required here.** ~~and so is `--mean-source ddim`~~ (fixed 2026-08-01;
+> the `ddim` half **superseded 2026-08-03**, see the correction after this block).
 > The gate arm is plain-MSE S1, which has **no UQ head**, and the tool used to refuse such
 > a checkpoint outright — while these four metrics exist nowhere else in the tree, so the
 > campaign's decision point was unmeasurable. It now reports the mean-only metrics and
@@ -327,6 +333,19 @@ Compare like-for-like (fixed t, identical noise, EMA weights).
 > any non-`x0` checkpoint, because it returns the raw network output, which is an x0
 > estimate only under `predict_type='x0'`; `ddim` converts through `scheduler.to_x0` and
 > is safe for any parameterization. Train the gate at x0 as §1 says and either works.
+
+> 🔴 **Correction 2026-08-03 — read BOTH sources, and do not read `ddim` alone.** The paragraph
+> above chose `ddim` for *parameterization safety*, which is a real property, and silently
+> inherited a false one: that `ddim` estimates a conditional mean. It does not.
+> `generate(eta=0.0)` is deterministic in its trajectory but starts from a **random `x_T`**, so it
+> returns **one sample**; and it applies CFG on `guidance_strength=(1.0, 2.0)`,
+> `guidance_power=0.3`, which pushes samples away from the unconditional. Both inflate MSE without
+> touching signal, so a single-sample MSE **understates a signal gate by construction** — measured
+> at 2.2–2.4× over-dispersion in §1b, enough to turn a +6 % model into a −3 % reading.
+> `--mean-source oneshot` at `t = T−1` *is* the conditional-mean estimator and is legal on the x0
+> gate arm. **Run both**: `oneshot` for the honest signal number, `ddim` for what sampling
+> actually delivers, and the gap between them is itself diagnostic (see lead 2 in §1b). Reading
+> only `ddim` would have scored this campaign's decision point wrong in the pessimistic direction.
 
 ### Decision table
 
@@ -340,8 +359,9 @@ Compare like-for-like (fixed t, identical noise, EMA weights).
 
 ### 🔴 EXECUTED 2026-08-03 on noaa_uk h=168 — **THE GATE FAILS**, both seeds
 
-Full readout and reproduce commands: `finetuning/results/phase1b/gate_readout.md` (gitignored
-path — this section is the tracked copy).
+Full readout and reproduce commands: **`w_docs/CMD_PHASE1B_GATE.md`** (tracked copy of
+`finetuning/results/phase1b/gate_readout.md`, which is gitignored). Checkpoints:
+`ldt/tuning/phase1b/noaa_uk_h168/d/s1_gate_seed{0,1}/output/predict-x0/modal-chirp/seed-{0,1}/pred-168/llapdiff_pred-168_best_ema.pt`.
 
 Both seeds converged and early-stopped on their own — **not** the `EPOCHS=60` truncation that made
 the `global` seeds unmeasurable:
@@ -703,7 +723,7 @@ paper, not for Table 3, and it must not be lost because this document did not co
 ## Execution order summary
 
 ```
-Phase 0  window audit (all cells)                      ✅ DONE — finetuning/results/window_audit.md
+Phase 0  window audit (all cells)                      ✅ DONE — w_docs/CMD_PHASE0_WINDOW_AUDIT.md
 Phase 1  Gate 0 round-trip + ridge probe + S1 gate
          on noaa_uk h=168, 2 seeds, x0               → DECISION POINT
 Phase 2  cross-check on bms_air h=168 (or crypto)
