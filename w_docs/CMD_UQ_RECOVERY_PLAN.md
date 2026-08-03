@@ -335,28 +335,39 @@ Compare like-for-like (fixed t, identical noise, EMA weights).
 | Beats baseline, `latent_corr` clearly positive | Pipeline works. G-c's failure was B19. | Proceed to Phase 2. |
 | Ties/loses baseline, **ridge passed 1a with margin**, cell is under-parameterized | Real modelling defect, independent of data size. | **STOP.** U3 is unanswerable on any dataset until fixed. Report before continuing, and open a debugging track — the two named leads first (below), then VAE latent learnability and x0 vs v. |
 | Ties/loses baseline, **cell is over-parameterized** (crypto, us_equity) | Not diagnostic — data and modelling are confounded here. | Re-run 1b on noaa_uk or bms_air before concluding anything. |
-| Ties/loses baseline, **ridge failed or was marginal in 1a** | Dataset uninformative. | Re-run 1a/1b on bms_air h=168. |
+| Ties/loses baseline, **ridge failed or was marginal in 1a** | Dataset uninformative. | ~~Re-run 1a/1b on bms_air h=168.~~ ⚠️ **Stale row, superseded 2026-08-03.** It predates the paired 1a rule, so "ridge failed" conflated *A* failing (dataset really is uninformative) with *C* failing (conditioning is), and its action is now known-wrong: bms_air was ruled VOID and Phase 2 moved to noaa_us. Use the row below. |
+| Ties/loses baseline, **1a returned `FIX THE CONDITIONING (B21)`** — A ≥ 10 % so the cell is forecastable, C < 10 % — and the cell is under-parameterized | The conditioning ceiling is the binding constraint, now confirmed **on the trained model** and not merely inferred from probes. Not a denoiser defect, not a dataset defect. | **STOP the campaign at Phase 1** and open the B21 conditioning track. Re-running 1b on another cell tests nothing: it carries the same summarizer. Re-enter 1b only after a conditioning change moves **C** past 10 % in 1a. |
 
-### 🟠 EXECUTED 2026-08-03 on noaa_uk h=168 — INTERIM, seed 0 of 2
+### 🔴 EXECUTED 2026-08-03 on noaa_uk h=168 — **THE GATE FAILS**, both seeds
 
-⚠️ **Not the gate verdict.** Seed 1 is still training (ETA ~21:10 local; at epoch 65 the two seeds
-sit at CRPS 0.3913 vs 0.3953, well inside the 0.036 band, so they are tracking). The two-seed rule
-exists because of §4 retraction 1 and is not waived here. Full readout, including the reproduce
-commands: `finetuning/results/phase1b/gate_readout.md` (gitignored path — this section is the
-tracked copy).
+Full readout and reproduce commands: `finetuning/results/phase1b/gate_readout.md` (gitignored
+path — this section is the tracked copy).
 
-Seed 0 converged and early-stopped on its own: best val CRPS **0.32376 at epoch 255**, stopped at
-355. Confirmed from the checkpoint's own `model_config`: `cond_norm_mode="sample"` (the default,
-**not** `global`), `sum_ft_mode` absent, `pole_pool_use_raw_summary=False`, `chirp_uq_head=False`,
-`predict_type="x0"`. The matching 1a row is therefore `cond_summary, "sample"`, not either
-`global` row.
+Both seeds converged and early-stopped on their own — **not** the `EPOCHS=60` truncation that made
+the `global` seeds unmeasurable:
 
-| `--mean-source` | `latent_mse` vs baseline 0.64917 | RMSE vs 0.80571 | `latent_corr` |
+| seed | best val CRPS | best epoch | stopped |
 |---|---|---|---|
-| `ddim` (this section mandates it) | 0.68280 → **+5.18 % worse** | **−2.56 %** | **0.370** |
-| `oneshot` (conditional mean) | 0.64369 → −0.85 % better | +0.42 % | 0.190 |
+| 0 | 0.32376 | 255 | 355 |
+| 1 | 0.33229 | 210 | 310 |
 
-**Both fail the 10 % threshold; the mandated read loses to predict-mean outright.**
+CRPS spread **0.0085**, well inside the documented 0.036 band, so the two seeds agree and the plan's
+"if both seeds agree, one is enough evidence" clause is satisfied. Confirmed from each checkpoint's
+own `model_config`: `cond_norm_mode="sample"` (the default, **not** `global`), `sum_ft_mode` absent,
+`pole_pool_use_raw_summary=False`, `chirp_uq_head=False`, `predict_type="x0"`. The matching 1a row
+is therefore `cond_summary, "sample"`, not either `global` row.
+
+| `--mean-source` | seed | `latent_mse` vs baseline 0.64917 | RMSE vs 0.80571 | `latent_corr` |
+|---|---|---|---|---|
+| `ddim` (this section mandates it) | 0 | 0.68280 → **+5.18 % worse** | **−2.56 %** | 0.3702 |
+| `ddim` | 1 | 0.72277 → **+11.34 % worse** | **−5.52 %** | 0.3395 |
+| `oneshot` (conditional mean) | 0 | 0.64369 → −0.84 % better | +0.42 % | 0.1903 |
+| `oneshot` | 1 | 0.63927 → −1.53 % better | +0.77 % | 0.1931 |
+
+**Both seeds, both reads, fail the 10 % threshold; the mandated read loses to predict-mean
+outright.** The `oneshot` correlations reproduce to **1.5 %** across seeds (0.1903 vs 0.1931) —
+the conditioning-only signal at max noise is essentially seed-independent, which is what makes the
+lead-2 reading below more than a one-seed curiosity.
 
 **`ddim` is the wrong statistic for a *signal* gate, and this section should stop mandating it.**
 It runs `generate(eta=0.0)` from a random `x_T` — deterministic in trajectory but still **one
@@ -364,21 +375,26 @@ sample**, not a conditional mean — and applies CFG on a `guidance_strength=(1.
 `guidance_power=0.3` schedule. Both inflate spread without touching signal. Solving
 `mse/base = a − 2·corr·√a + 1` for `a = Var(ŷ)/Var(y)` separates the two:
 
-| read | corr | std(ŷ)/std(y) | optimal (= corr) | over-dispersion | **RMSE reduction if rescaled** |
-|---|---|---|---|---|---|
-| `ddim` | 0.370 | 0.805 | 0.370 | **2.17×** | **+7.11 %** |
-| `oneshot` | 0.190 | 0.357 | 0.190 | 1.88× | +1.83 % |
+| read | seed | corr | std(ŷ)/std(y) | optimal (= corr) | over-dispersion | **RMSE reduction if rescaled** |
+|---|---|---|---|---|---|---|
+| `ddim` | 0 | 0.3702 | 0.805 | 0.370 | **2.17×** | **+7.11 %** |
+| `ddim` | 1 | 0.3395 | 0.818 | 0.339 | **2.41×** | **+5.94 %** |
+| `oneshot` | 0 | 0.1903 | 0.357 | 0.190 | 1.88× | +1.83 % |
+| `oneshot` | 1 | 0.1931 | 0.342 | 0.193 | 1.77× | +1.88 % |
 
-So the model does carry signal — enough for **+7.1 %** with its scale fixed — and loses only
-because it is 2.2× too wide. **+7.1 % is still under 10 %, so the verdict is unchanged**; what
-changes is the diagnosis.
+So the model does carry signal — enough for **+6.5 % on average** with its scale fixed — and loses
+only because it is ~2.3× too wide. **6.5 % is still well under 10 %, so the verdict is unchanged
+even after granting the model a free optimal rescaling it does not have**; what changes is the
+diagnosis.
 
 **The finding: the denoiser is at the ridge ceiling, so it is not the bottleneck.** 1a measured the
 best *linear* prediction of this same latent from this same conditioning at **C = 5.6 %** (2 048
-dims, `"sample"`) → implied corr **0.330**. The trained 10.2 M-parameter denoiser, rescaled,
-reaches **7.1 % / corr 0.370** — **1.5 pt above a ridge regression**, on the same side of the
-threshold. It extracts essentially everything the conditioning linearly exposes plus a small
-nonlinear margin, and the total still misses the gate.
+dims, `"sample"`) → implied corr **0.330**. The two trained 10.2 M-parameter denoisers, rescaled,
+reach **7.11 % and 5.94 %** — mean **6.5 %, i.e. +0.9 pt over a ridge regression**, with seed 1
+landing within **0.3 pt** of it. They extract essentially everything the conditioning linearly
+exposes plus a small nonlinear margin, and the total still misses the gate. Ten million parameters,
+a nonlinear architecture, and 355 epochs buy under one percentage point over a linear least-squares
+fit on the same inputs.
 
 ⇒ The decision-table row *"ties/loses baseline + ridge passed 1a with margin ⇒ real modelling
 defect ⇒ STOP"* **does not apply**: 1a did not pass, it returned `FIX THE CONDITIONING (B21)`, and
@@ -388,12 +404,14 @@ measurement on the trained model.
 **Independent confirmation of lead 2 below (`block_summary_adaln = False`).** `oneshot` reads the
 model at `t = T−1` — its x0 estimate given pure noise plus the conditioning, i.e. the cleanest
 measure of how much conditioning reaches the trunk when `x_t` carries nothing. It scores corr
-**0.190**; the reverse trajectory, where `x_t` becomes progressively informative, reaches **0.370**.
-Under an ideal model the ordering is the opposite — `corr(conditional mean) = ρ` but
-`corr(single sample) = ρ²`, so `oneshot` should score *higher*, not half as much. Instead the model
-recovers about half its final correlation only *after* `x_t` starts carrying signal, which is
-exactly lead 2's mechanism: conditioning enters only via cross-attention into K modal tokens whose
-residues come from `x_t`, so at high noise those tokens are noise-dominated.
+**0.1903 / 0.1931**; the reverse trajectory, where `x_t` becomes progressively informative, reaches
+**0.3702 / 0.3395**. Under an ideal model the ordering is the opposite —
+`corr(conditional mean) = ρ` but `corr(single sample) = ρ²`, so `oneshot` should score *higher*,
+not half as much. Instead both models recover about **half** their final correlation only *after*
+`x_t` starts carrying signal, which is exactly lead 2's mechanism: conditioning enters only via
+cross-attention into K modal tokens whose residues come from `x_t`, so at high noise those tokens
+are noise-dominated. That the two seeds land 1.5 % apart on this number makes it a property of the
+architecture, not of a draw.
 
 **Start the debugging track with the two leads already in the bug report**, not from scratch:
 
@@ -703,3 +721,11 @@ for cross-references; the execution order is the one above.
 Stop and report at Phase 1 if the gate fails on an **under-parameterized** cell with the ridge
 probe passing by a clear margin. Everything downstream depends on there being a forecast to put
 error bars around.
+
+> 🔴 **TRIGGERED 2026-08-03.** noaa_uk h=168, both S1 seeds, both mean sources — see §1b. The
+> trigger fires on *A* = 28.6 % (the cell is forecastable by a clear margin) while *C* < 10 %, so
+> the intent of the rule is met exactly: there is a forecast to be had and the pipeline does not
+> deliver it. **Phases 2–6 are on hold.** They are not merely unreliable, they are unanswerable —
+> every one of them scores the calibration of a predictive law around a mean the gate has just
+> shown carries ~6.5 % against a 10 % bar. The next action is the B21 conditioning track below,
+> not any phase in this plan.
