@@ -337,6 +337,64 @@ Compare like-for-like (fixed t, identical noise, EMA weights).
 | Ties/loses baseline, **cell is over-parameterized** (crypto, us_equity) | Not diagnostic — data and modelling are confounded here. | Re-run 1b on noaa_uk or bms_air before concluding anything. |
 | Ties/loses baseline, **ridge failed or was marginal in 1a** | Dataset uninformative. | Re-run 1a/1b on bms_air h=168. |
 
+### 🟠 EXECUTED 2026-08-03 on noaa_uk h=168 — INTERIM, seed 0 of 2
+
+⚠️ **Not the gate verdict.** Seed 1 is still training (ETA ~21:10 local; at epoch 65 the two seeds
+sit at CRPS 0.3913 vs 0.3953, well inside the 0.036 band, so they are tracking). The two-seed rule
+exists because of §4 retraction 1 and is not waived here. Full readout, including the reproduce
+commands: `finetuning/results/phase1b/gate_readout.md` (gitignored path — this section is the
+tracked copy).
+
+Seed 0 converged and early-stopped on its own: best val CRPS **0.32376 at epoch 255**, stopped at
+355. Confirmed from the checkpoint's own `model_config`: `cond_norm_mode="sample"` (the default,
+**not** `global`), `sum_ft_mode` absent, `pole_pool_use_raw_summary=False`, `chirp_uq_head=False`,
+`predict_type="x0"`. The matching 1a row is therefore `cond_summary, "sample"`, not either
+`global` row.
+
+| `--mean-source` | `latent_mse` vs baseline 0.64917 | RMSE vs 0.80571 | `latent_corr` |
+|---|---|---|---|
+| `ddim` (this section mandates it) | 0.68280 → **+5.18 % worse** | **−2.56 %** | **0.370** |
+| `oneshot` (conditional mean) | 0.64369 → −0.85 % better | +0.42 % | 0.190 |
+
+**Both fail the 10 % threshold; the mandated read loses to predict-mean outright.**
+
+**`ddim` is the wrong statistic for a *signal* gate, and this section should stop mandating it.**
+It runs `generate(eta=0.0)` from a random `x_T` — deterministic in trajectory but still **one
+sample**, not a conditional mean — and applies CFG on a `guidance_strength=(1.0, 2.0)`,
+`guidance_power=0.3` schedule. Both inflate spread without touching signal. Solving
+`mse/base = a − 2·corr·√a + 1` for `a = Var(ŷ)/Var(y)` separates the two:
+
+| read | corr | std(ŷ)/std(y) | optimal (= corr) | over-dispersion | **RMSE reduction if rescaled** |
+|---|---|---|---|---|---|
+| `ddim` | 0.370 | 0.805 | 0.370 | **2.17×** | **+7.11 %** |
+| `oneshot` | 0.190 | 0.357 | 0.190 | 1.88× | +1.83 % |
+
+So the model does carry signal — enough for **+7.1 %** with its scale fixed — and loses only
+because it is 2.2× too wide. **+7.1 % is still under 10 %, so the verdict is unchanged**; what
+changes is the diagnosis.
+
+**The finding: the denoiser is at the ridge ceiling, so it is not the bottleneck.** 1a measured the
+best *linear* prediction of this same latent from this same conditioning at **C = 5.6 %** (2 048
+dims, `"sample"`) → implied corr **0.330**. The trained 10.2 M-parameter denoiser, rescaled,
+reaches **7.1 % / corr 0.370** — **1.5 pt above a ridge regression**, on the same side of the
+threshold. It extracts essentially everything the conditioning linearly exposes plus a small
+nonlinear margin, and the total still misses the gate.
+
+⇒ The decision-table row *"ties/loses baseline + ridge passed 1a with margin ⇒ real modelling
+defect ⇒ STOP"* **does not apply**: 1a did not pass, it returned `FIX THE CONDITIONING (B21)`, and
+1b now confirms the ceiling 1a predicted. This converts B21 from an inference about probes into a
+measurement on the trained model.
+
+**Independent confirmation of lead 2 below (`block_summary_adaln = False`).** `oneshot` reads the
+model at `t = T−1` — its x0 estimate given pure noise plus the conditioning, i.e. the cleanest
+measure of how much conditioning reaches the trunk when `x_t` carries nothing. It scores corr
+**0.190**; the reverse trajectory, where `x_t` becomes progressively informative, reaches **0.370**.
+Under an ideal model the ordering is the opposite — `corr(conditional mean) = ρ` but
+`corr(single sample) = ρ²`, so `oneshot` should score *higher*, not half as much. Instead the model
+recovers about half its final correlation only *after* `x_t` starts carrying signal, which is
+exactly lead 2's mechanism: conditioning enters only via cross-attention into K modal tokens whose
+residues come from `x_t`, so at high noise those tokens are noise-dominated.
+
 **Start the debugging track with the two leads already in the bug report**, not from scratch:
 
 1. **B15's residual gap.** Fixing per-batch conditioning normalization moved R²_cond from
