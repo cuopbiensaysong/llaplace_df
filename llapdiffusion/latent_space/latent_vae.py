@@ -72,6 +72,7 @@ class LatentVAE(nn.Module):
         dropout: float = 0.1,
         num_entities: Optional[int] = None,
         entity_conditioned: bool = False,
+        entity_encode: bool = False,
     ) -> None:
         super().__init__()
         self.seq_len = int(seq_len)
@@ -86,11 +87,28 @@ class LatentVAE(nn.Module):
                 f"expected at least {2 * self.output_dim} token channels."
             )
         self.entity_conditioned = bool(entity_conditioned)
+        self.entity_encode = bool(entity_encode)
         self.num_entities = None if num_entities is None else int(num_entities)
         if self.entity_conditioned and (self.num_entities is None or self.num_entities <= 0):
             raise ValueError("num_entities must be provided when entity_conditioned=True")
+        if self.entity_encode and (self.num_entities is None or self.num_entities <= 0):
+            raise ValueError("num_entities must be provided when entity_encode=True")
 
         self.in_proj = nn.Linear(self.input_dim, latent_dim)
+        # B5/B20: without an entity tag on the encoder input, `encoder` is permutation-
+        # EQUIVARIANT and the observation-weighted pool below is permutation-INVARIANT, so
+        # `mu` is a function of the multiset of this timestep's values and cannot say which
+        # entity held which. The decoder's entity embedding can then only add a static
+        # per-entity offset to one shared code, which is exactly the measured signature:
+        # corr(recon, panel mean) = 1.000 with 5.9% of the cross-entity variation retained,
+        # and a round-trip pinned to the panel's own shared-variance ceiling. Tagging the
+        # encoder input lets entities occupy separable subspaces of the pooled sum, so the
+        # latent can carry their deviations without changing its shape.
+        if self.entity_encode:
+            self.entity_emb_enc = nn.Embedding(self.num_entities, latent_dim)
+            nn.init.normal_(self.entity_emb_enc.weight, std=0.02)
+        else:
+            self.entity_emb_enc = None
         self.encoder = _SetTransformer(latent_dim, enc_heads, enc_ff, enc_layers, dropout=dropout)
 
         self.mu_head = nn.Linear(latent_dim, self.latent_channel)
@@ -141,7 +159,11 @@ class LatentVAE(nn.Module):
             entity_pad = entity_pad.to(dtype=torch.bool, device=x_tok.device)
         if entity_pad.shape != (B, N):
             raise ValueError(f"entity_pad must have shape [B,N]=({B},{N}), got {tuple(entity_pad.shape)}")
-        if self.entity_conditioned and self.num_entities is not None and N > self.num_entities:
+        if (
+            (self.entity_conditioned or self.entity_encode)
+            and self.num_entities is not None
+            and N > self.num_entities
+        ):
             raise ValueError(f"N={N} exceeds configured num_entities={self.num_entities}")
         return x_tok, entity_pad, B, T, N, D
 
@@ -155,6 +177,9 @@ class LatentVAE(nn.Module):
         pad_bt = entity_pad.unsqueeze(1).expand(B, T, N).reshape(B * T, N)
 
         h = self.in_proj(x_bt)
+        if self.entity_emb_enc is not None:
+            ids = torch.arange(N, device=x_bt.device)
+            h = h + self.entity_emb_enc(ids).unsqueeze(0).to(dtype=h.dtype)
         h = self.encoder(h, key_padding_mask=pad_bt)
 
         obs_channels = x_bt[..., self.output_dim : self.output_dim * 2].float()

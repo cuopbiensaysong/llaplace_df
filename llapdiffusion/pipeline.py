@@ -14,6 +14,7 @@ from llapdiffusion.configs.config_utils import (
     dataloader_kwargs,
     make_jsonable,
     normalize_predict_type,
+    summarizer_ckpt_path,
 )
 from llapdiffusion.configs.dataset_archives import configure_dataset_archive
 from llapdiffusion.configs.dataset_defaults import apply_dataset_preset, dataset_keys, default_horizons, infer_dataset_key
@@ -112,10 +113,7 @@ def _summarizer_ckpt_path(config=config) -> Path:
     ckpt = config.SUM_CKPT
     if ckpt:
         return Path(ckpt)
-    return (
-        Path(config.SUM_DIR)
-        / f"{config.PRED}-{config.VAE_LATENT_CHANNELS}-summarizer.pt"
-    )
+    return summarizer_ckpt_path(config)
 
 
 def _select_vae_checkpoint(stats: Dict[str, object], fallback: Path) -> Path:
@@ -364,9 +362,7 @@ def _update_config_for_pred(pred: int, config=config) -> None:
     config.REQUESTED_PREDICT_TYPE_ARG = requested_predict_type
     config.PREDICT_TYPE = active_predict_type
     config.SUM_CONTEXT_LEN = _resolve_sum_context_len(pred, config=config)
-    config.SUM_CKPT = str(
-        Path(config.SUM_DIR) / f"{pred}-{config.VAE_LATENT_CHANNELS}-summarizer.pt"
-    )
+    config.SUM_CKPT = str(summarizer_ckpt_path(config))
 
 
 def _apply_pred_output_dirs(

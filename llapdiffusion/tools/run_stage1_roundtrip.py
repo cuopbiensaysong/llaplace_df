@@ -47,6 +47,7 @@ from typing import Dict, List
 import numpy as np
 import torch
 
+from llapdiffusion.configs.config_utils import refresh_artifact_paths
 from llapdiffusion.latent_space.latent_vae import LatentVAE
 from llapdiffusion.models.llapdiff_utils import (
     decode_latents_with_vae,
@@ -74,6 +75,7 @@ def _build_vae(cfg, train_dl, device: torch.device) -> LatentVAE:
         dec_layers=cfg.VAE_LAYERS, dec_heads=cfg.VAE_HEADS, dec_ff=cfg.VAE_FF,
         input_dim=vae_in, output_dim=vae_out, num_entities=num_entities,
         entity_conditioned=bool(getattr(cfg, "VAE_ENTITY_CONDITION", False)),
+        entity_encode=bool(getattr(cfg, "VAE_ENTITY_ENCODE", False)),
     ).to(device)
     payload = torch.load(cfg.VAE_CKPT, map_location=device, weights_only=False)
     tv._load_module_state(vae, unwrap_checkpoint_model(payload), strict=True)
@@ -164,6 +166,11 @@ def _parse_args() -> argparse.Namespace:
                         "puts gates and diagnostics on val), 'test' for --tasks (historical).")
     p.add_argument("--max-batches", type=int, default=2,
                    help="Batches read from the chosen split (default 2).")
+    p.add_argument("--vae-ckpt", default=None,
+                   help="Override the stage-1 artifact (default: the preset's cfg.VAE_CKPT).")
+    p.add_argument("--vae-entity-encode", action="store_true",
+                   help="Score the VAE trained with the encoder-side entity embedding (B20). "
+                        "Loads are strict, so this must match the artifact.")
     p.add_argument("--tasks", nargs="+", default=None,
                    help="Synthetic benchmark tasks (default: synthetic_linear_chirp).")
     p.add_argument("--seeds", nargs="+", type=int, default=(0,),
@@ -237,6 +244,11 @@ def _parse_args() -> argparse.Namespace:
 def _dataset_cell(args, device: torch.device) -> Dict[str, object]:
     """Gate 0 for a real (dataset, horizon) against its preset's frozen stage-1 VAE."""
     cfg = build_eval_config(args.dataset_key, int(args.pred))
+    if getattr(args, "vae_entity_encode", False):
+        cfg.VAE_ENTITY_ENCODE = True
+        refresh_artifact_paths(cfg)
+    if getattr(args, "vae_ckpt", None):
+        cfg.VAE_CKPT = str(args.vae_ckpt)
     vae_ckpt = Path(cfg.VAE_CKPT)
     if not vae_ckpt.exists():
         raise SystemExit(

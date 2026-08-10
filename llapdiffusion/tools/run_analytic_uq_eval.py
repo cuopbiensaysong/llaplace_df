@@ -20,12 +20,27 @@ Loads a chirp+UQ checkpoint and reports:
    the same split with wall-clock for both, i.e. the plan's "analytic vs sampled
    CRPS at matched wall-clock" comparison.
 
-Two mean sources:
+Three mean sources. They differ ONLY in how the law's location is obtained, so choosing
+between them is a protocol decision, not a modelling one — and it is recorded in the report's
+``resolved`` block for exactly that reason:
 
 - ``oneshot`` (default): a single forward at the final diffusion step with
-  information-free noise input — the U3 "no-diffusion" read of the model.
-- ``ddim``: the deterministic DDIM x0 as the mean, with the variance read from a
-  forward at t=1 around that mean.
+  information-free noise input — the U3 "no-diffusion" read of the model (arm A3).
+- ``ddim``: ONE reverse trajectory as the mean. Kept reachable because it is the
+  deterministic-mean cell of the 2×2, but see the warning below before reporting it.
+- ``ensemble`` (fix 1d): the mean of ``--mean-ensemble-size`` trajectories, defaulting to the
+  eval ensemble size. **This is the one that makes A1-vs-A2 a calibration comparison.**
+
+⚠️ ``generate(eta=0)`` is deterministic given ``x_T``, but ``x_T`` is random — so ``ddim``
+returns ONE DRAW from the predictive distribution, not its mean, while the sampled arm's point
+forecast is the mean of ``num_samples`` draws. Scoring the two against each other therefore
+compares different LOCATIONS before any UQ question is asked. Measured on a live S2 checkpoint:
+MSE 0.394 for ``ddim`` against 0.093 sampled, on the same weights.
+
+The cost consequence is deliberate and is the recovery plan's own note (§1d): with the means
+matched the analytic arm pays ``N*steps + 1`` denoiser passes against the sampled arm's
+``N*steps``, so **A1-vs-A2 has no speedup left to report** — it becomes "calibration at matched
+cost", and the method-level speedup claim belongs to A1-vs-A3.
 
 ⚠️ On a checkpoint trained with ``TRAIN_T_SAMPLER="max_only"`` (the U3 one-shot
 arm), the sampled-diffusion baseline is meaningless — reverse DDIM would walk
@@ -55,6 +70,7 @@ from llapdiffusion.models.uq_metrics import (
     reliability_curve,
 )
 from llapdiffusion.tools import llapdiff_checkpoint_eval as ce
+from llapdiffusion.configs.config_utils import refresh_artifact_paths
 from llapdiffusion.tools.llapdiff_checkpoint_eval import build_eval_config
 from llapdiffusion.trainers import train_val_llapdiff as tv
 
@@ -111,8 +127,21 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset-key", type=str, required=True)
     parser.add_argument("--pred", type=int, required=True)
     parser.add_argument("--checkpoint", type=str, required=True)
-    parser.add_argument("--split", choices=("val", "test"), default="test")
-    parser.add_argument("--mean-source", choices=("oneshot", "ddim"), default="oneshot")
+    parser.add_argument(
+        "--split", choices=("train", "val", "test"), default="test",
+        help="`train` is a DIAGNOSTIC read, never a reported number: it is the only way to "
+             "tell an over-confident variance head that generalises badly (calibrated on "
+             "train, sharp on val) from one whose objective or optimisation is wrong (sharp "
+             "on both). The split is recorded in the report so a train number cannot be "
+             "mistaken for a result.",
+    )
+    parser.add_argument("--mean-source", choices=("oneshot", "ddim", "ensemble"),
+                        default="oneshot")
+    parser.add_argument("--mean-ensemble-size", type=int, default=None,
+                        help="Draws averaged for --mean-source ensemble (default: the eval "
+                             "ensemble size, which is what matches the sampled arm). Setting "
+                             "it BELOW that size reintroduces the location difference this "
+                             "mean source exists to remove.")
     parser.add_argument(
         "--weights", choices=("raw", "ema"), default="raw",
         help=(
@@ -127,6 +156,40 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--max-batches", type=int, default=None,
                         help="Cap for the latent-space pass only; data space runs the full split.")
     parser.add_argument("--num-bins", type=int, default=20)
+    parser.add_argument("--add-reconstruction-variance", action="store_true",
+                        help="Add the stage-1 round-trip residual variance (estimated on TRAIN) "
+                             "to every data-space arm. Eq. (7) is a law for z0, so its "
+                             "pushforward describes decode(z) while the target is y = "
+                             "decode(encode(y)) + r; without this, r is missing from every "
+                             "data-space interval. Applied to the SAMPLED arm too -- it is a "
+                             "property of the decode step, not of the analytic law, and "
+                             "correcting only one arm would bias the comparison.")
+    parser.add_argument("--recon-var-batches", type=int, default=32,
+                        help="Train batches used to estimate the reconstruction variance.")
+    parser.add_argument("--variance-draws", type=int, default=4,
+                        help="Noise draws averaged when reading the analytic variance at T-1. "
+                             "At T-1 the head's `energy` term is the modal decomposition of a "
+                             "pure-noise input, so a single draw leaves ~14.5%% median "
+                             "per-element noise in the variance -- and PIT/coverage are "
+                             "per-element. Averaging marginalises the draw, which is what 'the "
+                             "law given only the conditioning' means; `s_modal` is "
+                             "draw-independent so the heteroscedasticity is untouched. Costs "
+                             "n-1 extra forwards per batch, not n-1 trajectories. Ignored for "
+                             "--mean-source oneshot, where the single pass IS the arm.")
+    parser.add_argument("--variance-timestep", type=int, default=None,
+                        help="Diffusion timestep the analytic law's variance is read at, for "
+                             "the `ddim`/`ensemble` mean sources (default: T-1, matching the "
+                             "`oneshot` arm). The spread scales with the modal energy of the "
+                             "x_t handed to the head, so this CHANGES THE LAW: measured on a "
+                             "live S2 checkpoint, coverage@0.9 is 0.690 at t=1 and 0.931 at "
+                             "t=T-1 for the same weights. Reading at t=1 asks 'how uncertain "
+                             "am I about x0 given a nearly-clean x_t built from my own "
+                             "prediction', which is not the quantity Table 3 reports.")
+    parser.add_argument(
+        "--coverage-level", type=float, default=0.8,
+        help="Nominal mass of the central predictive interval reported in data space "
+             "(coverage and mean interval width). Table 3's column is 0.8.",
+    )
     parser.add_argument("--latent-only", action="store_true",
                         help="Skip the data-space (decoder-propagated) evaluation. Also the "
                              "mode that accepts a checkpoint without the UQ head, where only "
@@ -137,8 +200,180 @@ def _parse_args() -> argparse.Namespace:
                              "reverse DDIM walks timesteps the model never trained on.")
     parser.add_argument("--num-samples", type=int, default=None,
                         help="Ensemble size for BOTH data-space arms (default config NUM_EVAL_SAMPLES=25).")
+    parser.add_argument("--guidance", type=float, default=None,
+                        help="Classifier-free guidance strength for the REPORTED numbers "
+                             "(writes cfg.TEST_GUIDANCE, which _sampling_kwargs prefers). "
+                             "Sampling knobs are NOT stored in the checkpoint, so a run "
+                             "trained at one guidance is scored at the config default unless "
+                             "this is passed -- and w > 1 sharpens the predictive law, which "
+                             "is indistinguishable from miscalibration. Also the knob Phase 3's "
+                             "w x GEN_STEPS sweep needs.")
+    parser.add_argument("--guidance-power", type=float, default=None,
+                        help="Ramp shape for --guidance (writes cfg.TEST_GUIDANCE_POWER).")
+    parser.add_argument("--gen-steps", type=int, default=None,
+                        help="Reverse-diffusion steps for the reported numbers "
+                             "(writes cfg.TEST_STEPS).")
+    parser.add_argument("--vae-ckpt", default=None,
+                        help="Override the stage-1 artifact (default: the preset's VAE_CKPT).")
+    parser.add_argument("--vae-entity-encode", action="store_true",
+                        help="Score against the VAE trained with the encoder-side entity "
+                             "embedding (B20). Loads are strict, so this must match the "
+                             "artifact the checkpoint was TRAINED against.")
+    parser.add_argument("--sum-ckpt", default=None,
+                        help="Override the stage-2 artifact (default: the preset's SUM_CKPT).")
+    parser.add_argument("--sum-decode-mode", default=None,
+                        help="Architecture of --sum-ckpt (B21). Must match the artifact.")
     parser.add_argument("--out-json", type=str, default=None)
     return parser.parse_args()
+
+
+@torch.no_grad()
+def estimate_reconstruction_variance(vae, train_dl, device, mu_mean, mu_std, *,
+                                     max_batches: Optional[int] = 32):
+    """Per-(horizon, channel) variance of the stage-1 round-trip residual, on TRAIN.
+
+    The Theorem-C law (Eq. 7) is a law for ``z_0``: pushing it through the decoder gives the
+    predictive law for ``decode(z)``, but the target is ``y``, and
+
+        y = decode(encode(y)) + r
+
+    so ``r`` -- everything stage 1 cannot reconstruct -- is a variance component no data-space
+    arm accounts for. That is measurable rather than assumed: the latent metrics score against
+    ``encode(y)`` and the data-space metrics against ``y``, so the gap between them IS this term.
+
+    Estimated on **train** only; using the eval split would leak it into the number it is meant
+    to correct. Returned per (H, C) because reconstruction error is not flat over the horizon,
+    with the scalar mean reported alongside for the record.
+
+    ⚠️ This is a MARGINAL correction. ``r`` is structured (correlated across time and entities);
+    per-element PIT, coverage, CRPS and interval width depend only on its marginal variance, so
+    it is the right correction for those. A joint/trajectory-level statement would need the full
+    covariance and this would understate it.
+    """
+    sq = None
+    cnt = None
+    batches = 0
+    for xb, yb, meta in train_dl:
+        if max_batches is not None and batches >= int(max_batches):
+            break
+        (V, T), yb_s, mask_bn = tv._sanitize_batch(xb, yb, meta, device)
+        if not mask_bn.any():
+            continue
+        x_tok, entity_pad, obs = tv.pack_targets_tokens(
+            yb_s, mask_bn, device, y_obs_mask=meta.get("y_obs_mask")
+        )
+        if x_tok is None or not obs.any():
+            continue
+        mu_norm, _ = tv._latent_targets_for_batch(vae, yb_s, mask_bn, meta, device, mu_mean, mu_std)
+        if mu_norm is None:
+            continue
+        y_true = torch.nan_to_num(
+            tv.targets_to_bhnc(yb_s, mask_bn, device=device), nan=0.0, posinf=0.0, neginf=0.0
+        )
+        y_rec = tv.decode_latents_with_vae(
+            vae, mu_norm, entity_pad=entity_pad, mu_mean=mu_mean, mu_std=mu_std
+        )
+        valid = (obs.unsqueeze(-1) if obs.dim() == 3 else obs).expand_as(y_true).to(y_true.dtype)
+        res2 = ((y_rec - y_true) ** 2 * valid).sum(dim=(0, 2))       # [H, C]
+        n = valid.sum(dim=(0, 2))
+        sq = res2 if sq is None else sq + res2
+        cnt = n if cnt is None else cnt + n
+        batches += 1
+    if sq is None or float(cnt.sum()) <= 0:
+        raise RuntimeError(
+            "could not estimate the reconstruction variance: the train loader produced no "
+            "usable batches."
+        )
+    var = sq / cnt.clamp_min(1.0)
+    # Horizon steps with no observations anywhere get the pooled value rather than 0, which
+    # would silently switch the correction off for them.
+    pooled = float(sq.sum() / cnt.sum())
+    var = torch.where(cnt > 0, var, torch.full_like(var, pooled))
+    return var, pooled, batches
+
+
+class ReconstructionNoiseVAE:
+    """The stage-1 decoder, plus the round-trip residual the analytic law never modelled.
+
+    Wraps rather than patches: ``decode_latents_with_vae`` dispatches on ``vae.decode_mu``, so
+    every arm keeps the unchanged ``evaluate_regression`` path, the same masking and the same
+    CRPS/PIT estimators -- only the decoded draws gain the missing variance component.
+
+    The noise is drawn independently PER DRAW, because it is genuine predictive uncertainty
+    rather than a fixed offset: the ensemble then samples the corrected law instead of a
+    shifted copy of the old one.
+    """
+
+    def __init__(self, vae, std: torch.Tensor, *, generator: Optional[torch.Generator] = None):
+        self._vae = vae
+        self._std = std          # [H, C]
+        self._generator = generator
+
+    def __getattr__(self, name):
+        return getattr(self._vae, name)
+
+    def decode_mu(self, mu_est, entity_pad):
+        out = self._vae.decode_mu(mu_est, entity_pad)
+        std = self._std
+        if std.dim() == 2 and std.shape[0] == out.shape[1] and std.shape[-1] == out.shape[-1]:
+            std = std.view(1, out.shape[1], 1, out.shape[-1])
+        else:  # horizon/channel layout did not match -- fall back to the pooled scalar
+            std = std.mean()
+        noise = torch.randn(
+            out.shape, device=out.device, dtype=out.dtype, generator=self._generator
+        )
+        return out + std.to(device=out.device, dtype=out.dtype) * noise
+
+
+def _mean_source_label(mean_source: str, ensemble_size: int) -> str:
+    """The mean source as it should appear in a table, with its size baked in.
+
+    ``"ensemble25"`` rather than ``"ensemble"``: the arm's location depends on how many draws
+    were averaged, and every bug this campaign chased in the last week was a protocol that was
+    not written down next to its number.
+    """
+    if str(mean_source) == "ensemble":
+        return f"ensemble{int(ensemble_size)}"
+    return str(mean_source)
+
+
+def _denoiser_passes(mean_source: str, *, steps: int, ensemble_size: int,
+                     with_variance: bool = True, variance_draws: int = 1) -> int:
+    """Denoiser forwards per batch for the analytic arm — the cost that is not wall-clock.
+
+    Wall-clock mixes in the decoder and the dataloader, both of which the arms share; this is
+    the part that is actually attributable to the method. Note what it says about fix 1d: at
+    ``ensemble`` with N = num_samples the analytic arm costs N*steps + 1 against the sampled
+    arm's N*steps, so **the A1-vs-A2 speedup is gone by construction**. That is the intended
+    outcome (recovery plan §1d) — A1 vs A2 becomes "calibration at matched cost", and the
+    method-level speedup claim moves to A1 vs A3, where ``oneshot`` costs 1.
+    """
+    if str(mean_source) == "oneshot":
+        return 1
+    draws = 1 if str(mean_source) == "ddim" else max(1, int(ensemble_size))
+    return draws * int(steps) + (max(1, int(variance_draws)) if with_variance else 0)
+
+
+def _calibration_block(metrics: Dict[str, object]) -> Dict[str, object]:
+    """Flatten ``evaluate_regression``'s calibration payload into a report arm.
+
+    Kept flat and prefix-free so a Table 3 row reads one dict, and returned empty rather than
+    with ``None`` placeholders when calibration was not requested -- an absent key is honest,
+    a null one invites a table cell that says "0.0".
+    """
+    block = (metrics or {}).get("calibration")
+    if not isinstance(block, dict):
+        return {}
+    return {
+        "pit_calibration_error": block.get("pit_calibration_error"),
+        "coverage": block.get("coverage"),
+        "coverage_level": block.get("coverage_level"),
+        "mean_interval_width": block.get("mean_interval_width"),
+        "reliability": block.get("reliability"),
+        "calibration_estimator": block.get("estimator"),
+        "calibration_space": block.get("space"),
+        "num_pit_values": block.get("num_pit_values"),
+    }
 
 
 class AnalyticLawSampler:
@@ -154,15 +389,30 @@ class AnalyticLawSampler:
     to the wrapped model.
     """
 
-    def __init__(self, model, cfg, *, mean_source: str, device: torch.device) -> None:
+    def __init__(self, model, cfg, *, mean_source: str, device: torch.device,
+                 ensemble_size: int = 1, mean_seed: Optional[int] = None,
+                 variance_timestep: Optional[int] = None,
+                 variance_draws: int = 1) -> None:
         self._model = model
         self._cfg = cfg
         self._mean_source = str(mean_source)
         self._device = device
+        self._ensemble_size = int(ensemble_size)
+        self._variance_timestep = variance_timestep
+        self._variance_draws = int(variance_draws)
         self._cache_key = None
         self._key_refs: tuple = ()
         self._mean: Optional[torch.Tensor] = None
         self._std: Optional[torch.Tensor] = None
+        # The law's OWN stream, separate from the draw noise evaluate_regression supplies.
+        # Sharing one would make the fitted mean depend on how many draws had been taken
+        # before the cache missed, i.e. on the ensemble size -- so changing `--num-samples`
+        # would move the point forecast as well as the spread, and the two effects would be
+        # inseparable in the table.
+        self._mean_generator: Optional[torch.Generator] = None
+        if mean_seed is not None:
+            self._mean_generator = torch.Generator(device=device)
+            self._mean_generator.manual_seed(int(mean_seed))
 
     def __getattr__(self, name):
         return getattr(self._model, name)
@@ -192,6 +442,10 @@ class AnalyticLawSampler:
                 dt_model=dt,
                 mean_source=self._mean_source,
                 device=self._device,
+                ensemble_size=self._ensemble_size,
+                variance_timestep=self._variance_timestep,
+                variance_draws=self._variance_draws,
+                generator=self._mean_generator,
             )
             self._cache_key = key
             self._key_refs = (cond_summary, cond_summary_raw, dt)
@@ -219,6 +473,10 @@ def _predict_mean_var(
     mean_source: str,
     device: torch.device,
     with_variance: bool = True,
+    ensemble_size: int = 1,
+    variance_timestep: Optional[int] = None,
+    variance_draws: int = 1,
+    generator: Optional[torch.Generator] = None,
 ):
     """(mean, variance) under the requested mean source.
 
@@ -226,12 +484,33 @@ def _predict_mean_var(
     Theorem-C UQ head (``LapFormer.forward`` raises on ``return_variance=True`` there).
     The returned variance is then ``None`` and the caller must skip every
     law-dependent metric. It also saves the extra t=1 forward in the ``ddim`` path.
+
+    ``ensemble`` averages ``ensemble_size`` reverse-diffusion draws instead of taking one
+    (fix 1d). ``ddim`` is that same path at N = 1 and is kept reachable deliberately: the two
+    together isolate the location contribution from the spread contribution, which a single
+    matched arm cannot.
+
+    Why N = 1 was a defect and not just a choice: ``generate(eta=0)`` is deterministic given
+    ``x_T``, but ``x_T`` is random, so one call is ONE DRAW from the predictive distribution --
+    not its mean. The sampled arm's point forecast is the mean of ``num_samples`` such draws,
+    so at N = 1 the two arms differ in LOCATION before any UQ question is asked, and a CRPS or
+    MSE gap between them reads as a method effect. Measured on a live S2 checkpoint: MSE 0.394
+    (N=1) against the sampled arm's 0.093 on the same weights -- a 4.2x gap that is entirely
+    location. ``CMD_CAMPAIGN_STATE.md`` §1b records the same trap costing ~50 points elsewhere.
+
+    ⚠️ The match is distributional, not draw-for-draw: these draws are generated here rather
+    than shared with ``evaluate_regression``'s sampled arm, and the decoder is non-linear, so
+    ``mean_j decode(z_j)`` and ``decode(mean_j z_j)`` differ by a Jensen gap. Both arms'
+    ``mse`` are reported so the size of that residual is visible rather than assumed.
     """
     timesteps = int(diff_model.scheduler.timesteps)
     B = mu_shape[0]
     if mean_source == "oneshot":
         t = torch.full((B,), timesteps - 1, device=device, dtype=torch.long)
-        x_t = torch.randn(mu_shape, device=device)
+        # A3's mean is a forward at t=T-1 on information-free noise, so an UNSEEDED draw
+        # makes the reported arm irreproducible run to run -- a "± std over seeds" would then
+        # carry estimator noise that no seed controls. Seeded from the config by default.
+        x_t = torch.randn(mu_shape, device=device, generator=generator)
         if not with_variance:
             mean = diff_model(
                 x_t, t, cond_summary=cond_summary, cond_summary_raw=cond_summary_raw,
@@ -243,31 +522,118 @@ def _predict_mean_var(
             dt=dt_model, return_variance=True,
         )
     sampling = tv._sampling_kwargs(cfg, prefix="TEST")
-    mean = diff_model.generate(
-        shape=tuple(mu_shape),
-        steps=int(sampling["steps"]),
-        guidance_strength=sampling["guidance_strength"],
-        guidance_power=float(sampling["guidance_power"]),
-        eta=0.0,
-        cond_summary=cond_summary,
-        cond_summary_raw=cond_summary_raw,
-        dt=dt_model,
-        dynamic_thresh_p=float(sampling.get("dynamic_thresh_p", 0.0)),
-    )
+    # `ddim` IS the N = 1 case. Sharing one code path rather than two keeps the only
+    # difference between the arms the number of draws averaged -- pinned by a test.
+    draws = 1 if mean_source == "ddim" else max(1, int(ensemble_size))
+    total = None
+    for _ in range(draws):
+        sample = diff_model.generate(
+            shape=tuple(mu_shape),
+            steps=int(sampling["steps"]),
+            guidance_strength=sampling["guidance_strength"],
+            guidance_power=float(sampling["guidance_power"]),
+            eta=0.0,
+            cond_summary=cond_summary,
+            cond_summary_raw=cond_summary_raw,
+            dt=dt_model,
+            dynamic_thresh_p=float(sampling.get("dynamic_thresh_p", 0.0)),
+            generator=generator,
+        )
+        total = sample if total is None else total + sample
+    mean = total / float(draws)
     if not with_variance:
         return mean, None
-    t1 = torch.ones(B, device=device, dtype=torch.long)
-    x_t1, _ = diff_model.scheduler.q_sample(mean, t1, torch.randn_like(mean))
-    _, variance = diff_model(
-        x_t1, t1, cond_summary=cond_summary, cond_summary_raw=cond_summary_raw,
-        dt=dt_model, return_variance=True,
-    )
-    return mean, variance
+    # 🔴 The timestep this is read at CHANGES THE LAW, and by more than any arm difference in
+    # Table 3. `LapFormer` computes Var = einsum(s_modal(cond), energy(theta)) where `theta` is
+    # the modal state of the x_t it is handed -- so the spread scales with the modal energy of
+    # that input. Only `p0`/`q` come from the conditioning.
+    #
+    # Measured, seed-1 S2, val, matched ensemble25 mean, 322 560 latent elements
+    # (realised residual variance 0.444):
+    #     t=1    E[var] 0.190   ratio 2.34   coverage@0.9 0.690   <- the historical default
+    #     t=100  E[var] 0.196   ratio 2.26   coverage@0.9 0.698
+    #     t=400  E[var] 0.237   ratio 1.88   coverage@0.9 0.747
+    #     t=T-1  E[var] 0.681   ratio 0.65   coverage@0.9 0.931   <- where `oneshot` reads
+    #
+    # At t=1 the model is handed a nearly-clean x_t built from its OWN predicted mean, so it
+    # reports the residual uncertainty about x0 GIVEN that x_t -- a true statement about the
+    # denoising problem and the wrong quantity for Table 3, which reports uncertainty about y
+    # given only the history. At t=T-1 the state carries no information about the target, which
+    # is the regime the `oneshot` arm reads in and the one the predictive law is defined for.
+    #
+    # The default is now t=T-1 (was a hardcoded 1). This is a PARITY fix, not a modelling
+    # preference: A2 read at 1 while A3 read at T-1, so the A2-vs-A3 row reported a ~3.6x
+    # spread difference that was the read protocol, not the arms. T-1 is the only value that
+    # makes them agree without redefining A3, whose mean IS the t=T-1 forward. Override with
+    # --variance-timestep; the value used is recorded in the report either way.
+    t_read = int(timesteps - 1 if variance_timestep is None else variance_timestep)
+    t_read = max(0, min(t_read, timesteps - 1))
+    t_vec = torch.full((B,), t_read, device=device, dtype=torch.long)
+    # At T-1 the `energy` term is the modal decomposition of an essentially pure-noise x_read,
+    # so a single draw makes the PER-ELEMENT variance ride that draw -- measured 14.5 % median
+    # relative spread between two seeds, against a 2 % aggregate. Seeding makes that
+    # reproducible, not right: PIT and coverage are per-element, so the noise lands directly in
+    # A2's reported calibration. Averaging marginalises the draw, which is what "the law given
+    # only the conditioning" means. `s_modal` is draw-independent and the readout is linear in
+    # `energy`, so averaging the variance is exactly averaging the energy -- the heteroscedasticity
+    # that lives in `s_modal` is untouched. (Refinement proposed by Claude A, 2026-08-08.)
+    n_draws = max(1, int(variance_draws))
+    total_var = None
+    for _ in range(n_draws):
+        noise = torch.randn(mean.shape, device=mean.device, dtype=mean.dtype, generator=generator)
+        x_read, _ = diff_model.scheduler.q_sample(mean, t_vec, noise)
+        _, v = diff_model(
+            x_read, t_vec, cond_summary=cond_summary, cond_summary_raw=cond_summary_raw,
+            dt=dt_model, return_variance=True,
+        )
+        total_var = v if total_var is None else total_var + v
+    return mean, total_var / float(n_draws)
 
 
 def main() -> None:
     args = _parse_args()
     cfg = build_eval_config(args.dataset_key, int(args.pred))
+    # Stage-1/2 architecture flags first: the artifact names derive from them.
+    if getattr(args, "vae_entity_encode", False):
+        cfg.VAE_ENTITY_ENCODE = True
+    if getattr(args, "sum_decode_mode", None):
+        cfg.SUM_DECODE_MODE = str(args.sum_decode_mode)
+    refresh_artifact_paths(cfg)
+    if getattr(args, "vae_ckpt", None):
+        cfg.VAE_CKPT = str(args.vae_ckpt)
+    if getattr(args, "sum_ckpt", None):
+        cfg.SUM_CKPT = str(args.sum_ckpt)
+    # Sampling protocol for the REPORTED numbers. _sampling_kwargs reads TEST_* first.
+    if getattr(args, "guidance", None) is not None:
+        cfg.TEST_GUIDANCE = float(args.guidance)
+    if getattr(args, "guidance_power", None) is not None:
+        cfg.TEST_GUIDANCE_POWER = float(args.guidance_power)
+    if getattr(args, "gen_steps", None) is not None:
+        cfg.TEST_STEPS = int(args.gen_steps)
+    if getattr(args, "num_samples", None) is not None:
+        # Both keys: _sampling_kwargs prefers TEST_NUM_SAMPLES, so writing only
+        # NUM_EVAL_SAMPLES would let a config that sets TEST_NUM_SAMPLES silently win while
+        # the report claimed the requested size. Applied here rather than in the data-space
+        # block because the mean ensemble size is derived from it, and the latent pass needs
+        # that before the data-space block runs.
+        cfg.NUM_EVAL_SAMPLES = int(args.num_samples)
+        cfg.TEST_NUM_SAMPLES = int(args.num_samples)
+
+    # One resolved protocol for the whole run: the latent pass, the analytic arm's mean and
+    # the sampled arm must not each re-derive their own.
+    sampling = tv._sampling_kwargs(cfg, prefix="TEST")
+    eval_ensemble = int(sampling["num_samples"])
+    mean_ensemble_size = int(args.mean_ensemble_size or eval_ensemble)
+    if mean_ensemble_size < 1:
+        raise ValueError(f"--mean-ensemble-size must be >= 1, got {mean_ensemble_size}")
+    if args.mean_source == "ensemble" and mean_ensemble_size != eval_ensemble:
+        print(
+            f"[uq-eval] ⚠️  mean ensemble {mean_ensemble_size} != eval ensemble "
+            f"{eval_ensemble}: the analytic arm's LOCATION no longer matches the sampled "
+            f"arm's, so an A1-vs-A2 gap is partly a mean difference again (fix 1d)."
+        )
+    mean_label = _mean_source_label(args.mean_source, mean_ensemble_size)
+
     device = set_torch(
         seed=int(getattr(cfg, "SEED", 42)),
         deterministic=False,
@@ -275,8 +641,11 @@ def main() -> None:
     )
 
     loaders, stack = prepare_eval_stack(cfg, args.checkpoint, device=device)
-    _, val_dl, test_dl, _ = loaders
-    loader = val_dl if args.split == "val" else test_dl
+    train_dl, val_dl, test_dl, _ = loaders
+    loader = {"train": train_dl, "val": val_dl, "test": test_dl}[args.split]
+    if args.split == "train":
+        print("[uq-eval] ⚠️  --split train: DIAGNOSTIC ONLY (the model fit these windows). "
+              "Use it to compare against val, never as a reported number.")
     diff_model, vae, summarizer, mu_mean, mu_std = stack
 
     # A checkpoint without the UQ head carries no predictive law, but its MEAN is still
@@ -287,6 +656,22 @@ def main() -> None:
     # the checkpoint outright made the gate unmeasurable. Everything that needs the
     # variance is dropped rather than approximated, and the data-space arms -- which
     # propagate the law through the decoder -- are still refused.
+    # Resolved once the scheduler is known, and recorded: the analytic law's spread scales with
+    # the modal energy of the x_t it is read at, so this is part of the law's definition, not a
+    # detail of the read. `oneshot` takes mean and variance from one forward at T-1 and is
+    # unaffected by the flag.
+    _timesteps = int(diff_model.scheduler.timesteps)
+    variance_timestep_used = (
+        _timesteps - 1 if args.mean_source == "oneshot" or args.variance_timestep is None
+        else max(0, min(int(args.variance_timestep), _timesteps - 1))
+    )
+    if variance_timestep_used != _timesteps - 1:
+        print(
+            f"[uq-eval] ⚠️  reading the analytic variance at t={variance_timestep_used}, not "
+            f"t={_timesteps - 1}. The `oneshot` arm reads at T-1, so an A2-vs-A3 spread "
+            f"comparison across this setting is confounded by the read protocol."
+        )
+
     has_uq_head = bool(getattr(diff_model.model, "chirp_uq_head", False))
     if not has_uq_head and not args.latent_only:
         raise ValueError(
@@ -331,6 +716,10 @@ def main() -> None:
     means: List[torch.Tensor] = []
     variances: List[torch.Tensor] = []
     batches = 0
+    # Seeded so the latent read is reproducible: `oneshot` draws an information-free x_T and
+    # `ensemble`/`ddim` draw one x_T per averaged sample, none of which any seed controlled.
+    latent_generator = torch.Generator(device=device)
+    latent_generator.manual_seed(int(getattr(cfg, "SEED", 42)))
     for xb, yb, meta in loader:
         (V, T), _, mask_bn = tv._sanitize_batch(xb, yb, meta, device)
         if not mask_bn.any():
@@ -356,6 +745,10 @@ def main() -> None:
             mean_source=str(args.mean_source),
             device=device,
             with_variance=has_uq_head,
+            ensemble_size=mean_ensemble_size,
+            variance_timestep=args.variance_timestep,
+            variance_draws=int(args.variance_draws),
+            generator=latent_generator,
         )
 
         mask = torch.as_tensor(obs_any, device=device, dtype=torch.bool)
@@ -382,7 +775,7 @@ def main() -> None:
         "pred": int(args.pred),
         "checkpoint": str(args.checkpoint),
         "split": args.split,
-        "mean_source": args.mean_source,
+        "mean_source": mean_label,
         "weights": args.weights,
         # False => this is a mean-only read and every law-dependent key below is absent.
         "has_uq_head": has_uq_head,
@@ -411,29 +804,63 @@ def main() -> None:
             "pit_calibration_error": pit_calibration_error(u, num_bins=int(args.num_bins)),
             "reliability": reliability_curve(u),
             "mean_predicted_std": float(var.clamp_min(1e-6).sqrt().mean().item()),
+            # ⚠️ `mean_predicted_std` is E[sigma]; `latent_rmse` is sqrt(E[e^2]). Comparing
+            # them is off by Jensen whenever the law is heteroscedastic -- E[sigma] <=
+            # sqrt(E[sigma^2]) -- and the bias always points toward "over-confident", which is
+            # the verdict this pair is used to reach. These two are the matched-units form:
+            # both are variances, so their ratio is the sharpness factor with no Jensen term.
+            # ratio > 1 == over-confident (predicted variance smaller than realised error).
+            "mean_predicted_var": float(var.clamp_min(1e-6).mean().item()),
+            "variance_calibration_ratio": float(
+                (mean - y).pow(2).mean().item() / var.clamp_min(1e-6).mean().item()
+            ),
         })
 
+    recon_var_scalar = None
     if not args.latent_only:
         # Data-space comparison: the analytic law propagated through the decoder
         # (Gaussian latent draws -> decode) vs the sampled-diffusion baseline, scored
         # by the SAME evaluate_regression code with the SAME ensemble size and seed.
-        if args.num_samples is not None:
-            cfg.NUM_EVAL_SAMPLES = int(args.num_samples)
-        num_samples = int(getattr(cfg, "NUM_EVAL_SAMPLES", 25))
-        sampling = tv._sampling_kwargs(cfg, prefix="TEST")
+        num_samples = eval_ensemble          # resolved once, at the top of main()
         common = dict(
             device=device, mu_mean=mu_mean, mu_std=mu_std, config=cfg, ema=None,
             self_cond=bool(getattr(cfg, "SELF_COND", False)),
             disable_conditioning=False, verbose=False,
             generator_seed=int(getattr(cfg, "SEED", 42)),
+            # Table 3's PIT-ECE / coverage / interval-width columns. Requested for BOTH arms
+            # from the same `common`, so they are scored by one estimator in one space on the
+            # same mask -- the analytic arm's latent closed-form numbers stay available above
+            # as the exact-Gaussian cross-check, not as A2's entry in a column A1 cannot fill.
+            calibration=True,
+            calibration_level=float(args.coverage_level),
         )
 
+        # The missing variance component (see estimate_reconstruction_variance). Estimated
+        # ONCE, on train, and applied identically to both arms so the comparison stays matched.
+        decode_vae = vae
+        recon_var_scalar = None
+        if args.add_reconstruction_variance:
+            rv, recon_var_scalar, rv_batches = estimate_reconstruction_variance(
+                vae, train_dl, device, mu_mean, mu_std,
+                max_batches=int(args.recon_var_batches),
+            )
+            print(f"[uq-eval] stage-1 reconstruction variance from {rv_batches} TRAIN batches: "
+                  f"pooled {recon_var_scalar:.5f} (std {recon_var_scalar ** 0.5:.5f}), "
+                  f"per-horizon range [{float(rv.min()):.5f}, {float(rv.max()):.5f}]")
+            rv_gen = torch.Generator(device=device)
+            rv_gen.manual_seed(int(getattr(cfg, "SEED", 42)) + 51_000_000)
+            decode_vae = ReconstructionNoiseVAE(vae, rv.sqrt(), generator=rv_gen)
+
         analytic_model = AnalyticLawSampler(
-            diff_model, cfg, mean_source=str(args.mean_source), device=device
+            diff_model, cfg, mean_source=str(args.mean_source), device=device,
+            ensemble_size=mean_ensemble_size,
+            mean_seed=int(getattr(cfg, "SEED", 42)),
+            variance_timestep=args.variance_timestep,
+            variance_draws=int(args.variance_draws),
         )
         start = time.perf_counter()
         analytic = tv.evaluate_regression(
-            analytic_model, vae, summarizer, loader, **common, **sampling
+            analytic_model, decode_vae, summarizer, loader, **common, **sampling
         )
         analytic_wall = time.perf_counter() - start
         report["data_space_analytic"] = {
@@ -441,14 +868,28 @@ def main() -> None:
             "mae": analytic.get("mae"),
             "mse": analytic.get("mse"),
             "num_samples": num_samples,
-            "mean_source": str(args.mean_source),
+            "mean_source": mean_label,
+            "mean_ensemble_size": (
+                mean_ensemble_size if str(args.mean_source) == "ensemble" else 1
+            ),
             "wall_seconds": analytic_wall,
+            # The law is read ONCE per batch and cached; every further draw is a Gaussian
+            # sample plus a decoder pass, neither of which touches the denoiser. See
+            # _denoiser_passes for what this says about the A1-vs-A2 speedup after fix 1d.
+            "denoiser_passes_per_batch": _denoiser_passes(
+                str(args.mean_source), steps=int(sampling["steps"]),
+                ensemble_size=mean_ensemble_size,
+                variance_draws=int(args.variance_draws),
+            ),
+            "variance_timestep": variance_timestep_used,
+            "variance_draws": (1 if args.mean_source == "oneshot" else int(args.variance_draws)),
+            **_calibration_block(analytic),
         }
 
         if not args.skip_sampled:
             start = time.perf_counter()
             sampled = tv.evaluate_regression(
-                diff_model, vae, summarizer, loader, **common, **sampling
+                diff_model, decode_vae, summarizer, loader, **common, **sampling
             )
             sampled_wall = time.perf_counter() - start
             report["data_space_sampled"] = {
@@ -457,12 +898,59 @@ def main() -> None:
                 "mse": sampled.get("mse"),
                 "num_samples": num_samples,
                 "ddim_steps": int(sampling["steps"]),
+                # This arm's point forecast IS the mean of its draws, so it carries the same
+                # label the analytic arm computes. Stated here rather than reconstructed by
+                # the driver, so a standalone report JSON is self-describing -- and so two
+                # identical labels in a table are the visible proof that fix 1d is in force.
+                "mean_source": f"ensemble{num_samples}",
                 "wall_seconds": sampled_wall,
+                # One full reverse trajectory per draw: this is the cost the analytic arm
+                # exists to avoid, and the ratio against the analytic count is the method-level
+                # speedup that survives matching the means.
+                "denoiser_passes_per_batch": num_samples * int(sampling["steps"]),
+                **_calibration_block(sampled),
             }
             report["analytic_speedup_x"] = (
                 sampled_wall / analytic_wall if analytic_wall > 0 else None
             )
+            # The wall ratio flatters the analytic arm: both arms pay the same decoder MC and
+            # dataloader, so the shared cost dilutes the difference in BOTH directions
+            # depending on the batch. This is the attributable one.
+            analytic_passes = report["data_space_analytic"]["denoiser_passes_per_batch"]
+            report["analytic_denoiser_pass_ratio_x"] = (
+                report["data_space_sampled"]["denoiser_passes_per_batch"] / analytic_passes
+                if analytic_passes else None
+            )
+            if str(args.mean_source) == "ensemble":
+                report["speedup_scope"] = (
+                    "A1-vs-A2 is calibration at MATCHED COST: with the means matched (fix 1d) "
+                    "the analytic arm pays num_samples*steps + 1 denoiser passes against the "
+                    "sampled arm's num_samples*steps, so there is no A1/A2 speedup to claim. "
+                    "The method-level speedup belongs to A1-vs-A3 (oneshot, 1 pass)."
+                )
 
+    # Provenance: a reported number must carry the stack and sampling protocol that produced
+    # it. Without this, a legacy-VAE eval and an entity-encoded one are indistinguishable in
+    # the JSON, which is how D1 stayed invisible.
+    report["resolved"] = {
+        "vae_ckpt": str(cfg.VAE_CKPT),
+        "sum_ckpt": str(cfg.SUM_CKPT),
+        "vae_entity_encode": bool(getattr(cfg, "VAE_ENTITY_ENCODE", False)),
+        "sum_decode_mode": str(getattr(cfg, "SUM_DECODE_MODE", "mean")),
+        # The mean source sits HERE, beside guidance, because it is a protocol choice that
+        # moves the arm's location as much as guidance moves its spread -- and an arm named
+        # only "A2" carries neither.
+        "mean_source": mean_label,
+        "mean_ensemble_size": (
+            mean_ensemble_size if str(args.mean_source) == "ensemble" else 1
+        ),
+        "variance_timestep": variance_timestep_used,
+        "variance_draws": (1 if args.mean_source == "oneshot" else int(args.variance_draws)),
+        "reconstruction_variance": (recon_var_scalar if not args.latent_only else None),
+        "reconstruction_variance_source": ("train" if args.add_reconstruction_variance else None),
+        "sampling": {k: v for k, v in tv._sampling_kwargs(cfg, prefix="TEST").items()
+                     if k in ("steps", "num_samples", "guidance_strength", "guidance_power", "eta")},
+    }
     payload = json.dumps(report, indent=2, sort_keys=True)
     if args.out_json:
         out_path = Path(args.out_json).resolve()

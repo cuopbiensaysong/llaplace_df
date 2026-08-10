@@ -4,6 +4,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
+from llapdiffusion.configs.config_utils import (
+    refresh_artifact_paths,
+    summarizer_ckpt_path,
+    vae_ckpt_path,
+)
 from llapdiffusion.configs.dataset_archives import find_dataset_archive, resolve_dataset_dir
 from llapdiffusion.configs.dataset_registry import dataset_name_from_data_dir
 
@@ -248,13 +253,8 @@ def apply_dataset_preset(cfg: object, dataset_key: str, *, pred: int | None = No
     vae_entity_condition = bool(getattr(cfg, "VAE_ENTITY_CONDITION", True))
     setattr(cfg, "VAE_ENTITY_CONDITION", vae_entity_condition)
     setattr(cfg, "VAE_NUM_ENTITIES", None)
-    vae_suffix = "_entity" if vae_entity_condition else ""
     setattr(cfg, "VAE_DIR", str((artifact_root / "vae" / "saved_model" / preset.artifact_name).resolve()))
-    setattr(
-        cfg,
-        "VAE_CKPT",
-        str(Path(getattr(cfg, "VAE_DIR")) / f"pred-{pred_value}_ch-{preset.vae_latent_channels}{vae_suffix}_elbo.pt"),
-    )
+    setattr(cfg, "VAE_CKPT", str(vae_ckpt_path(cfg)))
 
     setattr(cfg, "SUM_CONTEXT_LEN_FIXED", preset.context_length)
     setattr(cfg, "SUM_CONTEXT_LEN", preset.context_length)
@@ -269,11 +269,7 @@ def apply_dataset_preset(cfg: object, dataset_key: str, *, pred: int | None = No
     if preset.sum_amp is not None:
         setattr(cfg, "SUM_AMP", bool(preset.sum_amp))
     setattr(cfg, "SUM_DIR", str((artifact_root / "summarizer" / "saved_model" / preset.artifact_name).resolve()))
-    setattr(
-        cfg,
-        "SUM_CKPT",
-        str(Path(getattr(cfg, "SUM_DIR")) / f"{pred_value}-{preset.vae_latent_channels}-summarizer.pt"),
-    )
+    setattr(cfg, "SUM_CKPT", str(summarizer_ckpt_path(cfg)))
 
     setattr(cfg, "CKPT_DIR", str((artifact_root / "checkpoints" / preset.artifact_name).resolve()))
     setattr(cfg, "OUT_DIR", str((artifact_root / "output" / preset.artifact_name).resolve()))
@@ -302,7 +298,8 @@ def apply_dataset_preset(cfg: object, dataset_key: str, *, pred: int | None = No
     setattr(cfg, "NUM_HEADS", 4)
     setattr(cfg, "LAPLACE_K", int(preset.laplace_k))
 
-    return cfg
+    # model_overrides above may carry an architecture flag that the artifact names depend on.
+    return refresh_artifact_paths(cfg)
 
 
 def validate_dataset_presets(keys: Iterable[str] | None = None) -> dict[str, object]:

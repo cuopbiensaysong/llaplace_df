@@ -9,6 +9,8 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from llapdiffusion.configs.config_utils import vae_ckpt_path
+
 
 def _clean_list(value: object) -> list[str]:
     if value is None or (isinstance(value, str) and value == ""):
@@ -148,16 +150,7 @@ def sync_target_artifact_config(
             f"missing config attributes: {', '.join(missing)}"
         )
 
-    entity_suffix = "_entity" if bool(getattr(config_obj, "VAE_ENTITY_CONDITION", False)) else ""
-    setattr(
-        config_obj,
-        "VAE_CKPT",
-        str(
-            Path(str(getattr(config_obj, "VAE_DIR")))
-            / f"pred-{getattr(config_obj, 'PRED')}_ch-{getattr(config_obj, 'VAE_LATENT_CHANNELS')}"
-            f"{entity_suffix}{suffix}_elbo.pt"
-        ),
-    )
+    setattr(config_obj, "VAE_CKPT", str(vae_ckpt_path(config_obj)))
     if update_output_dirs:
         if hasattr(config_obj, "OUT_DIR"):
             out_dir = Path(str(getattr(config_obj, "OUT_DIR")))

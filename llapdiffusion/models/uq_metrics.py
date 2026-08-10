@@ -34,6 +34,66 @@ def gaussian_pit(
     return u.reshape(-1)
 
 
+def ensemble_pit(
+    draws: torch.Tensor,
+    y: torch.Tensor,
+    *,
+    mask: Optional[torch.Tensor] = None,
+    generator: Optional[torch.Generator] = None,
+) -> torch.Tensor:
+    """PIT values for a SAMPLED predictive distribution, given as an ensemble.
+
+    ``draws``: [S, ...] samples; ``y``: [...] observations, broadcastable against a draw.
+
+    Table 3's A1 arm has no closed-form law, which is why the old pre-registration excluded
+    calibration metrics for it -- leaving A1-vs-A2 to rest on CRPS alone, the metric that is
+    blind to a 3 % -> 87 % coverage swing (recovery plan, Phase 3). A closed-form law is not
+    required: ``pit_calibration_error`` and ``reliability_curve`` take PIT values and are
+    law-agnostic; only ``gaussian_pit`` assumes a Gaussian. This supplies the missing
+    estimator so **every arm is scored by the same one**, rather than by two lookalikes.
+
+    Uses the **randomized rank** form ``(rank + V) / (S + 1)`` with ``V ~ U(0,1)``, which is
+    *exactly* uniform at any ensemble size when the observation is exchangeable with the draws.
+
+    🔴 The obvious form ``(below + 0.5·ties) / S`` is NOT, and the error is large at the size
+    this pipeline runs. It places the PIT on the S+1 atoms {0, 1/S, …, 1}, which is
+    over-dispersed against U(0,1). Measured on a perfectly calibrated synthetic ensemble
+    (N = 400 000, y and draws both ~ N(0,1)) — every column should read 0 error:
+
+    | S | PIT-ECE | coverage @ 0.9 |
+    |---|---|---|
+    | 5 (campaign val profile) | 0.0553 | 0.666 |
+    | **25 (`NUM_EVAL_SAMPLES`, what U3 runs)** | **0.0132** | **0.846** |
+    | 100 | 0.0056 | 0.901 |
+    | `gaussian_pit` (A2/A3's estimator) | 0.0009 | 0.900 |
+    | **this form, S = 25** | **0.0009** | **0.899** |
+
+    At S = 25 the naive form would have reported A1 as **5.4 pt under-covered at nominal 0.9
+    with ~15× the PIT-ECE of A2/A3, on forecasts that are identically and perfectly
+    calibrated** — manufacturing exactly the arm difference Table 3 exists to measure.
+    (Found by Claude C in review, 2026-08-08; reproduced here before the change.)
+
+    ``generator`` seeds the randomization so a reported table is reproducible; the campaign's
+    CRPS estimator already carries RNG, but a calibration number should not move between runs
+    of the same command.
+    """
+    if draws.dim() < 1:
+        raise ValueError("draws must have a leading sample axis [S, ...]")
+    S = draws.shape[0]
+    if S < 2:
+        raise ValueError(f"ensemble PIT needs at least 2 draws, got {S}")
+    y_b = y.unsqueeze(0)
+    # Ties get a uniform share of their own rank interval, which keeps the transform exact for
+    # a discrete predictive law too (decoder output is continuous, so ties are ~impossible here).
+    below = (draws < y_b).sum(dim=0)
+    ties = (draws == y_b).sum(dim=0)
+    v = torch.rand(below.shape, device=draws.device, dtype=torch.float32, generator=generator)
+    u = (below + v * (ties + 1)) / float(S + 1)
+    if mask is not None:
+        u = u[torch.as_tensor(mask, device=u.device, dtype=torch.bool)]
+    return u.reshape(-1)
+
+
 def pit_calibration_error(u: torch.Tensor, *, num_bins: int = 20) -> float:
     """Mean absolute deviation between the empirical CDF of the PIT values and the
     uniform CDF, evaluated at bin edges (0 for perfect calibration)."""
@@ -83,6 +143,7 @@ def gaussian_nll(
 
 
 __all__ = [
+    "ensemble_pit",
     "gaussian_nll",
     "gaussian_pit",
     "pit_calibration_error",

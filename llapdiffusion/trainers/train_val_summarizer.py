@@ -13,6 +13,7 @@ import torch.nn as nn
 from torch.cuda.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 
+from llapdiffusion.configs.config_utils import summarizer_ckpt_path
 from llapdiffusion.configs.dataset_registry import resolve_run_experiment
 from llapdiffusion.logging_utils import is_debug, is_verbose, progress_iter
 from llapdiffusion.models.summarizer import LaplaceAE
@@ -63,7 +64,14 @@ def _record_epoch_stat(epoch_stats: Optional[MutableMapping[str, int]], key: str
 
 def save_ckpt(path: Path, model: nn.Module, stats: Dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({"model": model.state_dict(), "stats": stats}, path)
+    # `decode_mode` selects which pretraining decoder the state dict belongs to, and every
+    # loader is strict=True, so record it rather than leaving the architecture implicit in
+    # whatever SUM_DECODE_MODE happens to be set when the file is read back.
+    payload = {"model": model.state_dict(), "stats": stats}
+    decode_mode = getattr(model, "decode_mode", None)
+    if decode_mode is not None:
+        payload["decode_mode"] = str(decode_mode)
+    torch.save(payload, path)
 
 
 def _ensure_loaders(
@@ -337,6 +345,7 @@ def _build_model(
         pos_encoding=str(getattr(config, "SUM_POS_ENCODING", "learned_abs")),
         rope_base=float(getattr(config, "SUM_ROPE_BASE", 10000.0)),
         channel_balanced_x_loss=bool(getattr(config, "SUM_CHANNEL_BALANCED_X_LOSS", False)),
+        decode_mode=str(getattr(config, "SUM_DECODE_MODE", "mean")),
     ).to(device)
     return model
 
@@ -447,10 +456,7 @@ def run(
     patience = config.SUM_PATIENCE
     min_delta = config.SUM_MIN_DELTA
 
-    ckpt_path = Path(
-        getattr(config, "SUM_CKPT", "")
-        or (Path(config.SUM_DIR) / f"{config.PRED}-{config.VAE_LATENT_CHANNELS}-summarizer.pt")
-    )
+    ckpt_path = Path(getattr(config, "SUM_CKPT", "") or summarizer_ckpt_path(config))
 
     best_val = math.inf
     best_epoch = 0

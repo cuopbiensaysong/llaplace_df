@@ -8,6 +8,11 @@ import torch.nn.functional as F
 from llapdiffusion.models.time_utils import relative_time_offsets
 
 
+# Stage-2 pretraining objectives. "mean" is the shipped one and is kept so existing
+# summarizer artifacts stay loadable; "token" is the B21 §6 repair. See LaplaceAE.__init__.
+DECODE_MODES = ("mean", "token")
+
+
 class TVHead(nn.Module):
     """Single-hidden-layer MLP that projects per-step features to a scalar signal.
 
@@ -236,6 +241,7 @@ class LaplaceAE(nn.Module):
         pos_encoding: str = "learned_abs",
         rope_base: float = 10000.0,
         channel_balanced_x_loss: bool = False,
+        decode_mode: str = "mean",
     ) -> None:
         super().__init__()
 
@@ -245,6 +251,9 @@ class LaplaceAE(nn.Module):
         valid_pos_encodings = {"learned_abs", "continuous_rope", "learned_plus_continuous_rope"}
         if pos_encoding not in valid_pos_encodings:
             raise ValueError(f"Unknown pos_encoding={pos_encoding!r}; expected one of {sorted(valid_pos_encodings)}")
+        decode_mode = str(decode_mode).strip().lower()
+        if decode_mode not in DECODE_MODES:
+            raise ValueError(f"Unknown decode_mode={decode_mode!r}; expected one of {sorted(DECODE_MODES)}")
 
         self.N = int(num_entities)
         self.D = int(feat_dim)
@@ -259,6 +268,7 @@ class LaplaceAE(nn.Module):
         self.t_token_scale = float(t_token_scale)
         self.pos_encoding = pos_encoding
         self.channel_balanced_x_loss = bool(channel_balanced_x_loss)
+        self.decode_mode = decode_mode
         self.use_learned_pos = self.pos_encoding in {"learned_abs", "learned_plus_continuous_rope"}
         self.use_rope = self.pos_encoding in {"continuous_rope", "learned_plus_continuous_rope"}
         self.rope_time_scale = float(max(self.window_size - 1, 1))
@@ -360,16 +370,55 @@ class LaplaceAE(nn.Module):
         self.queries = nn.Parameter(torch.randn(self.S, self.Hc) / math.sqrt(self.Hc))
         self.norm = nn.LayerNorm(self.Hc)
 
-        # 5) Decoders used during summarizer pretraining
-        self.decoder_net = nn.Sequential(
-            nn.Linear(self.Hc, self.Hc * 2),
-            nn.GELU(),
-            nn.Linear(self.Hc * 2, self.window_size * self.N * self.D),
-        )
-        self.v_decoder = nn.Linear(self.Hc, self.window_size * self.N)
-        self.t_decoder = nn.Linear(self.Hc, self.window_size * self.N)
-        self.dt_decoder = nn.Linear(self.Hc, self.window_size * self.N)
-        self.obs_decoder = nn.Linear(self.Hc, self.window_size * self.N)
+        # 5) Decoders used during summarizer pretraining.
+        #
+        # decode_mode="mean" is the legacy objective and is kept for checkpoint compatibility.
+        # It reads context.mean(dim=1) -- 256 of the 86 016 numbers the denoiser consumes -- so
+        # 335 of the 336 token directions lie in the null space of the pretraining loss and
+        # receive no gradient from any objective (B21 §6). decode_mode="token" decodes the
+        # history PER TIME STEP through cross-attention over all S tokens, which makes the loss
+        # a function of every token direction: the summary must be sufficient to rebuild the
+        # history, which is the property the pipeline already assumes when it hands
+        # `cond_summary` to the denoiser as the conditioning.
+        if self.decode_mode == "token":
+            if self.Hc % n_heads != 0:
+                raise ValueError(
+                    f"decode_mode='token' needs context_dim={self.Hc} divisible by n_heads={n_heads}"
+                )
+            # Learned per-time queries: constant across windows, so everything window-specific
+            # has to arrive through the attention read of `context`.
+            self.decode_queries = nn.Parameter(torch.randn(self.window_size, self.Hc) * 0.02)
+            # Learned per-token key bias, so the S summary positions are individually
+            # addressable rather than distinguishable only by content.
+            self.decode_token_pos = nn.Parameter(torch.randn(self.S, self.Hc) * 0.02)
+            self.decode_q_norm = nn.LayerNorm(self.Hc)
+            self.decode_kv_norm = nn.LayerNorm(self.Hc)
+            self.decode_attn = nn.MultiheadAttention(
+                self.Hc, n_heads, dropout=dropout, batch_first=True
+            )
+            self.decode_norm = nn.LayerNorm(self.Hc)
+            self.decode_ff = nn.Sequential(
+                nn.Linear(self.Hc, self.Hc * 2),
+                nn.GELU(),
+                nn.Linear(self.Hc * 2, self.Hc),
+            )
+            self.decode_ff_norm = nn.LayerNorm(self.Hc)
+            # Per-time heads: the [B,K,Hc] readout is shared, each head emits one step.
+            self.decoder_net = nn.Linear(self.Hc, self.N * self.D)
+            self.v_decoder = nn.Linear(self.Hc, self.N)
+            self.t_decoder = nn.Linear(self.Hc, self.N)
+            self.dt_decoder = nn.Linear(self.Hc, self.N)
+            self.obs_decoder = nn.Linear(self.Hc, self.N)
+        else:
+            self.decoder_net = nn.Sequential(
+                nn.Linear(self.Hc, self.Hc * 2),
+                nn.GELU(),
+                nn.Linear(self.Hc * 2, self.window_size * self.N * self.D),
+            )
+            self.v_decoder = nn.Linear(self.Hc, self.window_size * self.N)
+            self.t_decoder = nn.Linear(self.Hc, self.window_size * self.N)
+            self.dt_decoder = nn.Linear(self.Hc, self.window_size * self.N)
+            self.obs_decoder = nn.Linear(self.Hc, self.window_size * self.N)
 
     @staticmethod
     def _masked_mse(
@@ -495,6 +544,24 @@ class LaplaceAE(nn.Module):
             raise ValueError(f"obs_mask must have 3 or 4 dims, got {tuple(m.shape)}")
 
         return m.to(dtype=torch.bool)
+
+    def _decode_readout(self, context: torch.Tensor) -> torch.Tensor:
+        """Features the pretraining heads decode from.
+
+        ``"mean"``: ``[B, Hc]``, the token-axis mean — the legacy objective, which can only
+        constrain that one direction (B21 §6).
+        ``"token"``: ``[B, K, Hc]``, one vector per reconstructed time step, cross-attended out
+        of **all** S summary tokens, so every token direction carries gradient.
+        """
+        if self.decode_mode != "token":
+            return context.mean(dim=1)
+
+        B = context.shape[0]
+        q = self.decode_q_norm(self.decode_queries).unsqueeze(0).expand(B, -1, -1)
+        kv = self.decode_kv_norm(context + self.decode_token_pos.to(dtype=context.dtype))
+        attended, _ = self.decode_attn(q, kv, kv, need_weights=False)
+        h = self.decode_norm(q + attended)
+        return self.decode_ff_norm(h + self.decode_ff(h))
 
     @staticmethod
     def _normalize_rel_t(rel_t: torch.Tensor) -> torch.Tensor:
@@ -632,15 +699,16 @@ class LaplaceAE(nn.Module):
         # ---------------------------------------------------------
         # 6) Decoding heads (for summarizer pretraining)
         # ---------------------------------------------------------
-        # Decode per-time/per-entity signals (B,N,K,*) from context tokens
-        # A small linear head is sufficient here; keep consistent with existing behavior by pooling:
-        ctx_mean = context.mean(dim=1)                   # [B, Hc]
+        # Decode per-time/per-entity signals (B,K,N,*) from the context tokens. Both modes feed
+        # the SAME five heads; they differ only in what is handed to them -- one pooled vector
+        # ("mean", legacy) or one vector per time step read out of all S tokens ("token").
+        decoded = self._decode_readout(context)          # [B, Hc] or [B, K, Hc]
 
-        x_hat = self.decoder_net(ctx_mean).view(B, K, N, D)
-        v_hat = self.v_decoder(ctx_mean).view(B, K, N)
-        t_hat = self.t_decoder(ctx_mean).view(B, K, N)
-        dt_hat = self.dt_decoder(ctx_mean).view(B, K, N)
-        obs_hat = torch.sigmoid(self.obs_decoder(ctx_mean).view(B, K, N))
+        x_hat = self.decoder_net(decoded).view(B, K, N, D)
+        v_hat = self.v_decoder(decoded).view(B, K, N)
+        t_hat = self.t_decoder(decoded).view(B, K, N)
+        dt_hat = self.dt_decoder(decoded).view(B, K, N)
+        obs_hat = torch.sigmoid(self.obs_decoder(decoded).view(B, K, N))
 
         aux = {
             "x": x,

@@ -1,155 +1,129 @@
-# CMD UQ campaign — state of play and handoff
+# CMD UQ campaign — state of play
 
-**Written 2026-08-03, end of session.** Read this first, then `CMD_UQ_RECOVERY_PLAN.md`.
-This file says where things stand and what to do next; the plan says how.
+**Start here.** Then `CMD_UQ_TABLE3_PLAN.md` for the live plan and Table 3.
+Last updated 2026-08-10.
 
----
-
-## 1. Status in one line
-
-**The campaign is STOPPED at Phase 1 by its own stop rule.** The Phase-1b signal gate failed on
-noaa_uk h=168 on both seeds and both mean sources, and the cause is pinned: the **conditioning**,
-not the denoiser and not the data. **Phases 2–6 are on hold** — they score the calibration of a
-predictive law around a mean the gate has just shown carries ~6.5 % against a 10 % bar.
-
-**Next action is not a phase in the plan.** It is the B21 conditioning track (§5 below).
+> ⚠️ **This file was rewritten 2026-08-10.** Its previous header carried a 🛑 banner reading
+> *"No UQ table is obtainable on noaa_uk h=168 with this pipeline"*. **That verdict is
+> withdrawn** — it rested on two measurement errors (single-draw scoring and guidance left on),
+> both since corrected. Table 3 now exists and both pre-flight gates pass. The full previous
+> text is at `archive/2026-08-uq-campaign/CMD_CAMPAIGN_STATE.md`.
 
 ---
 
-## 2. Where the work is — read this before touching git
+## 1. Where things stand
 
 | | |
 |---|---|
-| branch | **`cmd-uq-tooling-and-b21`** — **not** `main` |
-| ahead of `main` by | **20 commits** |
-| pushed | yes, `origin/cmd-uq-tooling-and-b21` |
-| merged to `main` | **no** |
+| cell | **noaa_uk h=168**, arm `d` (chirp − head), `predict_type=x0` |
+| stack | entity-encoded stage 1 (`VAE_ENTITY_ENCODE`) + shipped summarizer + `COND_POOL_NORM_MODE="global"` |
+| Table 3 | **exists**, 2 of 5 seeds, val — see `CMD_UQ_TABLE3_PLAN.md` |
+| gates | **G-b and G-c both PASS** (first time in the campaign) |
+| branch | **`cmd-uq-tooling-and-b21`**, not `main` |
+| next | seeds 2–4; then the two open questions in §4 |
 
-⚠️ `main` is at `f1788e3` and contains **none** of this campaign. A fresh agent that checks out
-`main` will see none of the tooling fixes, none of B20–B22, and will re-derive results that are
-already recorded. Start from `cmd-uq-tooling-and-b21`.
-
-⚠️ **`.gitignore:46` ignores `finetuning/results/*`.** Two campaign records lived only there and
-would not survive a clone; they now have tracked copies. **Edit the tracked copy:**
-
-| tracked (canonical) | ignored working copy |
-|---|---|
-| `w_docs/CMD_PHASE0_WINDOW_AUDIT.md` | `finetuning/results/window_audit.md` |
-| `w_docs/CMD_PHASE1B_GATE.md` | `finetuning/results/phase1b/gate_readout.md` |
-
-Raw JSON (`gate_seed*.json`, `s1_gate_seed*.json`) and all checkpoints under `ldt/` remain
-untracked by design — they are large and reproducible from the commands in the tracked copies.
-
-🔑 **`.git/config` contains a GitHub personal access token in plaintext** in the `origin` URL. It
-is not pushed, but it is readable by anyone with filesystem access — which on this machine
-includes other agents. **Rotate it** and switch to SSH or a credential helper. Left as-is because
-changing a remote is the owner's call.
+`main` (`f1788e3`) contains **none** of this campaign. Start from the branch.
 
 ---
 
-## 3. Settled — do not re-litigate, do not re-run
+## 2. Settled — do not re-litigate, do not re-run
 
 | finding | evidence |
 |---|---|
-| PhysioNet h=12 is a smoke-test cell only | 13 train windows vs 11.75 M params (B19, Phase 0) |
-| crypto / us_equity cannot serve the gate | 90 / 72 val windows; over-parameterized 6.0× / 8.9× |
-| bms_air h=168 is **VOID** as a cross-check | the h=168 eligibility filter leaves mostly *single-entity* windows; 23 full-panel val windows |
-| Gate-0 failures are **not** a capacity problem | the Gate-0 score equals the cell's own cross-entity mean share (B20) |
-| noaa_uk h=168 is the right gate cell | Gate 0 = 0.922, forecastable at A = 28.6 %, 4.3× **under**-parameterized |
-| the summarizer, not the VAE, is the bottleneck | 1a: A = 28.6 % raw history vs B = 7.7–16.4 % through the conditioning |
-| `COND_NORM_MODE="global"` is **not adopted and not measured** | 5 seeds, mean −0.0086 CRPS, 4 of 5 inside the 0.036 band, and `EPOCHS=60` truncated 8 of 10 runs at their final eval |
-| **the denoiser is not the bottleneck** | Phase 1b: rescaled 6.5 % mean vs a ridge ceiling of 5.6 % — **+0.9 pt** for 10.2 M params |
-| seed noise band on CRPS is **0.036** | §4 retraction 1; every decision run needs ≥ 2 seeds |
+| noaa_uk h=168 is the right cell | Gate 0 = 0.922 (0.995 entity-encoded), forecastable at A = 28.6 %, 4.3× **under**-parameterized |
+| PhysioNet h=12 is a smoke-test cell only | 13 train windows vs 11.75 M params (B19) |
+| crypto / us_equity cannot serve a gate | 90 / 72 val windows; over-parameterized 6.0× / 8.9× |
+| bms_air is **VOID** at every horizon | A ≤ +1.8 % across h ∈ {24,48,96,168}; the target (PM2.5) is not forecastable, not a pipeline defect |
+| **noaa_us h=168 is the Phase-2 cross-check cell** | A = 23.4 %, same target variable, independent sensor network |
+| Gate 0 does **not** license a cell | bms_air has the highest Gate 0 (0.941) and zero forecastable signal. Gate 0 and 1a's **A** are independent |
+| the B21 conditioning gap is genuine **loss**, not nonlinear re-encoding | oracle MLP reproduces the linear gap to 0.3 pt (`results_nonlinear_probe.md`) |
+| **335 of 336 summarizer token directions are unsupervised** | every `LaplaceAE` pretraining head reads `context.mean(dim=1)` (`summarizer.py:637`); `COND_NORM_MODE="sample"` then removes the one direction that *was* supervised |
+| the denoiser is not the bottleneck | Phase 1b: rescaled 6.5 % vs a ridge ceiling of 5.6 % — +0.9 pt for 10.2 M params |
+| CRPS seed band is **0.036** | every decision needs ≥ 2 seeds |
+| **guidance is monotone-harmful here; freeze `w = 1.0`** | w=1.0 → RMSE 0.4296 / CRPS 0.2565; shipped (1.0,2.0) ramp → 0.4513 / 0.2688; w=2.0 → 0.4754 / 0.2826 |
 
-Two corrections that cost real time and are easy to repeat — both are recorded in
-`CMD_BUG_REPORT.md`, read them before designing a probe:
+### The Phase-1 latent gate is retired
 
-- **Never mean-pool the summary tokens** in a probe. Averaging 336 tokens scores −0.2 % where the
-  strided view scores 14.2 % — pooling manufactures a FAIL out of working conditioning.
-- **Select ridge alpha on a chronological train holdout, never on val.** Selecting on val moved a
-  headline 6.2 % → 9.8 %, straight across the 10 % threshold a branch turns on.
-
----
-
-## 4. What Phase 1b actually measured
-
-Full detail in `w_docs/CMD_PHASE1B_GATE.md` and §1b of the plan. The three things that matter:
-
-1. **The gate fails.** Both seeds (CRPS 0.32376 / 0.33229, spread 0.0085 ≪ 0.036 band), all four
-   reads. Even granting a free optimal rescaling the model does not have, 6.5 % < 10 %.
-2. **The denoiser sits at the ridge ceiling.** 10.2 M parameters, a nonlinear architecture and 355
-   epochs buy **under one percentage point** over linear least squares on the same inputs. This
-   converts B21 from an inference about probes into a measurement on the trained model.
-3. **`--mean-source ddim` is the wrong statistic for a signal gate** and the plan no longer
-   mandates it alone. `generate(eta=0.0)` returns **one sample** from a random `x_T`, with CFG on a
-   `(1.0, 2.0)` schedule — 2.2–2.4× over-dispersion, enough to turn a +6 % model into a −3 %
-   reading. Run **both** sources; the gap between them is diagnostic.
+Four independent interventions moved the gate axis and val CRPS in **opposite** directions,
+without exception. Mechanism: a faithful stage 1 (round-trip 0.922 → 0.995) moves genuinely
+*unpredictable* per-entity content into the latent, so the fraction of latent variance explained
+falls while the decoded forecast improves. A criterion anti-correlated with the objective cannot
+gate the campaign. `CMD_UQ_TABLE3_PLAN.md` replaced it; the four-arm attribution table is there.
 
 ---
 
-## 5. The next task: the B21 conditioning track
+## 3. Metric traps — each produced a wrong verdict here before it was caught
 
-The gate will not move until **C** in Phase 1a (`cond_summary` → latent) clears 10 %. It currently
-reads 4.9–6.8 %. **Re-entering 1b on any other cell tests nothing** — every cell carries the same
-summarizer.
+Read these before designing any measurement.
 
-**Root mechanism (B21 §6, found with agent-B).** Every `LaplaceAE` pretraining head reads
-`ctx_mean = context.mean(dim=1)` — `llapdiffusion/models/summarizer.py:637`, and lines 639–642 for
-the four decoders. So of 336 token directions, **335 are unsupervised**; the objective only ever
-constrains their mean. `COND_NORM_MODE="sample"` then removes exactly the one direction that *was*
-supervised. That is the defect to fix, and **it has not been attempted** — everything tried so far
-works downstream of it.
-
-**Already tried, so do not repeat as if new:** `COND_POOL_USE_RAW=True`, `SUM_FT_MODE=all`,
-`COND_NORM_MODE="global"` (5 seeds, inconclusive — see §3).
-
-**Two named leads, both still open**, in the plan's debugging-track section:
-
-1. **B15's residual gap.** Fixing per-batch conditioning normalization moved R²_cond from −0.001
-   to **+0.210**, against a ridge ceiling of **+0.747** on the model's own `cond_summary`. The gap
-   is unexplained and upstream of everything.
-2. **`block_summary_adaln = False`.** Conditioning reaches the trunk only via cross-attention into
-   K modal tokens whose residues come from `x_t`; at high noise those tokens are noise-dominated.
-   **Phase 1b confirmed this independently**: `oneshot` at `t = T−1` scores corr 0.1903 / 0.1931
-   against the trajectory's 0.3702 / 0.3395 — the model recovers half its correlation only *after*
-   `x_t` becomes informative, and an ideal model would order these the other way. The two seeds
-   land 1.5 % apart, so it is architectural, not a draw.
-
-**How to know it worked:** re-run `llapdiff-ridge-probe --dataset-key noaa_uk --pred 168
---tokens 8`. Success is **C ≥ 10 %**, not a CRPS improvement — CRPS on this pipeline is dominated
-by a per-entity prior and is not a health check (see the plan's Background).
+| trap | cost when missed |
+|---|---|
+| **Never score a single draw.** `generate(eta=0)` returns ONE sample from a random `x_T`; the point forecast is `E[decode(z)]` over draws | 50 points of RMSE reduction; and 51 % of val `latent_mse` is draw noise (0.99 → 0.48 at a matched ensemble mean) |
+| **Name the baseline.** `baseline_rmse_predict_mean` is computed on the **eval** split, so it leaks that split's level — 2.3× stronger than an honest train-mean baseline | swings a verdict by 100 pt |
+| **Never mean-pool the summary tokens** in a probe | −0.2 % where the strided view scores 14.2 % — manufactures a FAIL |
+| **Select ridge alpha on a chronological train holdout, never on val** | moved a headline 6.2 % → 9.8 %, across a decision threshold |
+| **An "oracle-rescaled" model with c ≈ 0 collapses to the baseline itself** | scoring ≈ 0 % against it is a tautology, not a measurement |
+| **Marginal calibration is not conditional calibration** | pooled PIT-ECE 0.05 while per-decile coverage runs 0.78 → 0.997 (§4) |
+| **`val_diag_mse_raw` is an MSE under `mse` and an NLL under `gaussian_nll`** | produced a phantom "340× degradation" |
 
 ---
 
-## 6. Operational hazards specific to this repo
+## 4. Open questions
+
+1. **Seeds 2–4** to reach the pre-registered 5. The calibration columns are the deliverable and
+   they are the ones that need the seeds; CRPS and the A3 efficiency claim are already stable.
+2. 🔴 **Is the analytic law's heteroscedasticity informative?** Measured on seed 0:
+   `corr(predicted variance, squared residual) = +0.016`, Spearman +0.057. Predicted variance
+   spans 14.5× across deciles while the actual squared error spans 1.6× and does not track it.
+   The law is *marginally* near-calibrated only because over- and under-confident deciles cancel
+   when pooled. **Table 3's columns are all pooled statistics and cannot see this.** Confirm on
+   seeds 2–4; consider a conditional-calibration column.
+3. **The noaa_uk pre-registration was never written.** `PREREG_U3.md` is scoped to PhysioNet
+   h=12. Recovery plan Phase 4 requires a new file before the test split is touched.
+4. Should `cmd-uq-tooling-and-b21` merge to `main`? Asked repeatedly, unanswered.
+
+---
+
+## 5. Operational hazards specific to this repo
 
 - **`PYTHONPATH=$LLAPDIFF_SRC` is not optional.** A sibling checkout is installed editable in the
-  venv; without it, `import llapdiffusion` silently resolves elsewhere and edits appear to do
-  nothing. See `CLAUDE.md`. Verify with
-  `python -c "import llapdiffusion; print(llapdiffusion.__file__)"`.
-- **`EARLY_STOP` counts evals, not epochs.** Patience is `EARLY_STOP × DOWNSTREAM_EVAL_EVERY`.
-- **Do not launch a training run without setting `EPOCHS` explicitly.** The default is 600; a
-  forgotten override once queued ~32 h of work. Validate override JSON with `json.load` *before*
-  launching.
-- **`*.json` globs over a results directory will count override files**, not just results.
-- **Campaign eval profile** (~61× cheaper val, and what every recorded number above used):
-  `LLAPDIFF_EVAL_STEPS=16 EVAL_NUM_SAMPLES=5 EVAL_MAX_BATCHES=48 EVAL_SUBSET_MODE=stride
-  EVAL_SEED=4242 VAL_DIAG_EVERY=5`.
-- **A second agent (agent-B) shared this filesystem.** Its channel is `w_docs/agents_communication.md`
-  and its results are in `w_docs/results_nonlinear_probe.md`. Its shared-variance column supersedes
-  an earlier one of mine; the leave-one-out figures (noaa_uk 76.5 %, noaa_us 46.8 %, crypto 42.4 %,
-  us_equity 34.2 %) are the mediator of record. If another agent is run again, give it the same
-  write restrictions recorded in `w_docs/HANDOFF_nonlinear_probe.md`.
-- **415 tests pass** (`python -m pytest tests/ -q`). Keep them passing; several encode bugs that
-  recurred (B16 EMA/raw, the `blocked_purged_split` collapse, the degenerate-window filter).
+  venv; without it `import llapdiffusion` silently resolves elsewhere and edits do nothing.
+  Verify: `python -c "import llapdiffusion; print(llapdiffusion.__file__)"`.
+- **`EARLY_STOP` counts evals, not epochs.** Patience = `EARLY_STOP × DOWNSTREAM_EVAL_EVERY`.
+- **Always set `EPOCHS` explicitly.** The default is 600; a forgotten override once queued ~32 h.
+- **`--smoke` uses `setdefault("EPOCHS", 3)`**, so an `EPOCHS` in `--overrides-json` wins over it.
+  Give the smoke its own override file.
+- **Campaign eval profile** — all six variables carry the `LLAPDIFF_` prefix, and the run must
+  log `[run_trial] validation-protocol profile from env: {...}` with **six** keys:
+  ```bash
+  export LLAPDIFF_EVAL_STEPS=16 LLAPDIFF_EVAL_NUM_SAMPLES=5 LLAPDIFF_EVAL_MAX_BATCHES=48 \
+         LLAPDIFF_EVAL_SUBSET_MODE=stride LLAPDIFF_EVAL_SEED=4242 LLAPDIFF_VAL_DIAG_EVERY=5
+  ```
+  This is the *in-training* protocol only. Reported numbers use `prefix="TEST"` (steps 64,
+  25 samples) and are unaffected by it.
+- **Concurrent seeds need separate `DIFF_PRECOMPUTE_DIR`** — they otherwise race and delete each
+  other's cache.
+- **Concurrent drivers must not share `state.json` blindly.** `save_state` now merges per trial
+  key; before that fix, seed 1's save silently erased seed 0's completed S1 record.
+- **`.gitignore` ignores `finetuning/results/*`.** Tracked copies:
+  `w_docs/CMD_PHASE0_WINDOW_AUDIT.md`, `w_docs/CMD_PHASE1B_GATE.md`. Edit the tracked copy.
+- 🔑 **`.git/config` holds a GitHub PAT in plaintext** in the `origin` URL. Readable by anyone
+  with filesystem access. **Rotate it.** Left as-is because changing a remote is the owner's call.
+- **Keep the tests passing** — `python -m pytest tests/ -q`, currently **490**. Several encode
+  bugs that already recurred once.
 
 ---
 
-## 7. Open questions nobody has answered
+## 6. Document map
 
-1. Should `finetuning/results/window_audit.md` and the other results files be force-added to git,
-   or is the tracked-copy arrangement in §2 the permanent answer? Asked twice, unanswered.
-2. Should `cmd-uq-tooling-and-b21` be merged to `main`, or stay a long-lived branch?
-3. The shared-variance reproduction discrepancy (my noaa_us 42 % vs agent-B's 49.0 %, drop rates
-   11.4 % vs 1.7 %) was resolved by adopting agent-B's column wholesale, **not** by finding the
-   bug. The two scripts filter differently and the cause was never identified.
+| file | what it is |
+|---|---|
+| **this file** | state, settled facts, traps, hazards |
+| **`CMD_UQ_TABLE3_PLAN.md`** | the live plan of record + Table 3 |
+| `CMD_BUG_REPORT.md` | the durable bug ledger (B1–B24) |
+| `CMD_UQ_RECOVERY_PLAN.md` | standing rules + the U3 phase spec. **Its Phase 0–2 gate logic is superseded** |
+| `CMD_RUNBOOK.md`, `USAGE.md`, `DEVELOPER_GUIDE.md` | how to run things |
+| `results_nonlinear_probe.md` | the B21 loss-vs-re-encoding result |
+| `PREREG_U3.md` | PhysioNet-scoped prereg — **superseded, replacement unwritten** |
+| `claude_communication.md` | live agent channel; process log, not a source of record |
+| `archive/2026-08-uq-campaign/` | full pre-cleanup originals of every file above |

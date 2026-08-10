@@ -51,6 +51,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (  # noqa: E402
     FINETUNING_DIR,
+    REPO_ROOT,
     combo_dir,
     load_state,
     read_json,
@@ -79,20 +80,50 @@ BASE_CONFIG = {
     "CHIRP_NUM_BASIS": 4,
     "CHIRP_RHO_MIN": 1e-3,
     "CHIRP_COEFF_L2": 0.01,
-    "GUIDANCE_POWER": 2.0,  # the tuned ramp shape; config default is 0.3
+    # 🔴 GUIDANCE FROZEN AT 1.0 (no CFG) 2026-08-07, from the Phase-5/U1 audit this driver
+    # is supposed to run first and never had on this cell. Measured on noaa_uk h=168
+    # (300 val windows, 12 draws, ensemble mean decoded in data space): guidance is STRICTLY
+    # MONOTONE-HARMFUL on both RMSE and CRPS --
+    #     w=1.0  RMSE 0.4296  CRPS 0.2565      <- frozen
+    #     ramp (1.0,2.0)  0.4513  0.2688       <- the previous default
+    #     w=2.0  0.4754  0.2826
+    # Mechanism: CFG extrapolates along (conditional - unconditional); with weak conditioning
+    # that difference is mostly noise, so guidance amplifies noise -- also the source of the
+    # 2.2-2.4x over-dispersion recorded in CMD_UQ_RECOVERY_PLAN §1b.
+    # This is a VALIDITY requirement, not just accuracy: w > 1 sharpens the predictive
+    # distribution and is indistinguishable from miscalibration, so every PIT/coverage number
+    # in Table 3 would otherwise be confounded (plan §5.5).
+    "GUIDANCE_STRENGTH": 1.0,
+    "GUIDANCE_POWER": 0.3,  # inert at strength 1.0; kept explicit so it is a recorded choice
 }
 
 # CHIRP_UQ_INIT_VAR is NOT cosmetic. At the library default (1e-2) the initial
 # predicted variance on physionet h=12 is 0.0011 against a squared error of 2.675, so
 # the NLL mean gradient (pred-target)/sigma^2 is inflated ~2415x and destroys the
 # warm-started mean: measured latent val MSE 2.8 (MSE arm) -> 93+ (NLL arm), with data
-# space CRPS almost unchanged, i.e. CRPS does not reveal the damage. 25.0 puts the
-# initial variance at the residual scale. It is scale-dependent -- re-measure with
-# scratch diag_uqinit.py when moving to another dataset/horizon.
+# space CRPS almost unchanged, i.e. CRPS does not reveal the damage. The RULE is "initialise
+# at the residual scale"; the VALUE is per dataset x horizon and never transfers -- re-measure
+# it (llapdiff-uq-eval --latent-only, read latent_mse) when moving cells.
 UQ_CONFIG = {
     "CHIRP_UQ_HEAD": True,
     "DIFF_LOSS_MODE": "gaussian_nll",
-    "CHIRP_UQ_INIT_VAR": 25.0,
+    # 🔴 25.0 is the PHYSIONET h=12 value and is wrong by ~26x on noaa_uk h=168. The rule is
+    # "initialise the predicted variance at the residual scale"; the value never transfers.
+    # Measured on the repaired noaa_uk stack: latent_mse = 0.96 (llapdiff-uq-eval, val,
+    # --latent-only), so 1.0. Getting this wrong is invisible to CRPS and catastrophic for
+    # calibration -- on physionet the default 1e-2 gave coverage 0.034 at nominal 0.9 while
+    # CRPS moved < 0.001.
+    "CHIRP_UQ_INIT_VAR": 1.0,
+}
+
+# The stack the UQ arms must train on. Not the best-CRPS stack: `s1only` (entity-encoded
+# stage 1, legacy pooling) scores 0.30179 against this pairing's 0.3197, but it leaves the
+# pooled conditioning path dead, so `chirp_field.uq_params` sees no history and the
+# Theorem-C law's p0/q/rho-bar are IDENTICAL for every window (B23). A2/A3 would then score a
+# structurally homoscedastic law. Giving up ~0.018 CRPS buys arms that measure what they claim.
+STACK_CONFIG = {
+    "VAE_ENTITY_ENCODE": True,          # B20: encoder-side entity embedding
+    "COND_POOL_NORM_MODE": "global",    # B23: the pooled consumers actually see the history
 }
 
 STAGE_ORDER = ("s1_mean", "s2_diffusion_uq", "s3_oneshot_uq")
@@ -103,17 +134,56 @@ STAGE_LABELS = {
 }
 # Which stage's checkpoint each reported arm is evaluated on, and how.
 ARM_EVAL = {
-    "A1_diffusion_sampled": ("s2_diffusion_uq", "ddim"),  # read from data_space_sampled
-    "A2_diffusion_analytic": ("s2_diffusion_uq", "ddim"),  # read from data_space_analytic
-    "A3_oneshot_analytic": ("s3_oneshot_uq", "oneshot"),
+    # A1 and A2 come from ONE eval of the S2 checkpoint. Their means are matched by fix 1d --
+    # A1's is the mean of `num_samples` decoded draws, A2's the same ensemble averaged in
+    # latent space -- so the row between them is calibration at matched cost, not a speedup.
+    "A1_diffusion_sampled": ("s2_diffusion_uq", "ensemble"),  # read from data_space_sampled
+    "A2_diffusion_analytic": ("s2_diffusion_uq", "ensemble"),  # read from data_space_analytic
+    "A3_oneshot_analytic": ("s3_oneshot_uq", "oneshot"),  # 1 pass: the speedup arm
 }
 
 
-def stage_overrides(stage: str, init_ckpt: str | None) -> dict:
+def entenc_vae_path(dataset: str = "noaa_uk", pred: int = 168) -> Path:
+    """The entity-encoded stage-1 artifact (B20), resolved and existence-checked.
+
+    Fails loudly rather than letting a run start against the legacy VAE: every downstream
+    load is strict on shape but silent on provenance, so a wrong artifact here would train a
+    whole campaign on a latent nobody chose.
+    """
+    from llapdiffusion.configs.config_utils import clone_config, refresh_artifact_paths
+    from llapdiffusion.configs.dataset_defaults import apply_dataset_preset
+
+    cfg = clone_config()
+    cfg.VAE_ENTITY_ENCODE = True
+    apply_dataset_preset(cfg, dataset, pred=int(pred))
+    refresh_artifact_paths(cfg)
+    path = Path(cfg.VAE_CKPT)
+    if not path.exists():
+        raise SystemExit(
+            f"entity-encoded stage-1 artifact not found: {path}\n"
+            "Build it with:  llapdiff-stage-pretrain --dataset-key "
+            f"{dataset} --pred {pred} --stage vae --entity-encode --epochs 80 --seed 0"
+        )
+    return path
+
+
+def stage_overrides(stage: str, init_ckpt: str | None, seed: int | None = None) -> dict:
     """The {"cli":…, "config":…} payload for one stage. x0 everywhere: chirp_uq_head
     requires predict_type='x0' (models/llapdiff.py:60-64), and S1 must match so the
     warm start transfers a mean trained for the same target."""
     config = dict(BASE_CONFIG)
+    config.update(STACK_CONFIG)
+    if seed is not None:
+        # Per-seed precompute cache. Seeds share stage-1/2 artifacts, so they share a cache
+        # fingerprint and two concurrent seeds race on the same directory -- observed as
+        # `OSError: Directory not empty` while one rmtree'd what the other was writing, and
+        # silently corruptible if the timing is kinder. Disk is cheaper than a lost run.
+        config["DIFF_PRECOMPUTE_DIR"] = str(
+            (REPO_ROOT / "ldt" / f"diffusion_cache_u3_seed{int(seed)}").resolve())
+    # VAE_ENTITY_ENCODE alone is not enough: apply_dataset_preset derives VAE_CKPT and then
+    # run_trial re-applies these overrides AFTER it, so the path would still point at the
+    # legacy artifact and the strict load would fail. Name the artifact explicitly.
+    config["VAE_CKPT"] = str(entenc_vae_path())
     if stage in ("s2_diffusion_uq", "s3_oneshot_uq"):
         config.update(UQ_CONFIG)
         if not init_ckpt:
@@ -167,7 +237,7 @@ class Campaign:
             _, _, init_ckpt = self.resolve("s1_mean", seed)
             if not init_ckpt:
                 return None, None, None
-        overrides = stage_overrides(stage, init_ckpt)
+        overrides = stage_overrides(stage, init_ckpt, seed)
         tid = trial_id(self.dataset, self.pred, ARM, seed, overrides)
         rec = self.state["trials"].get(self.trial_key(stage, seed)) or {}
         ckpt = rec.get("checkpoint")
@@ -190,7 +260,7 @@ class Campaign:
                 self.log(f"{stage} seed={seed}: BLOCKED — s1_mean seed={seed} has no checkpoint")
                 return None
             # Planning only: show the stage with a placeholder warm-start path.
-            overrides = stage_overrides(stage, f"<s1_mean seed={seed} checkpoint>")
+            overrides = stage_overrides(stage, f"<s1_mean seed={seed} checkpoint>", seed)
 
         if self.args.dry_run:
             shown = {k: v for k, v in overrides["config"].items() if k not in BASE_CONFIG}
@@ -267,13 +337,22 @@ class Campaign:
 
     # ---------------- evaluation
     def eval_one(self, stage: str, seed: int, *, split: str, latent_only: bool = False,
-                 tag: str | None = None) -> dict | None:
+                 tag: str | None = None, mean_source: str | None = None) -> dict | None:
         ckpt = self.checkpoint_for(stage, seed)
         if not ckpt:
             self.log(f"eval {stage} seed={seed}: no checkpoint, skipping")
             return None
 
-        mean_source = "oneshot" if stage == "s3_oneshot_uq" else "ddim"
+        # 🔴 Fix 1d. A2's mean must be the ENSEMBLE mean, not one DDIM pass: `generate(eta=0)`
+        # is deterministic given x_T but x_T is random, so a single pass is one DRAW from the
+        # predictive distribution while A1's point forecast is the mean of `num_samples` of
+        # them. Measured on a live S2 checkpoint, that made A2's MSE 4.2x worse than A1's
+        # (0.394 vs 0.093) on the SAME weights -- entirely a location difference, which an
+        # A1-vs-A2 row would have reported as a UQ result. A3 stays `oneshot`: a single forward
+        # is what the no-diffusion arm IS, not an artefact of it.
+        mean_source = mean_source or (
+            "oneshot" if stage == "s3_oneshot_uq" else "ensemble"
+        )
         label = tag or f"{stage}_{split}"
         out_dir = self.dir / "eval"
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -289,6 +368,23 @@ class Campaign:
             "--split", split,
             "--out-json", str(out_path),
         ]
+        # 🔴 The eval stack is DERIVED from the training stack, never restated. Both defects
+        # this closes fail silently (found by Claude C in review, 2026-08-08):
+        #
+        #   D1  build_eval_config resolves VAE_ENTITY_ENCODE=False and the LEGACY VAE, which
+        #       EXISTS on disk, so _load_stack builds LatentVAE(entity_encode=False) to match
+        #       it and the strict load SUCCEEDS. Every latent metric and every data-space CRPS
+        #       would then be computed through a stage 1 the denoiser never saw, with
+        #       mu_mean/mu_std from the other stack, and nothing would warn.
+        #   D2  sampling knobs are not in the checkpoint: _sampling_kwargs(prefix="TEST")
+        #       resolves guidance to the shipped (1.0, 2.0) ramp regardless of what the run
+        #       trained under. The guidance freeze protected training only -- and the reason
+        #       for the freeze (w > 1 sharpens the predictive law and is indistinguishable
+        #       from miscalibration) is a SCORING-time argument.
+        if STACK_CONFIG.get("VAE_ENTITY_ENCODE"):
+            cmd += ["--vae-entity-encode", "--vae-ckpt", str(entenc_vae_path(self.dataset, self.pred))]
+        cmd += ["--guidance", str(BASE_CONFIG["GUIDANCE_STRENGTH"]),
+                "--guidance-power", str(BASE_CONFIG["GUIDANCE_POWER"])]
         if latent_only:
             cmd.append("--latent-only")
         else:
@@ -323,7 +419,12 @@ class Campaign:
         seed = self.args.seeds[0]
         verdicts = {}
 
-        s2 = self.eval_one("s2_diffusion_uq", seed, split="val", latent_only=True, tag="gate_b")
+        # Deliberately `ddim`, not the reported `ensemble`: G-b is a health check on the
+        # variance head, its thresholds were set against the single-pass mean, and an ensemble
+        # mean would cost NUM_EVAL_SAMPLES x the denoiser passes for a pre-flight gate. The
+        # divergence from the reported protocol is stated here rather than left to be inferred.
+        s2 = self.eval_one("s2_diffusion_uq", seed, split="val", latent_only=True, tag="gate_b",
+                           mean_source="ddim")
         if s2:
             verdicts["G-b_nll_health"] = _gate_b(s2)
         s3 = self.eval_one("s3_oneshot_uq", seed, split="val", latent_only=True, tag="gate_c")
@@ -353,7 +454,15 @@ class Campaign:
             s3 = read_json(self.dir / "eval" / f"seed{seed}_s3_oneshot_uq_{split}.json")
             if s2:
                 if s2.get("data_space_sampled"):
-                    rows["A1_diffusion_sampled"].append(s2["data_space_sampled"])
+                    # The sampled arm's point forecast IS the mean of its draws, so label it
+                    # the same way as the analytic arm. Printed side by side, two identical
+                    # labels are the visible evidence that fix 1d is in force; two different
+                    # ones say the A1-vs-A2 row is comparing locations.
+                    sampled = dict(s2["data_space_sampled"])
+                    sampled.setdefault(
+                        "mean_source", f"ensemble{int(sampled.get('num_samples') or 0)}"
+                    )
+                    rows["A1_diffusion_sampled"].append(sampled)
                 if s2.get("data_space_analytic"):
                     rows["A2_diffusion_analytic"].append(s2["data_space_analytic"])
                 latent["A2_diffusion_analytic"].append(s2)
@@ -373,10 +482,33 @@ class Campaign:
             "gates": self.state.get("gates", {}),
             "arms": {},
         }
+        # The nominal level the coverage column is read at. Constant across arms and seeds (it
+        # is a CLI default), but carried through rather than assumed, so a table can never
+        # label an 0.9 coverage number as 0.8.
+        levels = {
+            float(e["coverage_level"]) for entries in rows.values() for e in entries
+            if e.get("coverage_level") is not None
+        }
+        if len(levels) > 1:
+            raise ValueError(
+                f"arms were scored at different coverage levels {sorted(levels)}; they are not "
+                "comparable. Re-run the odd one with a matching --coverage-level."
+            )
+        payload["coverage_level"] = next(iter(levels), None)
+
         for arm, entries in rows.items():
+            sources = sorted({str(e["mean_source"]) for e in entries if e.get("mean_source")})
             payload["arms"][arm] = {
                 "n_seeds": len(entries),
-                **{m: _agg([e.get(m) for e in entries]) for m in ("crps", "mae", "mse", "wall_seconds")},
+                # A list, not a string: seeds scored under different mean sources must be
+                # visible rather than silently collapsed to the first one.
+                "mean_source": sources[0] if len(sources) == 1 else (sources or None),
+                **{m: _agg([e.get(m) for e in entries]) for m in (
+                    "crps", "mae", "mse", "wall_seconds",
+                    # Table 3's calibration columns: data space, one estimator, every arm.
+                    "pit_calibration_error", "coverage", "mean_interval_width",
+                    "denoiser_passes_per_batch",
+                )},
                 "latent": {
                     m: _agg([e.get(m) for e in latent.get(arm, [])])
                     for m in ("latent_gaussian_nll", "pit_calibration_error",
@@ -496,17 +628,22 @@ def _render_markdown(p: dict) -> str:
         "predictive law is obtained. A1/A2 are the same checkpoint (S2); A3 is a separately",
         "trained one-shot model (S3, `TRAIN_T_SAMPLER=\"max_only\"`).",
         "",
-        "> ### ⚠️ Read this before quoting any number below",
-        ">",
-        "> **This is a 5-window estimate.** On physionet h=12 the diffusion stage receives",
-        "> **13 train / 5 val / 5 test windows** (bug **B19**): the set-VAE pools all 445",
-        "> entities into one latent per window, so the denoiser sees 2 496 training scalars",
-        "> against 11.5 M parameters and memorizes (train loss 8.23 → 0.075 while the val",
-        "> latent MSE never beats predict-zero). Latent correlation with the target is ≈ 0 in",
-        "> **every** arm, including a plain-MSE control — so the arm-to-arm differences below",
-        "> are **not** evidence about diffusion. Treat this table as an end-to-end validation",
-        "> of the U3 pipeline. The statistical claim belongs on noaa_uk h=168",
-        "> (16 286 / 2 183 / 4 702 windows).",
+        # B19's caveat is TRUE for physionet h=12 and FALSE anywhere else -- printed
+        # unconditionally it told a reader to discard a valid noaa_uk result as a
+        # "5-window estimate". Gate it on the dataset it describes.
+        *([
+            "> ### ⚠️ Read this before quoting any number below",
+            ">",
+            "> **This is a 5-window estimate.** On physionet h=12 the diffusion stage receives",
+            "> **13 train / 5 val / 5 test windows** (bug **B19**): the set-VAE pools all 445",
+            "> entities into one latent per window, so the denoiser sees 2 496 training scalars",
+            "> against 11.5 M parameters and memorizes (train loss 8.23 → 0.075 while the val",
+            "> latent MSE never beats predict-zero). Latent correlation with the target is ≈ 0 in",
+            "> **every** arm, including a plain-MSE control — so the arm-to-arm differences below",
+            "> are **not** evidence about diffusion. Treat this table as an end-to-end validation",
+            "> of the U3 pipeline. The statistical claim belongs on noaa_uk h=168",
+            "> (16 286 / 2 183 / 4 702 windows).",
+        ] if p["dataset"] == "physionet" else []),
         "",
         "| Arm | CRPS | MAE | MSE | wall (s) |",
         "|---|---|---|---|---|",
@@ -536,6 +673,64 @@ def _render_markdown(p: dict) -> str:
             f"{_fmt(lat.get('pit_calibration_error'))} | {_fmt(lat.get('latent_rmse'))} | "
             f"{_fmt(lat.get('mean_predicted_std'))} |"
         )
+
+    a1_src = (p["arms"].get("A1_diffusion_sampled") or {}).get("mean_source")
+    a2_src = (p["arms"].get("A2_diffusion_analytic") or {}).get("mean_source")
+    matched = bool(a1_src) and a1_src == a2_src
+    lines += [
+        "",
+        "## Point-forecast protocol (read before the A1-vs-A2 row)",
+        "",
+        "| Arm | mean source | denoiser passes / batch |",
+        "|---|---|---|",
+    ]
+    for arm, label in labels.items():
+        a = p["arms"].get(arm) or {}
+        lines.append(
+            f"| {label} | `{a.get('mean_source') or '—'}` | "
+            f"{_fmt(a.get('denoiser_passes_per_batch'), 0)} |"
+        )
+    lines += [
+        "",
+        (
+            f"✅ **A1 and A2 share a mean source (`{a1_src}`), so the row between them is "
+            "calibration at MATCHED COST** — the analytic arm pays `N·steps + 1` denoiser "
+            "passes against the sampled arm's `N·steps`, so there is no A1/A2 speedup to "
+            "claim and none is reported. The method-level speedup is **A1 vs A3** (`oneshot`, "
+            "1 pass)."
+            if matched else
+            f"🔴 **A1 (`{a1_src or '—'}`) and A2 (`{a2_src or '—'}`) do NOT share a mean "
+            "source, so the row between them mixes a location difference with a calibration "
+            "one and must not be read as a UQ result** (fix 1d). Re-run the analytic arm with "
+            "`--mean-source ensemble`."
+        ),
+    ]
+
+    level = p.get("coverage_level")
+    lines += [
+        "",
+        "## Data-space calibration — **the Table 3 columns**",
+        "",
+        f"_All three arms, one estimator (`ensemble_pit`), one space, the same observation mask "
+        f"as the accuracy table above. Nominal coverage "
+        f"**{level if level is not None else '—'}**._",
+        "",
+        "> The latent table above is the exact-Gaussian cross-check, **not** these arms' entry in",
+        "> a shared column: A1 has no closed-form law, so a table mixing the two would compare a",
+        "> latent closed-form number against a data-space sampled one and read the difference as",
+        "> an arm effect.",
+        "",
+        f"| Arm | PIT-ECE | coverage @ {level if level is not None else '—'} | "
+        "mean interval width |",
+        "|---|---|---|---|",
+    ]
+    for arm, label in labels.items():
+        a = p["arms"].get(arm) or {}
+        lines.append(
+            f"| {label} | {_fmt(a.get('pit_calibration_error'))} | "
+            f"{_fmt(a.get('coverage'))} | {_fmt(a.get('mean_interval_width'))} |"
+        )
+
     if p.get("gates"):
         lines += ["", "## Pre-flight gates", ""]
         for name, v in p["gates"].items():

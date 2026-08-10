@@ -14,6 +14,11 @@ from llapdiffusion.models.laptrans import (
 
 OUTPUT_HEAD_MODES = ("auto", "on", "off")
 
+# How the POOLED conditioning consumers (pole/chirp field, AdaLN, analysis QK) normalise the
+# summary, independently of what cross-attention receives. "inherit" is the legacy behaviour --
+# pool whatever COND_NORM_MODE produced, which under "sample" is an exact zero (B23).
+POOL_NORM_MODES = ("inherit", "global")
+
 
 def normalize_output_head_mode(value: str) -> str:
     mode = str(value).strip().lower()
@@ -315,6 +320,7 @@ class LapFormer(nn.Module):
         use_mlp_residual: bool = True,
         self_conditioning: bool = False,
         summary_pool_mode: str = "mean",
+        summary_pool_norm_mode: str = "inherit",
         pole_pool_use_raw_summary: bool = False,
         block_summary_adaln: bool = False,
         analysis_summary_qk: bool = False,
@@ -345,6 +351,20 @@ class LapFormer(nn.Module):
         if pool_mode not in {"mean", "attn"}:
             raise ValueError(f"Unknown summary_pool_mode '{summary_pool_mode}'. Use 'mean' or 'attn'.")
         self.summary_pool_mode = pool_mode
+        pool_norm = str(summary_pool_norm_mode).strip().lower()
+        if pool_norm not in POOL_NORM_MODES:
+            raise ValueError(
+                f"Unknown summary_pool_norm_mode '{summary_pool_norm_mode}'. "
+                f"Use one of {sorted(POOL_NORM_MODES)}."
+            )
+        self.summary_pool_norm_mode = pool_norm
+        if pool_norm == "global":
+            # Buffers, so the statistics travel with the checkpoint and are restored by the
+            # same strict load as the weights. Registered ONLY in this mode: an "inherit"
+            # model must keep exactly the key set every existing checkpoint was saved with.
+            self.register_buffer("cond_pool_mean", torch.zeros(1, 1, self.hidden_dim))
+            self.register_buffer("cond_pool_std", torch.ones(1, 1, self.hidden_dim))
+            self.register_buffer("cond_pool_stats_set", torch.zeros((), dtype=torch.bool))
         self.pole_pool_use_raw_summary = bool(pole_pool_use_raw_summary)
         self.block_summary_adaln = bool(block_summary_adaln)
         self.analysis_summary_qk = bool(analysis_summary_qk)
@@ -464,6 +484,66 @@ class LapFormer(nn.Module):
             return cond_summary
         return cond_summary_raw
 
+    def set_cond_pool_stats(self, mean: torch.Tensor, std: torch.Tensor) -> None:
+        """Install the fixed (mean, std) the pooled path normalises with.
+
+        Computed once over the train split by ``compute_global_cond_stats``, so the pooled
+        conditioning is a function of the window alone (B15's requirement) while keeping the
+        window's LEVEL, which is what makes it non-degenerate under mean pooling (B23).
+        """
+        if self.summary_pool_norm_mode != "global":
+            raise RuntimeError(
+                "set_cond_pool_stats requires summary_pool_norm_mode='global'; this model is "
+                f"'{self.summary_pool_norm_mode}'."
+            )
+        self.cond_pool_mean = mean.reshape(1, 1, -1).to(self.cond_pool_mean)
+        self.cond_pool_std = std.reshape(1, 1, -1).to(self.cond_pool_std)
+        self.cond_pool_stats_set = torch.ones_like(self.cond_pool_stats_set)
+
+    def _pool_source(
+        self,
+        *,
+        cond_summary: Optional[torch.Tensor],
+        cond_summary_raw: Optional[torch.Tensor],
+        use_raw: bool,
+    ) -> Optional[torch.Tensor]:
+        """The tokens the pooled consumers reduce over.
+
+        B23: ``COND_NORM_MODE="sample"`` subtracts the mean over the token axis, which is the
+        axis this pool then averages, so under the shipped defaults every pooled consumer --
+        the pole/chirp field (rho(t), omega(t), the Theorem-C law) and the AdaLN path -- reads
+        an algebraically zero vector. Measured on 120 real val windows: across-window std
+        7.5e-08. ``"global"`` reduces the RAW summary with fixed train statistics instead:
+        batch-independent, unit-scaled, and level-preserving, so the pool varies per window.
+        ``"inherit"`` reproduces the legacy behaviour and is what every pre-fix checkpoint
+        resolves to.
+        """
+        if self.summary_pool_norm_mode != "global":
+            return self._select_summary_tokens(
+                cond_summary=cond_summary,
+                cond_summary_raw=cond_summary_raw,
+                use_raw=use_raw,
+            )
+
+        if cond_summary_raw is None:
+            if cond_summary is None:
+                return None
+            # Falling back to the normalised summary here would silently restore the exact
+            # degeneracy this mode exists to remove, with no visible symptom.
+            raise RuntimeError(
+                "summary_pool_norm_mode='global' needs cond_summary_raw; only the normalised "
+                "summary was supplied. Pass both (every in-tree caller does)."
+            )
+        if not bool(self.cond_pool_stats_set):
+            raise RuntimeError(
+                "summary_pool_norm_mode='global' has no conditioning statistics: call "
+                "set_cond_pool_stats(...) (stage 3 computes them once over train) or load a "
+                "checkpoint that carries them."
+            )
+        mean = self.cond_pool_mean.to(dtype=cond_summary_raw.dtype)
+        std = self.cond_pool_std.to(dtype=cond_summary_raw.dtype)
+        return (cond_summary_raw - mean) / (std + 1e-6)
+
     def pool_summary_tokens(
         self,
         t_vec: torch.Tensor,
@@ -472,7 +552,7 @@ class LapFormer(nn.Module):
         cond_summary_raw: Optional[torch.Tensor] = None,
         use_raw: bool = False,
     ) -> torch.Tensor:
-        summary_tokens = self._select_summary_tokens(
+        summary_tokens = self._pool_source(
             cond_summary=cond_summary,
             cond_summary_raw=cond_summary_raw,
             use_raw=use_raw,

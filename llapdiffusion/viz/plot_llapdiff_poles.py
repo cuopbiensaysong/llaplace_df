@@ -13,7 +13,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import torch
 
-from llapdiffusion.configs.config_utils import clone_config
+from llapdiffusion.configs.config_utils import clone_config, refresh_artifact_paths
 from llapdiffusion.configs.dataset_archives import configure_dataset_archive
 from llapdiffusion.configs.dataset_defaults import apply_dataset_preset, dataset_keys
 from llapdiffusion.configs.dataset_registry import resolve_run_experiment
@@ -253,13 +253,8 @@ def _align_config_to_model(cfg, pred: int, model_kwargs: Dict[str, object]) -> N
     data_dim = model_kwargs.get("data_dim")
     if data_dim is not None:
         cfg.VAE_LATENT_CHANNELS = int(data_dim)
-        vae_suffix = "_entity" if bool(getattr(cfg, "VAE_ENTITY_CONDITION", False)) else ""
-        cfg.VAE_CKPT = str(
-            Path(cfg.VAE_DIR) / f"pred-{int(pred)}_ch-{int(data_dim)}{vae_suffix}_elbo.pt"
-        )
-        cfg.SUM_CKPT = str(
-            Path(cfg.SUM_DIR) / f"{int(pred)}-{int(data_dim)}-summarizer.pt"
-        )
+        cfg.PRED = int(pred)
+        refresh_artifact_paths(cfg)
     if model_kwargs.get("laplace_k") is not None:
         cfg.LAPLACE_K = int(model_kwargs["laplace_k"])
     if model_kwargs.get("timesteps") is not None:
@@ -309,6 +304,7 @@ def _load_summarizer(cfg, train_dl, device: torch.device) -> LaplaceAE:
         pos_encoding=str(getattr(cfg, "SUM_POS_ENCODING", "learned_abs")),
         rope_base=float(getattr(cfg, "SUM_ROPE_BASE", 10000.0)),
         channel_balanced_x_loss=bool(getattr(cfg, "SUM_CHANNEL_BALANCED_X_LOSS", False)),
+        decode_mode=str(getattr(cfg, "SUM_DECODE_MODE", "mean")),
     ).to(device)
     payload = torch.load(ckpt_path, map_location=device)
     state_dict = payload["model"] if isinstance(payload, dict) and "model" in payload else payload

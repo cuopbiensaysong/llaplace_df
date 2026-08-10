@@ -352,6 +352,7 @@ def _load_stack(
         output_dim=vae_output_dim,
         num_entities=num_entities,
         entity_conditioned=bool(getattr(cfg, "VAE_ENTITY_CONDITION", False)),
+        entity_encode=bool(getattr(cfg, "VAE_ENTITY_ENCODE", False)),
     ).to(device)
     vae_payload = torch.load(cfg.VAE_CKPT, map_location=device)
     validate_checkpoint_target_metadata(vae_payload, cfg, context="VAE")
@@ -377,6 +378,7 @@ def _load_stack(
         pos_encoding=str(getattr(cfg, "SUM_POS_ENCODING", "learned_abs")),
         rope_base=float(getattr(cfg, "SUM_ROPE_BASE", 10000.0)),
         channel_balanced_x_loss=bool(getattr(cfg, "SUM_CHANNEL_BALANCED_X_LOSS", False)),
+        decode_mode=str(getattr(cfg, "SUM_DECODE_MODE", "mean")),
     ).to(device)
     # A checkpoint trained with SUM_FT_MODE != "none" carries its OWN fine-tuned summarizer,
     # and it must win over cfg.SUM_CKPT: the denoiser was trained against that encoder, so

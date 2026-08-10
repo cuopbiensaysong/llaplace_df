@@ -43,7 +43,8 @@ from llapdiffusion.models.llapdiff_utils import (
     set_torch,
     vae_io_dims_for_target_dim,
 )
-from llapdiffusion.models.summarizer import LaplaceAE
+from llapdiffusion.configs.config_utils import refresh_artifact_paths
+from llapdiffusion.models.summarizer import DECODE_MODES, LaplaceAE
 from llapdiffusion.tools.llapdiff_checkpoint_eval import build_eval_config
 from llapdiffusion.tools.run_analytic_uq_eval import build_eval_loaders, prepare_eval_stack
 from llapdiffusion.tools.run_stage1_roundtrip import _build_vae
@@ -72,6 +73,7 @@ def _build_frozen_stack(cfg, train_dl, device):
         pos_encoding=str(getattr(cfg, "SUM_POS_ENCODING", "learned_abs")),
         rope_base=float(getattr(cfg, "SUM_ROPE_BASE", 10000.0)),
         channel_balanced_x_loss=bool(getattr(cfg, "SUM_CHANNEL_BALANCED_X_LOSS", False)),
+        decode_mode=str(getattr(cfg, "SUM_DECODE_MODE", "mean")),
     ).to(device)
     sum_state = torch.load(cfg.SUM_CKPT, map_location=device)
     tv._load_module_state(
@@ -107,8 +109,41 @@ def _parse_args() -> argparse.Namespace:
                    help="Score only windows with exactly this many observed entities, so "
                         "every row of the raw-history/raw-target design has one width. "
                         "Default: the modal count on the split.")
+    p.add_argument("--sum-ckpt", default=None,
+                   help="Override the stage-2 artifact (default: cfg.SUM_CKPT). Use to probe a "
+                        "retrained summarizer without editing the config.")
+    p.add_argument("--vae-ckpt", default=None,
+                   help="Override the stage-1 artifact (default: cfg.VAE_CKPT).")
+    p.add_argument("--sum-decode-mode", default=None, choices=sorted(DECODE_MODES),
+                   help="Architecture of --sum-ckpt (default: cfg.SUM_DECODE_MODE). Loads are "
+                        "strict, so this must match the artifact.")
+    p.add_argument("--vae-entity-encode", dest="vae_entity_encode", default=None,
+                   action="store_true", help="--vae-ckpt was trained with the encoder-side "
+                        "entity embedding (B20). Loads are strict, so this must match.")
+    p.add_argument("--latent-channels", type=int, default=None,
+                   help="VAE_LATENT_CHANNELS of --vae-ckpt, if it differs from the preset. It "
+                        "also appears in the stage-2 filename, so pair it with --sum-ckpt.")
     p.add_argument("--out-json", default=None)
     return p.parse_args()
+
+
+def _apply_artifact_overrides(cfg, args) -> None:
+    """Point the frozen stack at explicitly named artifacts.
+
+    The architecture flags come first: they feed the filename helpers, so setting a mode
+    without a path still resolves to that mode's artifact.
+    """
+    if args.sum_decode_mode is not None:
+        cfg.SUM_DECODE_MODE = str(args.sum_decode_mode)
+    if args.vae_entity_encode:
+        cfg.VAE_ENTITY_ENCODE = True
+    if args.latent_channels is not None:
+        cfg.VAE_LATENT_CHANNELS = int(args.latent_channels)
+    refresh_artifact_paths(cfg)
+    if args.sum_ckpt:
+        cfg.SUM_CKPT = str(args.sum_ckpt)
+    if args.vae_ckpt:
+        cfg.VAE_CKPT = str(args.vae_ckpt)
 
 
 @torch.no_grad()
@@ -273,8 +308,11 @@ def _verdict(a: float, b: float, c: float) -> Tuple[str, str]:
 def main() -> None:
     args = _parse_args()
     cfg = build_eval_config(args.dataset_key, int(args.pred))
+    _apply_artifact_overrides(cfg, args)
     device = set_torch(seed=int(getattr(cfg, "SEED", 42)), deterministic=False,
                        allow_tf32=bool(getattr(cfg, "ALLOW_TF32", False)))
+    print(f"[1a] stage-1 {cfg.VAE_CKPT}\n[1a] stage-2 {cfg.SUM_CKPT} "
+          f"(decode_mode={getattr(cfg, 'SUM_DECODE_MODE', 'mean')})")
 
     if args.checkpoint:
         loaders, stack = prepare_eval_stack(cfg, args.checkpoint, device=device)

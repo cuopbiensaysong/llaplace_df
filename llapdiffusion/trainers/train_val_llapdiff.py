@@ -26,6 +26,11 @@ from llapdiffusion.diffusion_cache import (
 from llapdiffusion.latent_space.latent_vae import LatentVAE
 from llapdiffusion.models.summarizer import LaplaceAE
 from llapdiffusion.models.llapdiff import LLapDiff
+from llapdiffusion.models.uq_metrics import (
+    ensemble_pit,
+    pit_calibration_error,
+    reliability_curve,
+)
 from llapdiffusion.models.llapdiff_utils import (
     EMA,
     set_torch,
@@ -1264,6 +1269,8 @@ def evaluate_regression(
     rho: float = 7.5,
     generator_seed: Optional[int] = None,
     crps_pair_samples: int = 200,
+    calibration: bool = False,
+    calibration_level: float = 0.8,
     verbose: bool = False,
     progress_enabled: bool = False,
     progress_label: Optional[str] = None,
@@ -1274,6 +1281,20 @@ def evaluate_regression(
 
     Decoding produces y_hat: [B,H,N,1]. Metrics are computed only where:
       entity_mask[b,n] == True AND y_obs_mask[b,n,h] == True (if present) AND y is finite.
+
+    ``calibration=True`` additionally scores the DISTRIBUTION, not just its mean and CRPS:
+    PIT calibration error, central-interval coverage, and mean interval width, all in DATA
+    space and all from the ensemble this function already builds. Table 3 needs those three
+    columns and nothing produced them -- ``all_samples`` was discarded at the end of each
+    batch. It also closes a subtler gap: the analytic arms' only calibration numbers were
+    LATENT-space closed-form while the sampled arm has no closed form at all, so A1 and A2/A3
+    were scored in different spaces by different estimators. Read here, every arm is scored by
+    ``ensemble_pit`` on its own decoded draws.
+
+    OFF by default, and deliberately so: thirteen call sites predate it, including the
+    trainer's own selection evals, and none of their numbers may move. When off, not a single
+    extra tensor op runs; when on, the new keys live under ``metrics["calibration"]`` so the
+    top-level shape is identical either way.
     """
     if aggregation_method not in ["mean", "median"]:
         raise ValueError("aggregation_method must be either 'mean' or 'median'")
@@ -1300,6 +1321,30 @@ def evaluate_regression(
     if generator_seed is not None:
         generator = torch.Generator(device=device)
         generator.manual_seed(int(generator_seed))
+
+    pit_chunks: List[torch.Tensor] = []
+    width_sum, width_elts = 0.0, 0.0
+    pit_generator = None
+    if calibration:
+        if not 0.0 < float(calibration_level) < 1.0:
+            raise ValueError(
+                f"calibration_level must be in the open interval (0, 1), got {calibration_level}"
+            )
+        if num_samples < 2:
+            raise ValueError(
+                f"calibration=True needs at least 2 draws to form an ensemble PIT, got "
+                f"num_samples={num_samples}."
+            )
+        # A SEPARATE stream from `generator`. Drawing the PIT randomization from the sampling
+        # generator would advance it and silently move CRPS/MAE/MSE relative to the same run
+        # with calibration off -- the one thing this flag must never do. Seeded even when
+        # generator_seed is None, so a reported calibration number is reproducible for a given
+        # ensemble regardless of how the ensemble itself was drawn.
+        pit_generator = torch.Generator(device=device)
+        pit_generator.manual_seed(
+            90_000_000 if generator_seed is None else int(generator_seed) + 90_000_000
+        )
+
     use_ema = ema is not None
     if use_ema:
         ema.store(diff_model)
@@ -1445,6 +1490,25 @@ def evaluate_regression(
                 loss_q = torch.maximum(q * diff, (q - 1.0) * diff) * valid
                 pinball_sums[q] += loss_q.sum().item()
 
+            if calibration:
+                # Same `valid` mask as every metric above, so the calibration columns cover
+                # exactly the elements MAE/MSE/CRPS were computed on.
+                pit_chunks.append(
+                    ensemble_pit(
+                        all_samples, y_true, mask=valid > 0, generator=pit_generator
+                    ).detach().to("cpu", dtype=torch.float32)
+                )
+                # Width of the central interval at the nominal level -- the "sharpness" half
+                # of the pair. Coverage without width is gameable: a wide enough interval
+                # covers everything. Both quantiles in one pass over the ensemble.
+                lo = (1.0 - float(calibration_level)) / 2.0
+                edges = torch.tensor(
+                    [lo, 1.0 - lo], device=all_samples.device, dtype=all_samples.dtype
+                )
+                bounds = torch.quantile(all_samples, edges, dim=0, interpolation="linear")
+                width_sum += ((bounds[1] - bounds[0]) * valid).sum().item()
+                width_elts += valid.sum().item()
+
     if use_ema:
         ema.restore(diff_model)
 
@@ -1466,6 +1530,25 @@ def evaluate_regression(
         "num_samples": num_samples,
         "aggregation": aggregation_method,
     }
+    if calibration:
+        if not pit_chunks:
+            raise RuntimeError("calibration=True but no batch produced PIT values.")
+        pit = torch.cat(pit_chunks)
+        level = float(calibration_level)
+        metrics["calibration"] = {
+            "pit_calibration_error": pit_calibration_error(pit),
+            # The full curve for the record; the requested level asked for separately so it is
+            # present even when it is not one of reliability_curve's defaults.
+            "reliability": {str(k): v for k, v in reliability_curve(pit).items()},
+            "coverage_level": level,
+            "coverage": reliability_curve(pit, levels=(level,))[level],
+            "mean_interval_width": (width_sum / width_elts) if width_elts > 0 else None,
+            "num_pit_values": int(pit.numel()),
+            # Named so a table can never silently mix this with the latent-space closed-form
+            # number, which is a different estimator in a different space.
+            "estimator": "ensemble_pit",
+            "space": "data",
+        }
     if per_target_abs_sum is not None and int(per_target_abs_sum.numel()) > 1:
         denom = per_target_elts.clamp_min(1.0)
         target_cols = getattr(config, "TARGET_COLS", None) or getattr(config, "target_cols", None)
@@ -1540,6 +1623,7 @@ def _llapdiff_model_kwargs(config_obj: object) -> Dict[str, object]:
         "attn_dropout": float(getattr(config_obj, "ATTN_DROPOUT")),
         "self_conditioning": bool(getattr(config_obj, "SELF_COND")),
         "summary_pool_mode": str(getattr(config_obj, "COND_POOL_MODE", "mean")),
+        "summary_pool_norm_mode": str(getattr(config_obj, "COND_POOL_NORM_MODE", "inherit")),
         "pole_pool_use_raw_summary": bool(getattr(config_obj, "COND_POOL_USE_RAW", False)),
         "block_summary_adaln": bool(getattr(config_obj, "BLOCK_SUMMARY_ADALN", False)),
         "analysis_summary_qk": bool(getattr(config_obj, "ANALYSIS_SUMMARY_QK", False)),
@@ -1720,6 +1804,9 @@ def _llapdiff_config_from_checkpoint(payload: object) -> Dict[str, object]:
     config.setdefault("chirp_omega_basis", "nonneg")    # pre-fix ckpts: legacy 1+cos omega basis
     config.setdefault("chirp_basis", "integer")         # pre-fix ckpts: legacy integer-cycle basis
     config.setdefault("chirp_rho_max_scale", 4.0)
+    # Pre-B23 checkpoints pooled whatever COND_NORM_MODE produced -- under "sample" x "mean"
+    # that is the zero vector. Keep them reproducing exactly what they were trained under.
+    config.setdefault("summary_pool_norm_mode", "inherit")
     return config
 
 
@@ -2115,6 +2202,7 @@ def run(
         output_dim=vae_output_dim,
         num_entities=N0,
         entity_conditioned=bool(getattr(config, "VAE_ENTITY_CONDITION", False)),
+        entity_encode=bool(getattr(config, "VAE_ENTITY_ENCODE", False)),
     ).to(device)
     vae_ckpt = Path(config.VAE_CKPT)
     if not vae_ckpt.exists():
@@ -2144,6 +2232,7 @@ def run(
         pos_encoding=str(getattr(config, "SUM_POS_ENCODING", "learned_abs")),
         rope_base=float(getattr(config, "SUM_ROPE_BASE", 10000.0)),
         channel_balanced_x_loss=bool(getattr(config, "SUM_CHANNEL_BALANCED_X_LOSS", False)),
+        decode_mode=str(getattr(config, "SUM_DECODE_MODE", "mean")),
     ).to(device)
     sum_ckpt = Path(config.SUM_CKPT)
     if not sum_ckpt.exists():
@@ -2184,14 +2273,30 @@ def run(
     cond_adapter_mode = str(adapter_cfg["mode"])
     diff_model = build_llapdiff_model(config, device)
 
-    # COND_NORM_MODE="global" needs fixed statistics over the train split. Computed here,
-    # once, before any training step and before the precompute cache is consumed, so every
-    # epoch and every later evaluation share one definition of the conditioning scale.
-    if _resolve_cond_norm_mode(diff_model) == "global" and _resolve_cond_norm_stats(diff_model) is None:
-        diff_model.cond_norm_stats = compute_global_cond_stats(
+    # Fixed statistics over the train split. Computed here, once, before any training step and
+    # before the precompute cache is consumed, so every epoch and every later evaluation share
+    # one definition of the conditioning scale. Two consumers can ask for them:
+    #   - COND_NORM_MODE="global": what cross-attention receives;
+    #   - COND_POOL_NORM_MODE="global" (B23): what the pole/AdaLN/analysis pools receive.
+    # Either way the statistic is the same, so it is computed at most once.
+    backbone = getattr(diff_model, "model", None)
+    needs_cond_stats = (
+        _resolve_cond_norm_mode(diff_model) == "global"
+        and _resolve_cond_norm_stats(diff_model) is None
+    )
+    needs_pool_stats = (
+        getattr(backbone, "summary_pool_norm_mode", "inherit") == "global"
+        and not bool(getattr(backbone, "cond_pool_stats_set", False))
+    )
+    if needs_cond_stats or needs_pool_stats:
+        cond_stats = compute_global_cond_stats(
             laplace_summarizer, diff_model, train_dl, device,
             verbose=bool(getattr(config, "VERBOSE", False)) or True,
         )
+        if needs_cond_stats:
+            diff_model.cond_norm_stats = cond_stats
+        if needs_pool_stats:
+            backbone.set_cond_pool_stats(*cond_stats)
 
     init_ckpt_raw = getattr(config, "DIFF_INIT_CKPT", None)
     init_ckpt_path = None

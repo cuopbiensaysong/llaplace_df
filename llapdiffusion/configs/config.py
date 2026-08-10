@@ -64,9 +64,16 @@ VAE_FF = 256
 VAE_DROPOUT = 0.1
 VAE_ENTITY_CONDITION = True
 VAE_NUM_ENTITIES = None
+# B20/B5: without an encoder-side entity embedding the set encoder is permutation-equivariant
+# and the obs-weighted entity pool is permutation-INVARIANT, so the latent cannot represent
+# which entity held which value and the decoder can only emit the panel mean plus a static
+# per-entity offset (measured: corr(recon, panel mean) = 1.000, cross-entity std retained
+# 0.059 on noaa_uk). Off by default so existing artifacts keep resolving and loading; new
+# stage-1 runs opt in, and the artifact path carries the suffix either way.
+VAE_ENTITY_ENCODE = False
 
 VAE_DIR = "./ldt/vae/saved_model/dataset"
-_VAE_ENTITY_SUFFIX = "_entity" if VAE_ENTITY_CONDITION else ""
+_VAE_ENTITY_SUFFIX = ("_entity" if VAE_ENTITY_CONDITION else "") + ("_entenc" if VAE_ENTITY_ENCODE else "")
 VAE_CKPT = f"{VAE_DIR}/pred-{PRED}_ch-{VAE_LATENT_CHANNELS}{_VAE_ENTITY_SUFFIX}_elbo.pt"
 
 VAE_LEARNING_RATE = 1e-4
@@ -121,7 +128,14 @@ SUM_FT_LR_MULT = 0.1
 SUM_FT_WEIGHT_DECAY = 1e-4
 SUM_FT_START_EPOCH = 0
 
-SUM_CKPT = f"{SUM_DIR}/{PRED}-{VAE_LATENT_CHANNELS}-summarizer.pt"
+# B21 §6: "mean" decodes the pretraining reconstruction from context.mean(dim=1), so the loss
+# can only constrain 1 of the S token directions and the other S-1 receive no gradient from any
+# objective. "token" decodes per time step through cross-attention over all S tokens. Left at
+# the legacy value so shipped artifacts stay loadable; the artifact path carries the suffix.
+SUM_DECODE_MODE = "mean"
+
+_SUM_DECODE_SUFFIX = "" if SUM_DECODE_MODE == "mean" else f"_{SUM_DECODE_MODE}"
+SUM_CKPT = f"{SUM_DIR}/{PRED}-{VAE_LATENT_CHANNELS}-summarizer{_SUM_DECODE_SUFFIX}.pt"
 
 
 # ============================ Diffusion Model (LLapDiT) ============================
@@ -363,3 +377,26 @@ IRREG_CHECK_BATCHES = 4
 # differently at eval than in training (measured on H2: 41% relative error, cos 0.92).
 # That mismatch made conditioning actively harmful (MSE_cond > MSE_uncond).
 COND_NORM_MODE = "sample"
+
+# B23 -- how the POOLED conditioning consumers normalise the summary, independently of the
+# line above. They reduce over the token axis, which is the axis "sample" z-scores, so under
+# COND_NORM_MODE="sample" x COND_POOL_MODE="mean" the pool is ALGEBRAICALLY the zero vector:
+# the pole/chirp field (rho(t), omega(t) and the Theorem-C UQ law), the AdaLN path and the
+# analysis QK path all saw a constant, with no history in it at all. Measured on 120 real
+# noaa_uk val windows: across-window std 7.5e-08, against 0.533 with the level restored.
+# "global" reduces the RAW summary with fixed train statistics -- batch-independent (B15's
+# requirement), unit-scaled (unlike COND_POOL_USE_RAW, which stalled training at std 0.574)
+# and level-preserving. Cross-attention keeps COND_NORM_MODE, so the one path that was alive
+# is unchanged. Checkpoints predating this knob resolve to "inherit" (the legacy behaviour).
+#
+# 🔴 Default REVERTED to "inherit" 2026-08-07, on a pre-registered rule. Shipped as "global"
+# earlier the same session; the attribution run then measured it against a matched control
+# (arm `b23only`, noaa_uk h=168 seed 0): rescaled `ddim` **4.82 % vs the control's 6.41 %**,
+# i.e. -1.59 pt on the axis Phase 1 gates. The registered decision rule was "if it lands
+# materially below control, revert" -- honoured here rather than reasoned around, even though
+# the same run IMPROVED val CRPS (0.31513 vs 0.3280).
+#
+# ⚠️ Turn it ON deliberately for the U3 UQ arms. There it is not a tuning choice: with the
+# pooled path dead, `chirp_field.uq_params` sees no history, so the Theorem-C law's p0/q/rho-bar
+# are identical for every window and arms A2/A3 score a structurally homoscedastic law (B23).
+COND_POOL_NORM_MODE = "inherit"

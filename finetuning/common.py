@@ -86,11 +86,33 @@ def load_state(path: Path) -> dict:
 
 
 def save_state(path: Path, state: dict) -> None:
+    """Persist campaign state, MERGING the per-trial dicts with what is already on disk.
+
+    🔴 The write is atomic but was not concurrency-safe, which is a different thing. Each
+    driver loads state once at start-up and holds a private copy, so with one process per seed
+    the later writer replaced the earlier one's `trials`/`evals` wholesale. Observed: seed 0's
+    completed S1 (20 590 s of training) vanished from state.json when seed 1 saved 9 minutes
+    later. Nothing is lost on disk -- the checkpoint and summary.json survive in the trial
+    directory -- but `resolve()` then finds no record, so a restart RETRAINS a finished stage
+    and, until it does, every dependent stage reports BLOCKED.
+
+    Merging per key rather than locking: entries are keyed by (stage, seed) and written by
+    exactly one process each, so a last-writer-wins merge at the KEY level is correct, needs no
+    lock file, and cannot deadlock a long campaign. (Found by Claude C in review, 2026-08-08.)
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    state["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(state, indent=2, sort_keys=False, default=str))
+    merged = dict(state)
+    on_disk = load_state(path) or {}
+    for section in ("trials", "evals"):
+        if isinstance(on_disk.get(section), dict) or isinstance(state.get(section), dict):
+            combined = dict(on_disk.get(section) or {})
+            combined.update(state.get(section) or {})
+            merged[section] = combined
+    merged["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    tmp = path.with_suffix(f".json.tmp{os.getpid()}")
+    tmp.write_text(json.dumps(merged, indent=2, sort_keys=False, default=str))
     os.replace(tmp, path)
+    state.update({k: merged[k] for k in ("trials", "evals") if k in merged})
 
 
 def run_logged(cmd: list[str], log_path: Path) -> int:

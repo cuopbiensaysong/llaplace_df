@@ -18,6 +18,7 @@ from torch.cuda.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 
 from llapdiffusion.configs import config
+from llapdiffusion.configs.config_utils import vae_ckpt_path, vae_entity_suffix
 from llapdiffusion.configs.dataset_registry import resolve_run_experiment
 from llapdiffusion.logging_utils import is_debug, is_verbose, progress_iter
 from llapdiffusion.latent_space.latent_vae import LatentVAE
@@ -401,12 +402,11 @@ def _aggregate_metrics(totals: Dict[str, float]) -> Tuple[float, float, float]:
 
 
 def _vae_entity_suffix(config=config) -> str:
-    return "_entity" if bool(getattr(config, "VAE_ENTITY_CONDITION", False)) else ""
+    return vae_entity_suffix(config)
 
 
 def _vae_checkpoint_path(kind: str, config=config) -> Path:
-    target_suffix = str(getattr(config, "TARGET_ARTIFACT_SUFFIX", "") or "")
-    return Path(config.VAE_DIR) / f"pred-{config.PRED}_ch-{config.VAE_LATENT_CHANNELS}{_vae_entity_suffix(config)}{target_suffix}_{kind}.pt"
+    return vae_ckpt_path(config, kind)
 
 
 def _vae_checkpoint_payload(model: LatentVAE, config=config, **extra) -> Dict[str, object]:
@@ -417,6 +417,10 @@ def _vae_checkpoint_payload(model: LatentVAE, config=config, **extra) -> Dict[st
         "target_cols": list(getattr(config, "TARGET_COLS", []) or []),
         "target_indices": list(getattr(config, "TARGET_INDICES", []) or []),
         "target_source": str(getattr(config, "TARGET_SOURCE", "")),
+        # Architecture provenance: the filename carries it too, but a payload key survives a
+        # copied or renamed file, and every load of this state dict is strict.
+        "vae_entity_condition": bool(getattr(config, "VAE_ENTITY_CONDITION", False)),
+        "vae_entity_encode": bool(getattr(config, "VAE_ENTITY_ENCODE", False)),
         "vae_input_dim": int(getattr(config, "VAE_INPUT_DIM", 2)),
         "vae_output_dim": int(getattr(config, "VAE_OUTPUT_DIM", 1)),
     }
@@ -466,6 +470,7 @@ def _build_model(device: torch.device, config=config) -> LatentVAE:
         dropout=float(getattr(config, "VAE_DROPOUT", 0.1)),
         num_entities=getattr(config, "VAE_NUM_ENTITIES", None),
         entity_conditioned=bool(getattr(config, "VAE_ENTITY_CONDITION", False)),
+        entity_encode=bool(getattr(config, "VAE_ENTITY_ENCODE", False)),
     ).to(device)
 
 
@@ -976,6 +981,7 @@ def run(
             "vae_noise_std": noise_std,
             "vae_consist_lambda": cons_lambda,
             "vae_entity_condition": bool(getattr(config, "VAE_ENTITY_CONDITION", False)),
+            "vae_entity_encode": bool(getattr(config, "VAE_ENTITY_ENCODE", False)),
             "vae_num_entities": getattr(config, "VAE_NUM_ENTITIES", None),
             "vae_target_dim": int(getattr(config, "TARGET_DIM", 1)),
             "vae_input_dim": int(getattr(config, "VAE_INPUT_DIM", 2)),
