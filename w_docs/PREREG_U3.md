@@ -8,7 +8,7 @@
 >
 > **The campaign now runs on noaa_uk h=168 with no frozen pre-registration.** Recovery plan
 > Phase 4 requires one *before the test split is touched*, as
-> `w_docs/PREREG_U3_noaa_uk_h168.md`. Until it exists, **val only**. See §5 for what the new
+> `w_docs/noaa_uk_h168/PREREG_U3_noaa_uk_h168.md`. Until it exists, **val only**. See §5 for what the new
 > file must fix.
 >
 > Kept because §1–§4 define the arm design that is still in force, and §6's scope limits still

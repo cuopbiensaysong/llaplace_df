@@ -62,6 +62,10 @@ llapdiff-t1-poles = "llapdiffusion.tools.run_t1_pole_invariance:main"
 llapdiff-t4-timing = "llapdiffusion.tools.run_t4_timing:main"
 llapdiff-plot-poles = "llapdiffusion.viz.plot_llapdiff_poles:main"
 llapdiff-baselines = "llapdiffusion.tools.run_baselines:main"
+llapdiff-mixture-uq = "llapdiffusion.tools.run_mixture_uq_eval:main"
+llapdiff-marginal-consistency = "llapdiffusion.tools.run_marginal_consistency:main"
+llapdiff-option-a-probe = "llapdiffusion.tools.run_option_a_probe:main"
+llapdiff-prereg-power = "llapdiffusion.tools.run_prereg_power:main"
 
 [tool.setuptools.packages.find]
 include = ["llapdiffusion*"]

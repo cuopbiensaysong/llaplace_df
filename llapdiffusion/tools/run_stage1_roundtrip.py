@@ -171,6 +171,12 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--vae-entity-encode", action="store_true",
                    help="Score the VAE trained with the encoder-side entity embedding (B20). "
                         "Loads are strict, so this must match the artifact.")
+    p.add_argument("--latent-channels", type=int, default=None,
+                   help="Override VAE_LATENT_CHANNELS. The width is read from the PRESET, not "
+                        "from the checkpoint, so scoring a re-widened artifact without this "
+                        "builds the model at the preset width and the strict load fails. "
+                        "Mirrors the same flag on llapdiff-stage-pretrain; it also selects the "
+                        "artifact filename, so it is usually enough on its own.")
     p.add_argument("--tasks", nargs="+", default=None,
                    help="Synthetic benchmark tasks (default: synthetic_linear_chirp).")
     p.add_argument("--seeds", nargs="+", type=int, default=(0,),
@@ -246,6 +252,11 @@ def _dataset_cell(args, device: torch.device) -> Dict[str, object]:
     cfg = build_eval_config(args.dataset_key, int(args.pred))
     if getattr(args, "vae_entity_encode", False):
         cfg.VAE_ENTITY_ENCODE = True
+    # Width first, then refresh: the artifact filename embeds the channel count, so setting it
+    # afterwards would resolve the path at the preset width and load the wrong file.
+    if getattr(args, "latent_channels", None):
+        cfg.VAE_LATENT_CHANNELS = int(args.latent_channels)
+    if getattr(args, "vae_entity_encode", False) or getattr(args, "latent_channels", None):
         refresh_artifact_paths(cfg)
     if getattr(args, "vae_ckpt", None):
         cfg.VAE_CKPT = str(args.vae_ckpt)

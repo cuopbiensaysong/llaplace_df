@@ -10,6 +10,7 @@ from llapdiffusion.models.laptrans import (
     LaplacePseudoInverse,
     LaplaceTransformEncoder,
     normalize_modal_type,
+    normalize_time_origin,
 )
 
 OUTPUT_HEAD_MODES = ("auto", "on", "off")
@@ -341,8 +342,13 @@ class LapFormer(nn.Module):
         chirp_omega_basis: str = "nonneg",
         chirp_basis: str = "integer",
         chirp_rho_max_scale: float = 4.0,
+        time_origin: Optional[str] = None,
     ) -> None:
         super().__init__()
+        # None keeps the historical argument-driven anchor (dt -> last_history, t ->
+        # query_first) so every pre-existing checkpoint reproduces byte for byte; an explicit
+        # value pins the origin and is what the marginalization-consistency arms set.
+        self.time_origin = None if time_origin is None else normalize_time_origin(time_origin)
         self.hidden_dim = int(hidden_dim)
         self.self_conditioning = bool(self_conditioning)
         self.k = int(laplace_k)
@@ -733,7 +739,9 @@ class LapFormer(nn.Module):
         # Synthesis (parallel over all queried timestamps)
         variance = None
         if self.chirp_field is not None:
-            t_rel = self.analysis.relative_time(B, T, x_tokens.dtype, x_tokens.device, dt=dt, t=t)
+            t_rel = self.analysis.relative_time(
+                B, T, x_tokens.dtype, x_tokens.device, dt=dt, t=t, time_origin=self.time_origin
+            )
             rho_bar, omega_bar = self.chirp_field.integrated(cond_vec, t_rel)
             y_time = self.synthesis(theta, rho_bar=rho_bar, omega_bar=omega_bar)
             if return_variance:
@@ -753,10 +761,27 @@ class LapFormer(nn.Module):
                     rho_inst=rho_inst.detach(),
                     omega_inst=omega_inst.detach(),
                 )
+                if self.chirp_uq_head:
+                    # The noise parameters of the FINAL reverse step are what Algorithm 2
+                    # says supply the returned component's law, so they are captured with
+                    # the residues rather than recomputed later from a reconstructed
+                    # conditioning vector. Also the output scale: the returned tensor is
+                    # alpha * (modal sum), so the law carries alpha^2.
+                    p0_c, q_c = self.chirp_field.uq_params(cond_vec)
+                    modal_capture.update(
+                        p0=p0_c.detach(),
+                        q=q_c.detach(),
+                        alpha=self.output_skip_scale.detach().clamp(min=-1.0, max=1.0),
+                    )
         else:
-            y_time = self.synthesis(theta, rho=rho, omega=omega, dt=dt, t=t, target_T=T)
+            y_time = self.synthesis(
+                theta, rho=rho, omega=omega, dt=dt, t=t, target_T=T,
+                time_origin=self.time_origin,
+            )
             if modal_capture is not None:
-                t_rel = self.analysis.relative_time(B, T, x_tokens.dtype, x_tokens.device, dt=dt, t=t)
+                t_rel = self.analysis.relative_time(
+                    B, T, x_tokens.dtype, x_tokens.device, dt=dt, t=t, time_origin=self.time_origin
+                )
                 modal_capture.update(
                     modal_type="lti",
                     theta=theta.detach(),

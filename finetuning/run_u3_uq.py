@@ -167,10 +167,18 @@ def entenc_vae_path(dataset: str = "noaa_uk", pred: int = 168) -> Path:
     return path
 
 
-def stage_overrides(stage: str, init_ckpt: str | None, seed: int | None = None) -> dict:
+def stage_overrides(stage: str, init_ckpt: str | None, seed: int | None = None,
+                    dataset: str = "noaa_uk", pred: int = 168) -> dict:
     """The {"cli":…, "config":…} payload for one stage. x0 everywhere: chirp_uq_head
     requires predict_type='x0' (models/llapdiff.py:60-64), and S1 must match so the
-    warm start transfers a mean trained for the same target."""
+    warm start transfers a mean trained for the same target.
+
+    🔴 `dataset`/`pred` are NOT decorative. This used to call `entenc_vae_path()` with no
+    arguments, so every cell was pinned to **noaa_uk's** stage-1 artifact regardless of
+    `--dataset-key`. On a cell with a different latent width the strict load fails loudly; on
+    one that happens to match it would train a whole campaign against another cell's VAE --
+    precisely the failure `entenc_vae_path`'s own docstring exists to prevent.
+    """
     config = dict(BASE_CONFIG)
     config.update(STACK_CONFIG)
     if seed is not None:
@@ -183,9 +191,30 @@ def stage_overrides(stage: str, init_ckpt: str | None, seed: int | None = None) 
     # VAE_ENTITY_ENCODE alone is not enough: apply_dataset_preset derives VAE_CKPT and then
     # run_trial re-applies these overrides AFTER it, so the path would still point at the
     # legacy artifact and the strict load would fail. Name the artifact explicitly.
-    config["VAE_CKPT"] = str(entenc_vae_path())
+    config["VAE_CKPT"] = str(entenc_vae_path(dataset, int(pred)))
     if stage in ("s2_diffusion_uq", "s3_oneshot_uq"):
         config.update(UQ_CONFIG)
+        # 🔴 CHIRP_UQ_INIT_VAR above is the MEASURED noaa_uk h=168 value. The rule is
+        # "initialise the predicted variance at the residual scale" and the value is per
+        # cell -- 25.0 on physionet h=12, 1.0 here, ~26x apart. Getting it wrong is invisible
+        # to CRPS and catastrophic for calibration (physionet at the 1e-2 default: coverage
+        # 0.034 at nominal 0.9 while CRPS moved < 0.001), so a new cell must not silently
+        # inherit it. Measure with `llapdiff-uq-eval --latent-only` on that cell's s1_mean
+        # checkpoint, read `latent_mse`, and pass it in.
+        if str(dataset) != "noaa_uk" or int(pred) != 168:
+            env = os.environ.get("LLAPDIFF_CHIRP_UQ_INIT_VAR")
+            if not env:
+                raise SystemExit(
+                    f"refusing to train {stage} on {dataset} h={pred} with noaa_uk's "
+                    f"CHIRP_UQ_INIT_VAR={UQ_CONFIG['CHIRP_UQ_INIT_VAR']}.\n"
+                    "It is a per-cell quantity and does not transfer. Train s1_mean for this "
+                    "cell, then:\n"
+                    "  llapdiff-uq-eval --latent-only ...   # read latent_mse\n"
+                    "  export LLAPDIFF_CHIRP_UQ_INIT_VAR=<that value>\n"
+                    "and re-run. Set it explicitly even if it happens to be 1.0, so the "
+                    "value is a recorded measurement rather than an inherited default."
+                )
+            config["CHIRP_UQ_INIT_VAR"] = float(env)
         if not init_ckpt:
             raise ValueError(f"{stage} requires DIFF_INIT_CKPT (train s1_mean first).")
         config["DIFF_INIT_CKPT"] = str(init_ckpt)
@@ -237,7 +266,7 @@ class Campaign:
             _, _, init_ckpt = self.resolve("s1_mean", seed)
             if not init_ckpt:
                 return None, None, None
-        overrides = stage_overrides(stage, init_ckpt, seed)
+        overrides = stage_overrides(stage, init_ckpt, seed, self.dataset, self.pred)
         tid = trial_id(self.dataset, self.pred, ARM, seed, overrides)
         rec = self.state["trials"].get(self.trial_key(stage, seed)) or {}
         ckpt = rec.get("checkpoint")
@@ -260,7 +289,8 @@ class Campaign:
                 self.log(f"{stage} seed={seed}: BLOCKED — s1_mean seed={seed} has no checkpoint")
                 return None
             # Planning only: show the stage with a placeholder warm-start path.
-            overrides = stage_overrides(stage, f"<s1_mean seed={seed} checkpoint>", seed)
+            overrides = stage_overrides(stage, f"<s1_mean seed={seed} checkpoint>", seed,
+                                        self.dataset, self.pred)
 
         if self.args.dry_run:
             shown = {k: v for k, v in overrides["config"].items() if k not in BASE_CONFIG}
@@ -329,8 +359,14 @@ class Campaign:
         return checkpoint
 
     def train(self) -> None:
+        # --stages exists because CHIRP_UQ_INIT_VAR is measured on a cell's OWN s1 checkpoint
+        # and cannot be known before it. Without a way to stop after s1, a new cell would train
+        # s1 for tens of hours and then hit the guard in stage_overrides -- and under a worker
+        # that failure spins: the lock is released, the next worker reuses the stored s1 and
+        # fails at s2 again, immediately.
+        stages = tuple(self.args.stages) if getattr(self.args, "stages", None) else STAGE_ORDER
         for seed in self.args.seeds:
-            for stage in STAGE_ORDER:
+            for stage in stages:
                 if self.train_stage(stage, seed) is None and not self.args.dry_run:
                     self.log(f"stopping seed={seed}: {stage} did not produce a checkpoint")
                     break
@@ -766,6 +802,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--split", choices=("val", "test"), default="val")
     parser.add_argument("--num-samples", type=int, default=None,
                         help="Ensemble size for BOTH data-space arms (default: config's 25).")
+    parser.add_argument("--stages", nargs="+", default=None, choices=list(STAGE_ORDER),
+                        help="Train only these stages, in order (default: all three). "
+                             "Use `--stages s1_mean` on a NEW cell, measure that cell's "
+                             "CHIRP_UQ_INIT_VAR from its latent_mse, then run s2/s3 -- "
+                             "the guard in stage_overrides refuses s2 without it.")
     parser.add_argument("--smoke", action="store_true", help="3-epoch plumbing check.")
     parser.add_argument("--gpu", default=None, help="Sets CUDA_VISIBLE_DEVICES for children.")
     args = parser.parse_args()
@@ -784,9 +825,10 @@ def main() -> None:
     campaign = Campaign(args)
     if args.command in ("plan", "train"):
         if args.command == "plan":
-            print(f"[u3] {len(args.seeds)} seeds x {len(STAGE_ORDER)} stages = "
-                  f"{len(args.seeds) * len(STAGE_ORDER)} training runs")
-            for stage in STAGE_ORDER:
+            _st = tuple(args.stages) if getattr(args, "stages", None) else STAGE_ORDER
+            print(f"[u3] {len(args.seeds)} seeds x {len(_st)} stages = "
+                  f"{len(args.seeds) * len(_st)} training runs")
+            for stage in _st:
                 print(f"[u3]   {STAGE_LABELS[stage]}")
         campaign.train()
     elif args.command == "gates":

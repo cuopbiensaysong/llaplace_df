@@ -56,6 +56,7 @@ from llapdiffusion.target_artifacts import (
     validate_checkpoint_target_metadata,
 )
 from llapdiffusion.models.time_utils import relative_time_offsets
+from llapdiffusion.models.laptrans import normalize_time_origin
 
 
 LoaderTuple = Tuple[DataLoader, DataLoader, DataLoader]
@@ -1646,7 +1647,25 @@ def _llapdiff_model_kwargs(config_obj: object) -> Dict[str, object]:
         "chirp_omega_basis": str(getattr(config_obj, "CHIRP_OMEGA_BASIS", "centered")),
         "chirp_basis": str(getattr(config_obj, "CHIRP_BASIS", "half_integer")),
         "chirp_rho_max_scale": float(getattr(config_obj, "CHIRP_RHO_MAX_SCALE", 4.0)),
+        # None (the shipped default) keeps the historical argument-driven anchor, which the
+        # loaders already make `last_history`; an explicit value pins it and is what the
+        # marginalization-consistency arms set.
+        "time_origin": _resolve_time_origin(config_obj),
     }
+
+
+def _resolve_time_origin(config_obj: object) -> Optional[str]:
+    """``TIME_ORIGIN`` -> the model kwarg, with ``last_history`` mapped back to ``None``.
+
+    ``last_history`` is what the ``dt`` path has always produced, so passing ``None``
+    instead keeps the historical code path exactly and leaves every existing checkpoint
+    bit-identical. Only the two deliberately-different origins are threaded through.
+    """
+    value = getattr(config_obj, "TIME_ORIGIN", "last_history")
+    if value is None:
+        return None
+    mode = normalize_time_origin(value)
+    return None if mode == "last_history" else mode
 
 
 def _cond_adapter_config(config_obj: object) -> Dict[str, object]:
@@ -1760,7 +1779,28 @@ def _llapdiff_model_config(config_obj: object) -> Dict[str, object]:
         # summarizer's output is normalized before the denoiser consumes it, so it is
         # persisted alongside cond_adapter rather than inside "llapdiff".
         "cond_norm_mode": str(getattr(config_obj, "COND_NORM_MODE", "sample")),
+        # Also a pipeline setting, persisted for the same reason: q_k and p0_k receive no
+        # gradient under the x0 MSE loss, so an interval read off an MSE checkpoint reports
+        # CHIRP_UQ_INIT_VAR rather than a learned uncertainty -- with no loss-curve symptom.
+        # Recording the objective lets the analytic arms refuse such a checkpoint outright
+        # instead of relying on the (reliable but indirect) untrained-head signature.
+        "diff_loss_mode": _diff_loss_mode(config_obj),
     }
+
+
+def diff_loss_mode_from_checkpoint(payload: object) -> Optional[str]:
+    """The training objective recorded in a checkpoint, or ``None`` if it predates the field.
+
+    ``None`` is not ``"mse"``: callers that care (the analytic-UQ arms) must fall back to
+    ``ChirpModalField.uq_head_untrained_signature`` rather than assume either way.
+    """
+    if isinstance(payload, dict):
+        model_config = payload.get("model_config")
+        if isinstance(model_config, dict):
+            mode = model_config.get("diff_loss_mode")
+            if mode is not None:
+                return str(mode)
+    return None
 
 
 def _cond_norm_mode_from_checkpoint(payload: object) -> str:
@@ -1804,6 +1844,9 @@ def _llapdiff_config_from_checkpoint(payload: object) -> Dict[str, object]:
     config.setdefault("chirp_omega_basis", "nonneg")    # pre-fix ckpts: legacy 1+cos omega basis
     config.setdefault("chirp_basis", "integer")         # pre-fix ckpts: legacy integer-cycle basis
     config.setdefault("chirp_rho_max_scale", 4.0)
+    # Pre-knob checkpoints carry the historical argument-driven anchor. That path is already
+    # `last_history` for every `dt` caller, so None reproduces them exactly.
+    config.setdefault("time_origin", None)
     # Pre-B23 checkpoints pooled whatever COND_NORM_MODE produced -- under "sample" x "mean"
     # that is the zero vector. Keep them reproducing exactly what they were trained under.
     config.setdefault("summary_pool_norm_mode", "inherit")

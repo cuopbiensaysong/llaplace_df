@@ -194,6 +194,12 @@ def _parse_args() -> argparse.Namespace:
                         help="Skip the data-space (decoder-propagated) evaluation. Also the "
                              "mode that accepts a checkpoint without the UQ head, where only "
                              "the mean-only latent metrics are defined (Phase-1 signal gate).")
+    parser.add_argument("--allow-untrained-uq-head", action="store_true",
+                        help="Report the analytic law even when the UQ head was never trained "
+                             "(an x0-MSE checkpoint). Off by default: q_k and p0_k get no "
+                             "gradient under MSE, so the intervals would just restate "
+                             "CHIRP_UQ_INIT_VAR with no loss-curve symptom. Use only to "
+                             "measure the untrained head deliberately, and label it as such.")
     parser.add_argument("--skip-sampled", action="store_true",
                         help="Data space: skip the (expensive) sampled-diffusion baseline. "
                              "REQUIRED for a TRAIN_T_SAMPLER='max_only' checkpoint, where "
@@ -689,6 +695,45 @@ def main() -> None:
             "mean_predicted_std are omitted."
         )
 
+    # ---- Correctness gate (e): an analytic interval must come from an NLL-trained head ----
+    # q_k and p0_k do not enter the mean, so under DIFF_LOSS_MODE="mse" they receive exactly
+    # zero gradient and the returned "law" is CHIRP_UQ_INIT_VAR wearing a checkpoint. This
+    # fails silently -- the loss curve is fine and CRPS barely moves -- so it is refused here
+    # rather than reported. Two independent detectors, because checkpoints written before the
+    # objective was persisted carry no record of it.
+    uq_trained_report: Dict[str, object] = {"gate": "analytic_law_requires_nll_training"}
+    if has_uq_head:
+        recorded_mode = tv.diff_loss_mode_from_checkpoint(
+            torch.load(args.checkpoint, map_location="cpu")
+        )
+        untrained = diff_model.model.chirp_field.uq_head_untrained_signature()
+        uq_trained_report.update(
+            recorded_diff_loss_mode=recorded_mode,
+            untrained_head_signature=untrained,
+        )
+        offence = None
+        if recorded_mode is not None and recorded_mode != "gaussian_nll":
+            offence = (
+                f"the checkpoint records DIFF_LOSS_MODE='{recorded_mode}', so the UQ head "
+                f"never received a gradient"
+            )
+        elif untrained is not None:
+            offence = (
+                "the UQ head is bit-identical to its initialization "
+                f"({untrained}), so it was never trained"
+            )
+        if offence is not None and not args.allow_untrained_uq_head:
+            raise ValueError(
+                f"Refusing to report an analytic law: {offence}. Every number it produced "
+                f"would be a restatement of CHIRP_UQ_INIT_VAR, not a measurement. Train with "
+                f"DIFF_LOSS_MODE='gaussian_nll' (warm-started from the MSE mean checkpoint via "
+                f"DIFF_INIT_CKPT), or pass --allow-untrained-uq-head if you are deliberately "
+                f"measuring the untrained head and will label it as such."
+            )
+        if offence is not None:
+            print(f"[uq-eval] ⚠️  --allow-untrained-uq-head: {offence}. Results are NOT a law.")
+            uq_trained_report["override"] = offence
+
     # `oneshot` returns the network's RAW output, which is the x0 estimate only under
     # predict_type='x0'; under 'v'/'eps' it is a different quantity entirely and
     # latent_rmse would silently score it against x0 targets. This could not fire while
@@ -932,6 +977,8 @@ def main() -> None:
     # Provenance: a reported number must carry the stack and sampling protocol that produced
     # it. Without this, a legacy-VAE eval and an entity-encoded one are indistinguishable in
     # the JSON, which is how D1 stayed invisible.
+    # The gate that licenses reading a law off this checkpoint at all (correctness gate (e)).
+    report["uq_head_training"] = uq_trained_report
     report["resolved"] = {
         "vae_ckpt": str(cfg.VAE_CKPT),
         "sum_ckpt": str(cfg.SUM_CKPT),

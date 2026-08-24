@@ -232,6 +232,22 @@ CHIRP_RHO_MAX_SCALE = 4.0
 # outside the function class entirely (it fits the H2 chirp truth at only R^2 = 0.35 vs
 # 0.99 for half_integer). Pre-fix checkpoints keep "integer".
 CHIRP_BASIS = "half_integer"
+# Query-time origin: which instant the synthesizer's relative time t_rel is measured from.
+# This is a MODEL property, not a data detail -- it decides whether the predictive law is a
+# stochastic process at all, because a query-dependent origin makes the law of a subset
+# differ from the marginal of the superset.
+#   "last_history" (default, and what the loaders have always produced): t_rel = t^q_r - t_i
+#       with t_i the final history timestamp. delta_t_y is built this way at
+#       datasets/fin_dataset.py:_compute_time_offsets_from_anchor(times, Tf[e-1], ...), so
+#       the first lead gap t^q_1 - t_i survives and adding/removing a query changes no other
+#       offset. Verified on noaa_uk h=168: first offset 1.0 (not 0.0), subset discrepancy 0.
+#   "query_first": t_rel = t^q_r - t^q_1, the legacy recentering. Inserting a query before
+#       t^q_1 shifts EVERY offset, so subset consistency fails by construction. Retained
+#       deliberately as the positive control for the marginalization-consistency test.
+#   "window_start": t_rel = t^q_r - t^w_0, anchored at the target-window start -- a property
+#       of the window, not of the query set. The imputation anchoring (I1), where queries
+#       straddle the history and t^q_r - t_i can go negative.
+TIME_ORIGIN = "last_history"
 
 
 # ============================ Training Hyperparameters ============================

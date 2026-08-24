@@ -55,6 +55,7 @@ class LLapDiff(nn.Module):
         chirp_omega_basis: str = "nonneg",
         chirp_basis: str = "integer",
         chirp_rho_max_scale: float = 4.0,
+        time_origin: Optional[str] = None,
     ) -> None:
         super().__init__()
         if predict_type not in {"eps", "v", "x0"}:
@@ -108,6 +109,7 @@ class LLapDiff(nn.Module):
             chirp_omega_basis=chirp_omega_basis,
             chirp_basis=chirp_basis,
             chirp_rho_max_scale=chirp_rho_max_scale,
+            time_origin=time_origin,
         )
         self.time_dim = hidden_dim
 

@@ -1,6 +1,6 @@
 import math
 import warnings
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -12,6 +12,7 @@ from llapdiffusion.models.time_utils import relative_time_offsets
 RHO_CONDITIONING_MODES = ("legacy_effective", "raw")
 MODAL_TYPES = ("lti", "chirp")
 CHIRP_PARAMETERIZATIONS = ("p_exact", "p_mono", "p_grid")
+TIME_ORIGINS = ("last_history", "query_first", "window_start")
 
 
 def normalize_chirp_parameterization(value: str) -> str:
@@ -98,6 +99,28 @@ def normalize_chirp_rho_basis(value: object) -> str:
     mode = str(value).strip().lower()
     if mode not in CHIRP_RHO_BASES:
         raise ValueError(f"Unknown chirp_rho_basis '{value}'. Use one of {CHIRP_RHO_BASES}.")
+    return mode
+
+
+def normalize_time_origin(value: object) -> str:
+    """Which instant the synthesizer's relative time is measured from.
+
+    This decides whether the predictive law is a stochastic process at all: a
+    query-DEPENDENT origin makes the law of a subset differ from the marginal of the
+    superset, because inserting a query moves every offset.
+
+    ``last_history``  t_rel = t^q_r - t_i, the final history timestamp. What the loaders
+        have always produced (``delta_t_y`` is anchored at ``Tf[e-1]``), so the first lead
+        gap survives and adding or removing a query changes no other offset.
+    ``query_first``   t_rel = t^q_r - t^q_1. The legacy recentering, kept as the positive
+        control for the marginalization-consistency test -- it is *expected* to fail.
+    ``window_start``  t_rel = t^q_r - t^w_0, anchored at the target-window start: a property
+        of the window rather than of the query set. The imputation anchoring (I1), for
+        queries that straddle the history where t^q_r - t_i can go negative.
+    """
+    mode = str(value).strip().lower()
+    if mode not in TIME_ORIGINS:
+        raise ValueError(f"Unknown time_origin '{value}'. Use one of {TIME_ORIGINS}.")
     return mode
 
 
@@ -297,23 +320,67 @@ class LaplaceTransformEncoder(nn.Module):
         device: torch.device,
         dt: Optional[torch.Tensor] = None,
         t: Optional[torch.Tensor] = None,
+        *,
+        time_origin: Optional[str] = None,
+        window_origin: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Return model time coordinates with shape [B,T,1].
 
         Explicit ``t`` values are absolute timestamps and are recentered to the first query.
-        Explicit ``dt`` values are already-relative query offsets and are preserved.
+        Explicit ``dt`` values are already-relative query offsets and are preserved -- the
+        loaders anchor them at the LAST HISTORY timestamp
+        (``fin_dataset._compute_time_offsets_from_anchor(times, Tf[e-1], ...)``), so the
+        default ``dt`` path already realises the ``last_history`` origin, lead gap included.
+
+        ``time_origin`` makes that anchor explicit and overridable; ``None`` (the default)
+        preserves the historical argument-driven behaviour byte for byte, so no existing
+        checkpoint or call site moves. See ``normalize_time_origin`` for the three modes.
+        ``window_origin`` is required by ``window_start`` and is broadcast against the time
+        axis, e.g. ``[B]`` or ``[B,1,1]``.
         """
-        if t is not None:
-            t = t.to(device=device, dtype=dtype)
-            if t.dim() == 2:
-                t = t.unsqueeze(-1)
-            return relative_time_offsets(t, time_dim=1, recenter=True)
-        if dt is not None:
-            dt = dt.to(device=device, dtype=dtype)
-            if dt.dim() == 2:
-                dt = dt.unsqueeze(-1)
-            return relative_time_offsets(dt, time_dim=1, recenter=False)
-        return torch.arange(T, device=device, dtype=dtype).view(1, T, 1).expand(B, T, 1)
+        def _prep(x: torch.Tensor) -> torch.Tensor:
+            x = x.to(device=device, dtype=dtype)
+            return x.unsqueeze(-1) if x.dim() == 2 else x
+
+        if time_origin is None:
+            # Historical behaviour, preserved exactly: an explicit `t` wins over `dt` and is
+            # recentered to the first query; `dt` alone is passed through untouched.
+            if t is not None:
+                return relative_time_offsets(_prep(t), time_dim=1, recenter=True)
+            if dt is not None:
+                return relative_time_offsets(_prep(dt), time_dim=1, recenter=False)
+            return torch.arange(T, device=device, dtype=dtype).view(1, T, 1).expand(B, T, 1)
+
+        if dt is None and t is None:
+            return torch.arange(T, device=device, dtype=dtype).view(1, T, 1).expand(B, T, 1)
+
+        # Under an explicit origin the anchor is named, not inferred from which argument was
+        # passed, so prefer `dt`: it is the quantity the loaders actually anchor.
+        src = _prep(dt if dt is not None else t)
+
+        origin = normalize_time_origin(time_origin)
+        if origin == "query_first":
+            return relative_time_offsets(src, time_dim=1, recenter=True)
+        if origin == "window_start":
+            if window_origin is None:
+                raise ValueError(
+                    "time_origin='window_start' needs an explicit window_origin: the whole "
+                    "point of (I1) is an anchor that is a property of the window, not of the "
+                    "requested query set."
+                )
+            offs = relative_time_offsets(src, time_dim=1, recenter=False)
+            w = window_origin.to(device=device, dtype=dtype)
+            while w.dim() < offs.dim():
+                w = w.unsqueeze(-1)
+            return offs - w
+        # last_history
+        if dt is None:
+            raise ValueError(
+                "time_origin='last_history' needs `dt` (query offsets already anchored at the "
+                "final history timestamp). Absolute `t` alone carries no history anchor, so "
+                "recentering it would silently give the 'query_first' origin instead."
+            )
+        return relative_time_offsets(src, time_dim=1, recenter=False)
 
     @staticmethod
     def basis_matrix(
@@ -961,6 +1028,31 @@ class ChirpModalField(nn.Module):
         q = F.softplus(self._q_base.view(1, self.k) + delta_q)
         return p0, q
 
+    @torch.no_grad()
+    def uq_head_untrained_signature(self) -> Optional[Dict[str, float]]:
+        """Detect a UQ head that was built but never trained, e.g. an x0-MSE checkpoint.
+
+        ``q_k`` and ``p0_k`` do not enter the mean, so under ``DIFF_LOSS_MODE="mse"`` they
+        receive **exactly zero** gradient and a checkpoint silently carries whatever they
+        were initialized with. There is no loss-curve symptom, and any interval read off
+        such a checkpoint reports ``CHIRP_UQ_INIT_VAR``, not a learned uncertainty.
+
+        The init is fully determined -- ``to_uq``'s output layer is zero in weight and
+        bias, and both bases are constant across modes -- so an untrained head is exactly
+        that configuration. Returns ``None`` when the head shows evidence of training, else
+        a dict of the measured statistics for the error message.
+        """
+        if not self.uq_head:
+            return None
+        out = self.to_uq[-1]
+        stats = {
+            "to_uq_weight_absmax": float(out.weight.abs().max()),
+            "to_uq_bias_absmax": float(out.bias.abs().max()),
+            "p0_base_spread": float(self._p0_base.max() - self._p0_base.min()),
+            "q_base_spread": float(self._q_base.max() - self._q_base.min()),
+        }
+        return None if any(v > 0.0 for v in stats.values()) else stats
+
     @staticmethod
     def modal_variance(
         rho_bar: torch.Tensor,
@@ -1109,6 +1201,7 @@ class LaplacePseudoInverse(nn.Module):
         target_T: Optional[int] = None,
         rho_bar: Optional[torch.Tensor] = None,  # [B,T,K] (chirp / time-varying poles)
         omega_bar: Optional[torch.Tensor] = None,  # [B,T,K]
+        time_origin: Optional[str] = None,
     ) -> torch.Tensor:
         if theta.dim() != 3:
             raise ValueError("theta must be [B,2K,D]")
@@ -1128,7 +1221,9 @@ class LaplacePseudoInverse(nn.Module):
                 T = int(target_T)
             else:
                 raise ValueError("Provide t or dt or target_T to determine output length")
-            t_rel = self.encoder.relative_time(B, T, theta.dtype, theta.device, dt=dt, t=t)
+            t_rel = self.encoder.relative_time(
+                B, T, theta.dtype, theta.device, dt=dt, t=t, time_origin=time_origin
+            )
             basis = self.encoder.basis_matrix(t_rel, rho, omega)  # [B,T,2K]
         y = torch.bmm(basis, theta)  # [B,T,D]
 
