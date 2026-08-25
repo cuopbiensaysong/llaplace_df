@@ -406,22 +406,47 @@ independent-outer-unit target frozen in `decision_thresholds.yaml`.
 
 ### 10.1 Primary predictive measurements
 
-- Joint NLL normalized per predicted scalar.
-- Variogram score with predeclared physical-lag/channel weights.
-- Energy score under a common estimator.
+> **AMENDED 2026-08-25 — objective path 2 adopted.** The paragraphs below replace the
+> earlier hierarchy, which selected $D$ on latent NLL. Two things forced the change.
+> First, the training score is **not** an exact latent joint likelihood: it is joint over
+> time but factorised over channels, while the sampled law has nonzero cross-channel
+> covariance. Calling it "exact latent joint NLL" overstated it. Second, a latent-space
+> criterion cannot be compared across arms whose latent parameterisations differ, and it
+> is not the quantity anyone cares about. Selection moves to observation space.
 
-Use a two-stage endpoint hierarchy:
+- **Training / diagnostic score:** *latent time-joint/channel-factorized composite
+  mixture NLL*, normalized per predicted scalar. Named for what it is. It trains every
+  arm and is reported as a diagnostic. **It never selects $D$ and never carries a
+  comparative claim.**
+- **Selection score:** observation-space **variogram score of order 0.5**, computed over
+  **both** temporal pairs $(t,t')$ within a forecast window **and cross-channel pairs**
+  $(c,c')$ at equal and unequal times, with predeclared weights frozen against the hashed
+  development scale. A temporal-only variogram cannot see the cross-channel structure the
+  sampled law actually has — which is precisely the structure the training score omits.
+- **Ordered safeguards:** unbiased energy score (the $m(m-1)$ U-statistic; the naive
+  estimator is biased toward under-dispersion, the exact failure a mixture can hide),
+  then calibration.
 
-1. Select among finite $D$ values using exact latent joint NLL per predicted
-   scalar when it is a valid common criterion for those arms.
-2. Gate equivalence to CMD-D using variogram score as the common primary
-   observation-space endpoint, with predeclared physical-lag/channel weights.
-   Energy score and calibration are ordered safeguards.
+Endpoint hierarchy:
 
-If exact latent joint NLL is unavailable as a common finite-arm criterion, use
-the frozen training/selection score instead and retain NLL as a diagnostic. Do
-not compare an exact mixture NLL with a diffusion KDE surrogate as though they
-were the same quantity.
+1. **Select one $D$** on the observation-space variogram score, by the Holm-adjusted
+   superiority rule in `decision_thresholds.yaml`. Ties resolve to the **smallest** $D$.
+2. **Apply the safeguards in order**: unbiased energy score non-inferiority, then
+   calibration. An arm failing either cannot be selected whatever its variogram score.
+3. **Gate equivalence to CMD-D** on the same variogram score, then report the
+   matched-quality speedup against the major-rewrite criterion.
+
+Every score sample passes through the **complete stochastic decoder/emission** — VAE
+decode plus emission noise — with common random numbers across arms. Latent-space samples
+are not admissible for any reported score.
+
+A full state-space likelihood matching the sampled latent law is **deferred**. It is
+revisited only if CMD-Mix clears the major-rewrite criterion; implementing it before then
+would be a large rewrite justified by nothing.
+
+Do not compare a mixture NLL with a diffusion KDE surrogate as though they were the same
+quantity — that hazard is unchanged, and is now moot for selection, since selection no
+longer uses either.
 
 Define all multivariate metrics in one frozen, train-fitted standardized space
 or with preregistered channel weights. Freeze target-mask handling and the

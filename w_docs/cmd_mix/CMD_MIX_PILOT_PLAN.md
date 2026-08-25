@@ -428,3 +428,116 @@ a **config change, not a code change**, and P-mono is a production variant named
 §2 alongside P-exact. Required alongside it: a per-epoch diagnostic recording the fraction of
 steps with `d_rhobar < 0` and the minimum kernel eigenvalue, so validity is asserted rather
 than assumed.
+
+---
+
+## §10 — G0 and G3 under `CMD_MIX_NOAA_UK_V2_ACTIONS.md` (2026-08-25)
+
+### §10.1 §9 is RETRACTED
+
+**§9 concluded that constrained `p_exact` leaves Assumption R unenforced. That conclusion
+is wrong and is withdrawn.** Two independent errors:
+
+**The method was invalid.** §9's causal test perturbed `rho_bar` directly while keeping the
+trained head's `Lambda`. `Lambda` and `rho_bar` are coupled through one quadrature, so a
+hand-edited `rho_bar` with a stale `Lambda` is an inconsistent pair that need not describe
+any law — indefiniteness there says nothing about the model. ACTIONS §6 called this out
+before the audit was run, and it was right.
+
+**The reading of the code was wrong.** §9 stated that `rho_var` is "a learned, unconstrained
+combination of basis antiderivatives". It is not:
+
+- `_coeffs` returns `a_rho2 = c**2`, i.e. **non-negative by construction**.
+- Under `rho_basis="centered"` it then rescales by `rho_head/(rho_total + rho_head)` with
+  `rho_head = rho_floor - rho_min`, so `sum_m a_rho2 < rho_floor - rho_min`.
+- `Phi_rho = Phi - t_rel`, whose t-derivative is `phi_m - 1 = s_m cos(.)`, so
+  `|phi_m - 1| <= 1`.
+- Therefore `d(rho_bar)/dt = rho_floor + sum_m a_rho2 (phi_m - 1) >= rho_min > 0`.
+- `ChirpGPHead` **hard-codes** `rho_basis="centered", omega_basis="centered"`, and
+  `growth_budget` defaults to `0.0` and is never passed, so Theorem B' excursions are off.
+
+`p0` and `q` are both `softplus(.) > 0`, so the implied innovation
+`q_eff_r = Lambda_r - e^{-2 d_rhobar_r} Lambda_{r-1} = q dt_r (1 - e^{-2x})/(2x)` is
+non-negative for every real `x`. **The shipped kernel is PSD by construction in exact
+arithmetic.** `_RHO_FLOOR = -20.0` is an overflow guard on a quantity that is already
+non-negative; it never had to act as a validity guard.
+
+### §10.2 G3 — measured, `cmd_mix/audit_psd.py`
+
+Runtime pinned: `llapdiffusion` resolves to this checkout, `llaplace_df` HEAD
+`180a7466a735af494ff05eddbc148e92845eabf0`, `laptrans.py`
+`357d7e90…b002f8`, `chirp_gp.py` `42924c33…5b7befe`, `dist_heads.py` `5027b8bd…2b39ee80`.
+Real `noaa_uk` windows (`T=168`, `K=32`, `d_z=16`, `anchor_nodes=128`), canonically sorted
+grid; the cache's `t_rel` was **already sorted**, so no past run had a mis-ordered kernel on
+this cell. Every intervention is applied to PARAMETERS and the whole forward pass is
+recomputed, per ACTIONS §6.
+
+| state | precision | min d(rhobar) | min q_eff | eig_min | material neg | fixed-jitter Cholesky | numerical rank |
+|---|---|---|---|---|---|---|---|
+| init | f64 | +7.50e-04 | +9.89e-01 | +2.28e-03 | 0/128 | 0 | 168/168 |
+| perturbed x2 | f64 | +1.01e-04 | +6.35e-05 | +5.37e+02 | 0/128 | 0 | 168/168 |
+| perturbed x32 | f64 | +1.00e-04 | −2.8e-14 | +1.71e+06 | 0/128 | 0 | 168/168 |
+| **USHCN TRAINED s0** | f64 | +3.53e-04 | +5.11e-03 | +6.48e-04 | 0/256 | 0 | 12/12 |
+| probe `q→0` + `theta×1000` | **f64** | +7.50e-04 | +3.50e-09 | **+8.16e-06** | **0/128** | **0** | **168/168** |
+| probe `q→0` + `theta×1000` | **f32, TF32 off** | +7.50e-04 | −1.79e-07 | **−1.73e-01** | 0/128 | **8** | **40**/168 |
+| probe `q→0` + `theta×1000` | **f32, TF32 on** | +7.50e-04 | −1.79e-07 | **−1.29e+01** | **126/128** | **128** | **53**/168 |
+
+`min d(rhobar) > 0` in **every one of the 40 audited configurations**, at every perturbation
+scale up to 32x. Assumption R is never violated. The worst float64 `q_eff` is −2.8e−14
+against `Lambda ~ 1e4` — cancellation round-off, not a negative innovation.
+
+### §10.3 What actually caused the crashes
+
+**Rank collapse plus a relatively vanishing nugget, in float32.** As `q -> 0` the quadrature
+term vanishes and `Lambda_r -> e^{-2 rhobar_r} p0`, so
+
+    K(t,t') -> sum_k E_k p0_k e^{-rhobar_k(t)} e^{-rhobar_k(t')} cos(omegabar_k(t) - omegabar_k(t'))
+
+which is a Gram matrix of `2K` cos/sin features and therefore has rank **at most 2K = 64** on
+a `T = 168` grid. It is still PSD — it is a Gram matrix — but singular, and only the nugget
+lifts it off zero. Inflating the modal part makes the same `SIGMA2_MIN = 1e-4` nugget
+relatively negligible (measured `nugget/diag = 1.3e-06`). In float64 the combination still
+factorises cleanly; in float32 the numerical rank drops to 40/168 and the factorisation
+fails. **TF32 turns 8 failures into 128/128.**
+
+This is exactly ACTIONS §6's precision case, and its decision rule applies: *"If float64
+passes and float32 fails, treat that as a precision problem and use the validated precision
+for covariance construction/factorization. It is not evidence for `p_mono`."*
+
+It also explains the cell-dependence that the `p_mono` story never did: USHCN has `T = 12`
+against `2K = 32`, so `T < 2K` and the rank-collapse mechanism **cannot** bite. noaa_uk has
+`T = 168` against `2K = 64`. USHCN never crashed; noaa_uk did.
+
+### §10.4 G3 decision
+
+**Keep `p_exact`.** It passes the recurrence and PSD gates under the frozen implementation.
+`p_mono` remains a separately named ablation and is NOT adopted. Required instead, as
+frozen S4 policy:
+
+1. Build and factorise the covariance in **float64**; **TF32 disabled** for every correctness
+   gate and for the objective.
+2. Record the §6 panel per epoch: `min d(rhobar)`, `min q_eff`, `min Lambda`, unjittered
+   `eig_min` with the scale-aware tolerance, numerical rank, `nugget/diag`, and Cholesky
+   status — so validity is asserted per arm, never assumed.
+3. Treat any adaptive-jitter escalation, Cholesky failure, NaN/Inf or skipped non-finite
+   step as a **failed fit** (ACTIONS §7), not a rescued one.
+
+An open model question, deliberately NOT acted on here: the joint objective rewards driving
+`q -> 0`, which is what walks the kernel into the degenerate corner. A floor on `q` would
+remove the mechanism at its source, but that is a model change and needs a dated pre-S4
+amendment. Float64 + TF32-off is a runtime setting and removes the observed failure without
+one.
+
+### §10.5 G0 — NOAA-owned v2 conformance
+
+`cmd_mix/conformance_v2.py` imports the production NOAA mixture law and **no Toy model**.
+All four (scorer x case) combinations pass; worst discrepancy **2.842e-13** absolute on
+`comp_logpdf_T` against a tolerance of 3.33e-04, everything else at or below 1.7e-15.
+Fixture NPZ / canonical-metadata-body / raw-JSON / config hashes all match the literals
+pinned in ACTIONS §1. NOAA adapter `7ed9e1b1…cb385898`, checker `5073debb…f34075cb`.
+Self-test: 44 golden-value tampers and 7 adapter tampers x 2 cases, **all detected**.
+
+The self-test found a defect in itself before it found anything else: `cov_T_restricted` and
+`z_S` come out of the npz non-C-contiguous, so `reshape(-1)[i] += eps` wrote into a copy and
+the tamper was silently discarded. `.flat[i]` fixes it. Any checker tampering the same way
+has the same hole.
